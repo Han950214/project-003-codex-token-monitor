@@ -1,0 +1,69 @@
+{
+  "session_id": "session-demo-001",
+  "run_id": "run-demo-001",
+  "title": "Codex desktop token monitoring demo",
+  "started_at": "2026-07-08T09:00:00+08:00",
+  "ended_at": "2026-07-08T09:12:30+08:00",
+  "elapsed_seconds": 750,
+  "prompt_artifact": {
+    "source": "manual_paste",
+    "text": "Use low token mode. Inspect only necessary files and estimate token waste for this Codex run.",
+    "sha256": "sample",
+    "approx_chars": 91,
+    "estimated_tokens": 23
+  },
+  "output_artifact": {
+    "source": "manual_paste",
+    "text": "Changed files, validation, and local estimate report.",
+    "sha256": "sample",
+    "approx_chars": 53,
+    "estimated_tokens": 14
+  },
+  "token_estimate": {
+    "input_tokens": 3200,
+    "output_tokens": 950,
+    "optional_log_tokens": 120,
+    "stable_prefix_tokens": 2100,
+    "observed_cached_input_tokens": null,
+    "source": "local_estimate"
+  },
+  "repo_before": {
+    "captured_at": "2026-07-08T09:00:00+08:00",
+    "git_root": "E:/Workspace/projects/project_003_codex_token_monitor",
+    "branch": "main",
+    "status_short": ""
+  },
+  "repo_after": {
+    "captured_at": "2026-07-08T09:12:30+08:00",
+    "git_root": "E:/Workspace/projects/project_003_codex_token_monitor",
+    "branch": "main",
+    "status_short": "M README.md",
+    "changed_files": ["README.md"],
+    "diff_stat": "1 file changed, 12 insertions"
+  },
+  "waste_signals": [
+    {
+      "kind": "repeated_background",
+      "severity": "medium",
+      "evidence": "Long project boundary repeated in multiple turns.",
+      "estimated_wasted_tokens": 600
+    }
+  ],
+  "cache_risks": [
+    {
+      "kind": "dynamic_prefix",
+      "severity": "medium",
+      "evidence": "Timestamp appears before stable project rules.",
+      "recommendation": "Move run-specific timestamps after stable instructions."
+    }
+  ],
+  "recommendations": [
+    {
+      "kind": "next_prompt",
+      "summary": "Use a shorter delta prompt and keep stable rules first.",
+      "suggested_prompt": "Use low token mode. Continue the current token monitor scaffold. Only inspect files needed for tests and final status.",
+      "estimated_savings_tokens": 500
+    }
+  ]
+}
+
