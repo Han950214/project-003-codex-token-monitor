@@ -12,5 +12,4 @@ The UI can be smoke-tested without opening a window:
 python app\main.py --smoke
 ```
 
-All asserted token, cache hit, cost, budget, and context usage values are local estimates.
-
+All asserted token, cache hit, cost, budget, and context usage values are 本地估算 / local estimate.

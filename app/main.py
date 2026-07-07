@@ -58,10 +58,10 @@ def build_dashboard() -> tk.Tk:
 
     report = (
         "Token Waste Report / 本地估算\n"
-        f"- 本次 tokens: {current_tokens(current)} local estimate\n"
-        f"- 会话 tokens: {session_tokens(SAMPLE_USAGES)} local estimate\n"
-        f"- 本次命中率: {format_percent(current_hit(current))} local estimate\n"
-        f"- 平均命中率: {format_percent(average_hit(SAMPLE_USAGES))} local estimate\n"
+        f"- 本次 tokens: {current_tokens(current)} 本地估算 / local estimate\n"
+        f"- 会话 tokens: {session_tokens(SAMPLE_USAGES)} 本地估算 / local estimate\n"
+        f"- 本次命中率: {format_percent(current_hit(current))} 本地估算 / local estimate\n"
+        f"- 平均命中率: {format_percent(average_hit(SAMPLE_USAGES))} 本地估算 / local estimate\n"
         f"- Changed files: {', '.join(SAMPLE_CHANGED_FILES)}\n"
         f"- Diff stat: {SAMPLE_DIFF_STAT}\n"
     )
@@ -92,8 +92,8 @@ def _text_panel(parent: tk.Widget, title: str, content: str) -> ttk.Frame:
 
 def smoke() -> None:
     print("Codex Token Monitor smoke OK")
-    print(f"current_tokens={current_tokens(SAMPLE_USAGES[-1])} local_estimate")
-    print(f"session_tokens={session_tokens(SAMPLE_USAGES)} local_estimate")
+    print(f"current_tokens={current_tokens(SAMPLE_USAGES[-1])} 本地估算 / local estimate")
+    print(f"session_tokens={session_tokens(SAMPLE_USAGES)} 本地估算 / local estimate")
 
 
 def main() -> None:

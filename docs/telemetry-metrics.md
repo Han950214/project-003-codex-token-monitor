@@ -1,6 +1,6 @@
 # Telemetry Metrics
 
-All formulas produce local estimates.
+All formulas produce 本地估算 / local estimate values.
 
 ## Current Cache Hit
 
@@ -71,4 +71,3 @@ budget_remaining = configured_budget - session_cost
 ## UI Label Requirement
 
 Every displayed value must include `本地估算 / local estimate`.
-
