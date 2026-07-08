@@ -30,6 +30,19 @@ class MetricsTests(unittest.TestCase):
         usage = RunUsage(input_tokens=1000, output_tokens=200, stable_prefix_tokens=250)
         self.assertEqual(current_hit(usage), 0.25)
 
+    def test_current_hit_clamps_stable_prefix_to_input_tokens(self):
+        usage = RunUsage(input_tokens=1000, output_tokens=200, stable_prefix_tokens=1200)
+        self.assertEqual(current_hit(usage), 1.0)
+
+    def test_current_hit_clamps_observed_cached_tokens_to_input_tokens(self):
+        usage = RunUsage(
+            input_tokens=1000,
+            output_tokens=200,
+            stable_prefix_tokens=250,
+            observed_cached_input_tokens=1400,
+        )
+        self.assertEqual(current_hit(usage), 1.0)
+
     def test_average_hit_is_weighted_by_input_tokens(self):
         usages = [
             RunUsage(input_tokens=1000, output_tokens=100, stable_prefix_tokens=500),

@@ -33,12 +33,7 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
 
 
 def current_hit(usage: RunUsage) -> float:
-    cached = (
-        usage.observed_cached_input_tokens
-        if usage.observed_cached_input_tokens is not None
-        else usage.stable_prefix_tokens
-    )
-    return _safe_ratio(max(cached, 0), usage.input_tokens)
+    return _safe_ratio(cached_input_tokens(usage), usage.input_tokens)
 
 
 def average_hit(usages: Iterable[RunUsage]) -> float:
@@ -101,4 +96,3 @@ def estimate_tokens_from_text(text: str) -> int:
     if not text:
         return 0
     return max(1, round(len(text) / 4))
-
