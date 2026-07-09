@@ -2,7 +2,7 @@
 
 Codex Token Monitor Skill is an independent local-first project for estimating and visualizing token usage in Codex Desktop workflows. It is designed as a GitHub-agent-skill-style toolkit with a Windows desktop floating window / Dashboard as the first user-facing surface.
 
-关键边界：本项目当前独立开发，不修改 AOS 主仓库，不接入云端，不读取真实凭据，不读取 Codex hidden reasoning tokens，不做真实扣费。所有 token、cache hit、cost、budget、context usage 均为“本地估算 / local estimate”，不能当作真实账单、真实余额或 provider 官方 usage。
+关键边界：本项目当前独立开发，不修改 AOS 主仓库，不接入云端，不读取真实凭据，不读取 Codex hidden reasoning tokens，不做真实扣费。除明确标注为 `codex_state_sqlite / real total` 的 session total tokens 外，input/output/cache hit/cost/budget/context usage 仍为“本地估算 / local estimate”或 unknown，不能当作真实账单、真实余额或 provider 官方 usage。
 
 ## MVP
 
