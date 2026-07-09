@@ -166,6 +166,20 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(summary.current_run_tokens, 150)
         self.assertEqual(summary.total_tokens_source, "codex_state_sqlite")
 
+    def test_latest_response_usage_overrides_only_current_usage(self):
+        pricing = PricingConfig(1, 0.1, 2)
+        summary = summarize_runs(
+            [],
+            pricing,
+            real_total_tokens=999,
+            latest_response_usage=RunUsage(input_tokens=100, output_tokens=50, optional_log_tokens=5, observed_cached_input_tokens=25),
+        )
+        self.assertEqual(summary.session_tokens, 999)
+        self.assertEqual(summary.current_run_tokens, 155)
+        self.assertEqual(summary.current_cache_hit, 0.25)
+        self.assertEqual(summary.total_tokens_source, "codex_state_sqlite")
+        self.assertEqual(summary.current_usage_source, "codex_logs_sqlite")
+
 
 if __name__ == "__main__":
     unittest.main()

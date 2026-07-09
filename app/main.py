@@ -14,8 +14,9 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import load_pricing
+from app.codex_logs import load_latest_completed_response_usage
 from app.codex_state import load_latest_thread_total
-from app.metrics import build_run_estimates, summarize_runs
+from app.metrics import RunUsage, build_run_estimates, summarize_runs
 from app.models import AgentRun
 from app.reporting import export_report
 from app.storage import DEFAULT_RUNS_PATH, append_run, load_runs
@@ -154,10 +155,12 @@ class Dashboard:
             messagebox.showerror("Storage error", result.error)
             return
         codex_total = load_latest_thread_total()
+        latest_usage = load_latest_completed_response_usage()
         summary = summarize_runs(
             result.runs,
             self.pricing,
             codex_total.total_tokens if codex_total else None,
+            _run_usage_from_codex_logs(latest_usage),
         )
         path = export_report(result.runs, summary, ROOT / "reports" / f"token-waste-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md")
         self.status_var.set(f"Report exported: {path} 本地估算 / local estimate")
@@ -168,27 +171,40 @@ class Dashboard:
         if result and result.error:
             self.status_var.set(f"Storage warning: {result.error}")
         codex_total = load_latest_thread_total()
+        latest_usage = load_latest_completed_response_usage()
         summary = summarize_runs(
             loaded_runs,
             self.pricing,
             codex_total.total_tokens if codex_total else None,
+            _run_usage_from_codex_logs(latest_usage),
         )
         total_label = (
             "codex_state_sqlite / real total"
             if summary.total_tokens_source == "codex_state_sqlite"
             else "本地估算 / local estimate"
         )
+        current_label = (
+            "codex_logs_sqlite / real usage"
+            if summary.current_usage_source == "codex_logs_sqlite"
+            else "本地估算 / local estimate"
+        )
+        cache_label = (
+            "derived from codex_logs_sqlite / real usage, not official cache hit rate"
+            if summary.current_cache_hit_source == "codex_logs_sqlite"
+            else "local estimate, not real Codex cache"
+        )
         self.summary_label.configure(
             text=(
                 "Session Summary / 会话汇总\n"
                 f"- Rounds: {summary.rounds}\n"
                 f"- Session tokens: {summary.session_tokens} {total_label}\n"
-                f"- Current run tokens: {summary.current_run_tokens} 本地估算 / local estimate\n"
+                f"- Current run tokens: {summary.current_run_tokens} {current_label}\n"
                 f"- Session cost: ${summary.session_cost:.6f} local estimate, not billing\n"
+                f"- Current cache hit: {summary.current_cache_hit * 100:.1f}% {cache_label}\n"
                 f"- Average cache hit: {summary.average_cache_hit * 100:.1f}% local estimate, not real Codex cache\n"
                 f"- Context usage: {summary.context_usage * 100:.1f}% 本地估算 / local estimate\n"
                 f"- Budget remaining: ${summary.budget_remaining:.6f} 本地估算 / local estimate\n"
-                "- Adapter scope: safe fields from state_5.sqlite only; logs_2.sqlite not connected"
+                "- Adapter scope: latest response.completed numeric usage only; no session/thread aggregation"
             )
         )
         recent = loaded_runs[-5:]
@@ -250,6 +266,17 @@ def _text_value(widget: tk.Text) -> str:
     return widget.get("1.0", "end").strip()
 
 
+def _run_usage_from_codex_logs(latest_usage) -> RunUsage | None:
+    if latest_usage is None:
+        return None
+    return RunUsage(
+        input_tokens=latest_usage.input_tokens,
+        output_tokens=latest_usage.output_tokens,
+        optional_log_tokens=max(latest_usage.total_tokens - latest_usage.input_tokens - latest_usage.output_tokens, 0),
+        observed_cached_input_tokens=latest_usage.cached_tokens,
+    )
+
+
 def build_dashboard() -> tk.Tk:
     root = tk.Tk()
     Dashboard(root)
@@ -260,7 +287,13 @@ def smoke() -> None:
     pricing = load_pricing(PRICING_PATH)
     runs = load_runs(RUNS_PATH).runs
     codex_total = load_latest_thread_total()
-    summary = summarize_runs(runs, pricing, codex_total.total_tokens if codex_total else None)
+    latest_usage = load_latest_completed_response_usage()
+    summary = summarize_runs(
+        runs,
+        pricing,
+        codex_total.total_tokens if codex_total else None,
+        _run_usage_from_codex_logs(latest_usage),
+    )
     total_label = (
         "codex_state_sqlite / real total"
         if summary.total_tokens_source == "codex_state_sqlite"
@@ -269,10 +302,15 @@ def smoke() -> None:
     print("Codex Token Monitor smoke OK")
     print(f"rounds={summary.rounds} 本地估算 / local estimate")
     print(f"session_tokens={summary.session_tokens} {total_label}")
-    print(f"current_run_tokens={summary.current_run_tokens} local estimate")
-    print("cache_hit=local estimate, not real Codex cache")
-    print("cost=local estimate, not billing")
-    print("adapter=state_5.sqlite safe fields only; logs_2.sqlite not connected")
+    current_source = (
+        "codex_logs_sqlite / real usage"
+        if summary.current_usage_source == "codex_logs_sqlite"
+        else "local estimate"
+    )
+    print(f"current_run_tokens={summary.current_run_tokens} {current_source}")
+    print("cache_hit=derived from real usage when codex_logs_sqlite is available, not official cache hit rate")
+    print("cost=estimate, not billing")
+    print("adapter=logs_2.sqlite latest response.completed usage only; state_5.sqlite session total fallback; no aggregation")
 
 
 def main() -> None:

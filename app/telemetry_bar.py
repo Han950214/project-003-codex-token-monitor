@@ -77,6 +77,14 @@ def build_telemetry_values_from_summary(summary: SessionSummary, pricing: Pricin
     if summary.total_tokens_source == "codex_state_sqlite":
         session_label, session_value = labeled_values[2]
         labeled_values[2] = (session_label, f"{summary.session_tokens} codex_state_sqlite / real total")
+    if summary.current_usage_source == "codex_logs_sqlite":
+        current_label, current_value = labeled_values[3]
+        labeled_values[3] = (current_label, f"{summary.current_run_tokens} codex_logs_sqlite / real usage")
+        cost_label, cost_value = labeled_values[4]
+        labeled_values[4] = (cost_label, f"{values[4][1]} estimate from codex_logs_sqlite / real usage, not billing")
+    if summary.current_cache_hit_source == "codex_logs_sqlite":
+        cache_label, cache_value = labeled_values[0]
+        labeled_values[0] = (cache_label, f"{values[0][1]} derived from codex_logs_sqlite / real usage, not official cache hit rate")
     return labeled_values
 
 

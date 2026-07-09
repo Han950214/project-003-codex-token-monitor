@@ -26,7 +26,7 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("Input/output/cache/reasoning/cost/context/budget remain", report)
         self.assertIn("not real Codex cache", report)
         self.assertIn("not billing", report)
-        self.assertIn("logs_2.sqlite` is not connected", report)
+        self.assertIn("no session/thread aggregation is performed", report)
         self.assertNotIn("Current cache hit: 20.0% codex_state_sqlite / real total", report)
         self.assertNotIn("Session estimated cost: $0.010000 codex_state_sqlite / real total", report)
 
