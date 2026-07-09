@@ -69,7 +69,11 @@ def build_telemetry_values_from_summary(summary: SessionSummary, pricing: Pricin
         ("会话费用 / session cost", f"${summary.session_cost:.6f}"),
         ("预算剩余 / budget remaining", f"${summary.budget_remaining:.6f}"),
     ]
-    return [(label, f"{value} 本地估算 / local estimate") for label, value in values]
+    labeled_values = [(label, f"{value} 本地估算 / local estimate") for label, value in values]
+    if summary.total_tokens_source == "codex_state_sqlite":
+        session_label, session_value = labeled_values[2]
+        labeled_values[2] = (session_label, f"{summary.session_tokens} codex_state_sqlite / real total")
+    return labeled_values
 
 
 def create_telemetry_bar(parent: tk.Widget, usages: list[RunUsage], pricing: PricingConfig) -> tk.Frame:

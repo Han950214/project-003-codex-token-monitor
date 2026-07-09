@@ -139,6 +139,33 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(summary.context_usage, 0.45)
         self.assertAlmostEqual(summary.budget_remaining, 0.997)
 
+    def test_real_total_overrides_only_session_total(self):
+        pricing = PricingConfig(1, 0.1, 2)
+        run = AgentRun(
+            run_id="run-1",
+            session_id="session-1",
+            project="project",
+            title="Run",
+            started_at="",
+            ended_at="",
+            elapsed_seconds=0,
+            model="demo",
+            mode="manual",
+            prompt_summary="",
+            output_summary="",
+            note="",
+            input_tokens=100,
+            output_tokens=50,
+            cached_tokens=20,
+            total_tokens=150,
+            estimated_cost=0.001,
+            cache_hit=0.2,
+        )
+        summary = summarize_runs([run], pricing, real_total_tokens=999)
+        self.assertEqual(summary.session_tokens, 999)
+        self.assertEqual(summary.current_run_tokens, 150)
+        self.assertEqual(summary.total_tokens_source, "codex_state_sqlite")
+
 
 if __name__ == "__main__":
     unittest.main()

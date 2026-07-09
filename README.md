@@ -38,4 +38,4 @@ python app\main.py
 
 Phase 2-MVP adds manual local run records, JSON persistence, session summaries, and Markdown report export. It saves prompt/output summaries and manual token counts only by default; do not store credentials or private prompt/output full text.
 
-All usage, cost, cache, context, and budget values remain 本地估算 / local estimate. Later versions may add optional wrappers, richer storage, and AOS adapters, but this repository must remain independent until integration is explicitly planned.
+By default, usage, cost, cache, context, and budget values remain 本地估算 / local estimate. When available, the optional read-only `state_5.sqlite` adapter labels `threads.tokens_used` as `codex_state_sqlite / real total`; input/output/cache/cost/context/budget remain local estimates or unknown. Set `CODEX_STATE_DB` to configure the database path. The repository remains independent until integration is explicitly planned.

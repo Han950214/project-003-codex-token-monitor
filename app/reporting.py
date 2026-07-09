@@ -11,6 +11,7 @@ from app.models import AgentRun
 
 DEFAULT_REPORTS_DIR = Path("reports")
 LOCAL_ESTIMATE = "本地估算 / local estimate"
+REAL_TOTAL = "codex_state_sqlite / real total"
 
 
 def default_report_path(now: datetime | None = None, reports_dir: Path = DEFAULT_REPORTS_DIR) -> Path:
@@ -26,12 +27,12 @@ def render_report(runs: list[AgentRun], summary: SessionSummary, generated_at: d
         "",
         f"Generated: {now.isoformat(timespec='seconds')}",
         "",
-        f"> All usage, cost, cache, context, and budget values are {LOCAL_ESTIMATE}.",
+        f"> Total tokens source: {_total_tokens_label(summary)}. Input/output/cache/cost/context/budget remain {LOCAL_ESTIMATE} or unknown.",
         "",
         "## Session Summary",
         "",
         f"- Run count: {summary.rounds}",
-        f"- Session tokens: {summary.session_tokens} {LOCAL_ESTIMATE}",
+        f"- Session tokens: {summary.session_tokens} {_total_tokens_label(summary)}",
         f"- Current run tokens: {summary.current_run_tokens} {LOCAL_ESTIMATE}",
         f"- Current estimated cost: ${summary.current_cost:.6f} {LOCAL_ESTIMATE}",
         f"- Session estimated cost: ${summary.session_cost:.6f} {LOCAL_ESTIMATE}",
@@ -61,6 +62,10 @@ def render_report(runs: list[AgentRun], summary: SessionSummary, generated_at: d
     return "\n".join(lines)
 
 
+def _total_tokens_label(summary: SessionSummary) -> str:
+    return REAL_TOTAL if summary.total_tokens_source == "codex_state_sqlite" else LOCAL_ESTIMATE
+
+
 def export_report(
     runs: list[AgentRun],
     summary: SessionSummary,
@@ -71,4 +76,3 @@ def export_report(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(render_report(runs, summary, generated_at), encoding="utf-8")
     return report_path
-

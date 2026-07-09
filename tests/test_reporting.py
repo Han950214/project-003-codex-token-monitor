@@ -17,6 +17,13 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("Session tokens", report)
         self.assertIn("Current cache hit", report)
 
+    def test_report_distinguishes_real_total_from_estimates(self):
+        runs = [sample_run()]
+        summary = summarize_runs(runs, PricingConfig(1, 0.1, 2), real_total_tokens=999)
+        report = render_report(runs, summary)
+        self.assertIn("Session tokens: 999 codex_state_sqlite / real total", report)
+        self.assertIn("Input/output/cache/cost/context/budget remain", report)
+
     def test_report_uses_summaries_not_full_prompt_or_output(self):
         runs = [sample_run()]
         summary = summarize_runs(runs, PricingConfig(1, 0.1, 2))

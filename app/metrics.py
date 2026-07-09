@@ -39,6 +39,7 @@ class SessionSummary:
     average_cache_hit: float
     context_usage: float
     budget_remaining: float
+    total_tokens_source: str = "local_estimate"
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
@@ -136,11 +137,17 @@ def build_run_estimates(
     return current_tokens(usage), current_cost(usage, pricing), current_hit(usage)
 
 
-def summarize_runs(runs: list[AgentRun], pricing: PricingConfig) -> SessionSummary:
+def summarize_runs(
+    runs: list[AgentRun],
+    pricing: PricingConfig,
+    real_total_tokens: int | None = None,
+) -> SessionSummary:
     usages = [usage_from_run(run) for run in runs]
     current_usage = usages[-1] if usages else RunUsage(input_tokens=0, output_tokens=0)
     spent = sum(max(run.estimated_cost, 0.0) for run in runs)
-    total_tokens = sum(max(run.total_tokens, 0) for run in runs)
+    local_total_tokens = sum(max(run.total_tokens, 0) for run in runs)
+    has_real_total = real_total_tokens is not None and real_total_tokens >= 0
+    total_tokens = real_total_tokens if has_real_total else local_total_tokens
     return SessionSummary(
         rounds=len(runs),
         session_tokens=total_tokens,
@@ -151,4 +158,5 @@ def summarize_runs(runs: list[AgentRun], pricing: PricingConfig) -> SessionSumma
         average_cache_hit=average_hit(usages),
         context_usage=context_usage(total_tokens, pricing.configured_context_window),
         budget_remaining=budget_remaining(pricing.configured_budget, spent),
+        total_tokens_source="codex_state_sqlite" if has_real_total else "local_estimate",
     )

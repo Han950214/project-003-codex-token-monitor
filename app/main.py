@@ -14,6 +14,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import load_pricing
+from app.codex_state import load_latest_thread_total
 from app.metrics import build_run_estimates, summarize_runs
 from app.models import AgentRun
 from app.reporting import export_report
@@ -152,7 +153,12 @@ class Dashboard:
         if result.error:
             messagebox.showerror("Storage error", result.error)
             return
-        summary = summarize_runs(result.runs, self.pricing)
+        codex_total = load_latest_thread_total()
+        summary = summarize_runs(
+            result.runs,
+            self.pricing,
+            codex_total.total_tokens if codex_total else None,
+        )
         path = export_report(result.runs, summary, ROOT / "reports" / f"token-waste-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md")
         self.status_var.set(f"Report exported: {path} 本地估算 / local estimate")
 
@@ -161,12 +167,22 @@ class Dashboard:
         loaded_runs = runs if runs is not None else result.runs
         if result and result.error:
             self.status_var.set(f"Storage warning: {result.error}")
-        summary = summarize_runs(loaded_runs, self.pricing)
+        codex_total = load_latest_thread_total()
+        summary = summarize_runs(
+            loaded_runs,
+            self.pricing,
+            codex_total.total_tokens if codex_total else None,
+        )
+        total_label = (
+            "codex_state_sqlite / real total"
+            if summary.total_tokens_source == "codex_state_sqlite"
+            else "本地估算 / local estimate"
+        )
         self.summary_label.configure(
             text=(
                 "Session Summary / 会话汇总\n"
                 f"- Rounds: {summary.rounds}\n"
-                f"- Session tokens: {summary.session_tokens} 本地估算 / local estimate\n"
+                f"- Session tokens: {summary.session_tokens} {total_label}\n"
                 f"- Current run tokens: {summary.current_run_tokens} 本地估算 / local estimate\n"
                 f"- Session cost: ${summary.session_cost:.6f} 本地估算 / local estimate\n"
                 f"- Average cache hit: {summary.average_cache_hit * 100:.1f}% 本地估算 / local estimate\n"
@@ -242,10 +258,16 @@ def build_dashboard() -> tk.Tk:
 def smoke() -> None:
     pricing = load_pricing(PRICING_PATH)
     runs = load_runs(RUNS_PATH).runs
-    summary = summarize_runs(runs, pricing)
+    codex_total = load_latest_thread_total()
+    summary = summarize_runs(runs, pricing, codex_total.total_tokens if codex_total else None)
+    total_label = (
+        "codex_state_sqlite / real total"
+        if summary.total_tokens_source == "codex_state_sqlite"
+        else "本地估算 / local estimate"
+    )
     print("Codex Token Monitor smoke OK")
     print(f"rounds={summary.rounds} 本地估算 / local estimate")
-    print(f"session_tokens={summary.session_tokens} 本地估算 / local estimate")
+    print(f"session_tokens={summary.session_tokens} {total_label}")
 
 
 def main() -> None:
