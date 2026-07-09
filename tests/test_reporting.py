@@ -22,7 +22,13 @@ class ReportingTests(unittest.TestCase):
         summary = summarize_runs(runs, PricingConfig(1, 0.1, 2), real_total_tokens=999)
         report = render_report(runs, summary)
         self.assertIn("Session tokens: 999 codex_state_sqlite / real total", report)
-        self.assertIn("Input/output/cache/cost/context/budget remain", report)
+        self.assertIn("Real total applies only to session total tokens", report)
+        self.assertIn("Input/output/cache/reasoning/cost/context/budget remain", report)
+        self.assertIn("not real Codex cache", report)
+        self.assertIn("not billing", report)
+        self.assertIn("logs_2.sqlite` is not connected", report)
+        self.assertNotIn("Current cache hit: 20.0% codex_state_sqlite / real total", report)
+        self.assertNotIn("Session estimated cost: $0.010000 codex_state_sqlite / real total", report)
 
     def test_report_uses_summaries_not_full_prompt_or_output(self):
         runs = [sample_run()]

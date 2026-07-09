@@ -20,8 +20,11 @@ class TelemetryBarTests(unittest.TestCase):
         )
         values = build_telemetry_values_from_summary(summary, PricingConfig(1, 0.1, 2))
         self.assertEqual(values[2][1], "999 codex_state_sqlite / real total")
-        self.assertIn("local estimate", values[0][1])
+        self.assertIn("local estimate, not real Codex cache", values[0][1])
         self.assertIn("local estimate", values[3][1])
+        self.assertIn("local estimate, not billing", values[4][1])
+        self.assertNotIn("real total", values[0][1])
+        self.assertNotIn("real total", values[4][1])
 
 
 if __name__ == "__main__":

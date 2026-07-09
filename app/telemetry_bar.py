@@ -70,6 +70,10 @@ def build_telemetry_values_from_summary(summary: SessionSummary, pricing: Pricin
         ("预算剩余 / budget remaining", f"${summary.budget_remaining:.6f}"),
     ]
     labeled_values = [(label, f"{value} 本地估算 / local estimate") for label, value in values]
+    labeled_values[0] = (labeled_values[0][0], f"{values[0][1]} local estimate, not real Codex cache")
+    labeled_values[1] = (labeled_values[1][0], f"{values[1][1]} local estimate, not real Codex cache")
+    labeled_values[4] = (labeled_values[4][0], f"{values[4][1]} local estimate, not billing")
+    labeled_values[8] = (labeled_values[8][0], f"{values[8][1]} local estimate, not billing")
     if summary.total_tokens_source == "codex_state_sqlite":
         session_label, session_value = labeled_values[2]
         labeled_values[2] = (session_label, f"{summary.session_tokens} codex_state_sqlite / real total")

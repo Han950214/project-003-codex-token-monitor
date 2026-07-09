@@ -184,10 +184,11 @@ class Dashboard:
                 f"- Rounds: {summary.rounds}\n"
                 f"- Session tokens: {summary.session_tokens} {total_label}\n"
                 f"- Current run tokens: {summary.current_run_tokens} 本地估算 / local estimate\n"
-                f"- Session cost: ${summary.session_cost:.6f} 本地估算 / local estimate\n"
-                f"- Average cache hit: {summary.average_cache_hit * 100:.1f}% 本地估算 / local estimate\n"
+                f"- Session cost: ${summary.session_cost:.6f} local estimate, not billing\n"
+                f"- Average cache hit: {summary.average_cache_hit * 100:.1f}% local estimate, not real Codex cache\n"
                 f"- Context usage: {summary.context_usage * 100:.1f}% 本地估算 / local estimate\n"
-                f"- Budget remaining: ${summary.budget_remaining:.6f} 本地估算 / local estimate"
+                f"- Budget remaining: ${summary.budget_remaining:.6f} 本地估算 / local estimate\n"
+                "- Adapter scope: safe fields from state_5.sqlite only; logs_2.sqlite not connected"
             )
         )
         recent = loaded_runs[-5:]
@@ -268,6 +269,10 @@ def smoke() -> None:
     print("Codex Token Monitor smoke OK")
     print(f"rounds={summary.rounds} 本地估算 / local estimate")
     print(f"session_tokens={summary.session_tokens} {total_label}")
+    print(f"current_run_tokens={summary.current_run_tokens} local estimate")
+    print("cache_hit=local estimate, not real Codex cache")
+    print("cost=local estimate, not billing")
+    print("adapter=state_5.sqlite safe fields only; logs_2.sqlite not connected")
 
 
 def main() -> None:
