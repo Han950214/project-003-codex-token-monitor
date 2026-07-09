@@ -36,5 +36,6 @@ python app\main.py
 
 ## Current Status
 
-This is a phase-1 scaffold and mock telemetry UI. It estimates locally from pasted prompt/output and sample data. Later versions may add optional wrappers, richer storage, and AOS adapters, but this repository must remain independent until integration is explicitly planned.
+Phase 2-MVP adds manual local run records, JSON persistence, session summaries, and Markdown report export. It saves prompt/output summaries and manual token counts only by default; do not store credentials or private prompt/output full text.
 
+All usage, cost, cache, context, and budget values remain 本地估算 / local estimate. Later versions may add optional wrappers, richer storage, and AOS adapters, but this repository must remain independent until integration is explicitly planned.

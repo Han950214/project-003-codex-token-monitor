@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from app.models import AgentRun
+
 
 @dataclass(frozen=True)
 class PricingConfig:
@@ -24,6 +26,19 @@ class RunUsage:
     optional_log_tokens: int = 0
     stable_prefix_tokens: int = 0
     observed_cached_input_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    rounds: int
+    session_tokens: int
+    current_run_tokens: int
+    current_cost: float
+    session_cost: float
+    current_cache_hit: float
+    average_cache_hit: float
+    context_usage: float
+    budget_remaining: float
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
@@ -96,3 +111,44 @@ def estimate_tokens_from_text(text: str) -> int:
     if not text:
         return 0
     return max(1, round(len(text) / 4))
+
+
+def usage_from_run(run: AgentRun) -> RunUsage:
+    return RunUsage(
+        input_tokens=run.input_tokens,
+        output_tokens=run.output_tokens,
+        stable_prefix_tokens=run.cached_tokens,
+        observed_cached_input_tokens=run.cached_tokens,
+    )
+
+
+def build_run_estimates(
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int,
+    pricing: PricingConfig,
+) -> tuple[int, float, float]:
+    usage = RunUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        observed_cached_input_tokens=cached_tokens,
+    )
+    return current_tokens(usage), current_cost(usage, pricing), current_hit(usage)
+
+
+def summarize_runs(runs: list[AgentRun], pricing: PricingConfig) -> SessionSummary:
+    usages = [usage_from_run(run) for run in runs]
+    current_usage = usages[-1] if usages else RunUsage(input_tokens=0, output_tokens=0)
+    spent = sum(max(run.estimated_cost, 0.0) for run in runs)
+    total_tokens = sum(max(run.total_tokens, 0) for run in runs)
+    return SessionSummary(
+        rounds=len(runs),
+        session_tokens=total_tokens,
+        current_run_tokens=current_tokens(current_usage),
+        current_cost=current_cost(current_usage, pricing),
+        session_cost=spent,
+        current_cache_hit=current_hit(current_usage),
+        average_cache_hit=average_hit(usages),
+        context_usage=context_usage(total_tokens, pricing.configured_context_window),
+        budget_remaining=budget_remaining(pricing.configured_budget, spent),
+    )
