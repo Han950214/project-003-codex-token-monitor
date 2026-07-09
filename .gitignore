@@ -7,3 +7,4 @@ reports/
 reports/*.md
 data/*.json
 *.log
+.reasonix/
