@@ -44,27 +44,36 @@ def load_latest_completed_response_usage(path: Path | None = None) -> CodexRespo
     if not database.is_file():
         return None
 
-    try:
-        uri = database.resolve().as_uri() + "?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as connection:
-            row = connection.execute(
-                """
-                SELECT feedback_log_body
-                FROM logs
-                WHERE feedback_log_body LIKE '%"response.completed"%'
-                ORDER BY ts_nanos DESC
-                LIMIT 1
-                """
-            ).fetchone()
-    except (OSError, sqlite3.Error):
-        return None
-
+    row = _fetch_latest_completed_response(database)
     if row is None or not isinstance(row[0], str):
         return None
     values = _extract_usage_values(row[0])
     if values is None:
         return None
     return CodexResponseUsage(**values)
+
+
+def _fetch_latest_completed_response(database: Path) -> tuple[object, ...] | None:
+    uri = database.resolve().as_uri() + "?mode=ro"
+    for args, kwargs in [
+        ((uri,), {"uri": True}),
+        ((str(database),), {}),
+    ]:
+        try:
+            with closing(sqlite3.connect(*args, **kwargs)) as connection:
+                connection.execute("PRAGMA query_only=ON")
+                return connection.execute(
+                    """
+                    SELECT feedback_log_body
+                    FROM logs
+                    WHERE feedback_log_body LIKE '%response.completed%'
+                    ORDER BY ts_nanos DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        except (OSError, sqlite3.Error):
+            continue
+    return None
 
 
 def _extract_usage_values(body: str) -> dict[str, int] | None:

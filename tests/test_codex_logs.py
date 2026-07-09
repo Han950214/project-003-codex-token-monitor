@@ -59,6 +59,43 @@ class CodexLogsTests(unittest.TestCase):
         self.assertEqual(usage.cached_tokens, 7)
         self.assertEqual(usage.reasoning_tokens, 5)
 
+    def test_response_completed_like_does_not_require_quotes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_body(
+                path,
+                1,
+                'event=response.completed usage={"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}',
+            )
+            usage = load_latest_completed_response_usage(path)
+        self.assertIsNotNone(usage)
+        self.assertEqual(usage.total_tokens, 3)
+
+    def test_plain_path_fallback_after_uri_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_body(
+                path,
+                1,
+                '{"type":"response.completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}}',
+            )
+            real_connect = sqlite3.connect
+            calls = []
+
+            def flaky_connect(*args, **kwargs):
+                calls.append((args, kwargs))
+                if kwargs.get("uri"):
+                    raise sqlite3.OperationalError("uri open failed")
+                return real_connect(*args, **kwargs)
+
+            with patch("app.codex_logs.sqlite3.connect", side_effect=flaky_connect):
+                usage = load_latest_completed_response_usage(path)
+        self.assertIsNotNone(usage)
+        self.assertEqual(usage.total_tokens, 3)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0][1].get("uri"))
+        self.assertEqual(calls[1][0][0], str(path))
+
     def test_does_not_return_body_text(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self._database(directory)
