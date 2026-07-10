@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from app.codex_logs import CodexLogsResult, LogsAdapterStatus
+
 from app.metrics import (
     PricingConfig,
     RunUsage,
@@ -21,6 +23,48 @@ from app.metrics import (
 
 def format_percent(value: float) -> str:
     return f"{value * 100:.1f}%"
+
+
+def build_latest_response_values(result: CodexLogsResult) -> list[tuple[str, str]]:
+    usage = result.usage
+    source = result.source if usage is not None else "unknown"
+    values = [
+        ("Input tokens", _known(usage.input_tokens if usage else None, source)),
+        ("Output tokens", _known(usage.output_tokens if usage else None, source)),
+        ("Total tokens", _known(usage.total_tokens if usage else None, source)),
+        ("Cached tokens", _known(usage.cached_tokens if usage else None, source)),
+        ("Reasoning tokens", _known(usage.reasoning_tokens if usage else None, source)),
+    ]
+    if usage is not None and usage.input_tokens > 0:
+        cache_hit = min(max(usage.cached_tokens, 0), usage.input_tokens) / usage.input_tokens
+        cache_value = (
+            f"{format_percent(cache_hit)} derived from codex_logs_sqlite / real usage; "
+            "not official cache hit rate"
+        )
+    else:
+        cache_value = "unknown / source: unknown"
+    values.append(("Derived cache hit", cache_value))
+    return values
+
+
+def build_logs_adapter_metadata(result: CodexLogsResult) -> list[tuple[str, str]]:
+    if result.observed_at is not None:
+        time_label = "Latest response at"
+        timestamp = result.observed_at
+    elif result.status in {LogsAdapterStatus.CONNECTED, LogsAdapterStatus.NO_RESPONSE_COMPLETED}:
+        time_label = "Refreshed at"
+        timestamp = result.refreshed_at
+    else:
+        time_label = "Refresh attempted at"
+        timestamp = result.refreshed_at
+    return [
+        ("Logs adapter", result.status.value),
+        (time_label, timestamp.astimezone().isoformat(timespec="seconds")),
+    ]
+
+
+def _known(value: int | None, source: str) -> str:
+    return "unknown / source: unknown" if value is None else f"{value} {source}"
 
 
 def build_telemetry_values(usages: list[RunUsage], pricing: PricingConfig) -> list[tuple[str, str]]:

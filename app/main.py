@@ -14,13 +14,17 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import load_pricing
-from app.codex_logs import load_latest_completed_response_usage
-from app.codex_state import load_latest_thread_total
-from app.metrics import RunUsage, build_run_estimates, summarize_runs
+from app.dashboard import DashboardViewModel
+from app.metrics import build_run_estimates
 from app.models import AgentRun
 from app.reporting import export_report
-from app.storage import DEFAULT_RUNS_PATH, append_run, load_runs
-from app.telemetry_bar import build_telemetry_values_from_summary, create_telemetry_bar_from_values
+from app.storage import DEFAULT_RUNS_PATH, append_run
+from app.telemetry_bar import (
+    build_latest_response_values,
+    build_logs_adapter_metadata,
+    build_telemetry_values_from_summary,
+    create_telemetry_bar_from_values,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +36,7 @@ class Dashboard:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.pricing = load_pricing(PRICING_PATH)
+        self.view_model = DashboardViewModel(self.pricing, RUNS_PATH)
         self.started_at: datetime | None = None
         self.started_at_var = tk.StringVar(value="")
         self.ended_at_var = tk.StringVar(value="")
@@ -51,6 +56,7 @@ class Dashboard:
         header.pack(fill="x")
         ttk.Label(header, text="Codex Token Monitor / 本地估算 Dashboard", font=("Segoe UI", 15, "bold")).pack(side="left")
         ttk.Button(header, text="Export Report / 导出报告", command=self.export_report).pack(side="right", padx=(8, 0))
+        ttk.Button(header, text="Refresh / 刷新", command=self.refresh).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="Save Run / 保存", command=self.save_run).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="End Run / 结束", command=self.end_run).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="Start Run / 开始", command=self.start_run).pack(side="right")
@@ -122,9 +128,11 @@ class Dashboard:
         right.grid_columnconfigure(0, weight=1)
         self.summary_label = ttk.Label(right, text="", justify="left", padding=10)
         self.summary_label.grid(row=0, column=0, sticky="ew")
+        self.latest_usage_label = ttk.Label(right, text="", justify="left", padding=10)
+        self.latest_usage_label.grid(row=1, column=0, sticky="ew")
         self.recent_label = ttk.Label(right, text="", justify="left", padding=10)
-        self.recent_label.grid(row=1, column=0, sticky="ew")
-        ttk.Label(right, textvariable=self.status_var, padding=10).grid(row=2, column=0, sticky="ew")
+        self.recent_label.grid(row=2, column=0, sticky="ew")
+        ttk.Label(right, textvariable=self.status_var, padding=10).grid(row=3, column=0, sticky="ew")
 
     def start_run(self) -> None:
         self.started_at = datetime.now()
@@ -150,34 +158,21 @@ class Dashboard:
         self.refresh(result.runs)
 
     def export_report(self) -> None:
-        result = load_runs(RUNS_PATH)
-        if result.error:
-            messagebox.showerror("Storage error", result.error)
+        snapshot = self.view_model.refresh()
+        if snapshot.storage_error:
+            messagebox.showerror("Storage error", snapshot.storage_error)
             return
-        codex_total = load_latest_thread_total()
-        latest_usage = load_latest_completed_response_usage()
-        summary = summarize_runs(
-            result.runs,
-            self.pricing,
-            codex_total.total_tokens if codex_total else None,
-            _run_usage_from_codex_logs(latest_usage),
-        )
-        path = export_report(result.runs, summary, ROOT / "reports" / f"token-waste-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md")
+        path = export_report(snapshot.runs, snapshot.summary, ROOT / "reports" / f"token-waste-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md")
         self.status_var.set(f"Report exported: {path} 本地估算 / local estimate")
 
     def refresh(self, runs: list[AgentRun] | None = None) -> None:
-        result = load_runs(RUNS_PATH) if runs is None else None
-        loaded_runs = runs if runs is not None else result.runs
-        if result and result.error:
-            self.status_var.set(f"Storage warning: {result.error}")
-        codex_total = load_latest_thread_total()
-        latest_usage = load_latest_completed_response_usage()
-        summary = summarize_runs(
-            loaded_runs,
-            self.pricing,
-            codex_total.total_tokens if codex_total else None,
-            _run_usage_from_codex_logs(latest_usage),
-        )
+        snapshot = self.view_model.refresh(runs)
+        loaded_runs = snapshot.runs
+        summary = snapshot.summary
+        if snapshot.storage_error:
+            self.status_var.set(f"Storage warning: {snapshot.storage_error}")
+        elif runs is None:
+            self.status_var.set(f"Refresh complete; logs adapter: {snapshot.logs.status.value}")
         total_label = (
             "codex_state_sqlite / real total"
             if summary.total_tokens_source == "codex_state_sqlite"
@@ -199,6 +194,7 @@ class Dashboard:
                 f"- Rounds: {summary.rounds}\n"
                 f"- Session tokens: {summary.session_tokens} {total_label}\n"
                 f"- Current run tokens: {summary.current_run_tokens} {current_label}\n"
+                f"- Current cost: ${summary.current_cost:.6f} local estimate, not billing\n"
                 f"- Session cost: ${summary.session_cost:.6f} local estimate, not billing\n"
                 f"- Current cache hit: {summary.current_cache_hit * 100:.1f}% {cache_label}\n"
                 f"- Average cache hit: {summary.average_cache_hit * 100:.1f}% local estimate, not real Codex cache\n"
@@ -207,6 +203,10 @@ class Dashboard:
                 "- Adapter scope: latest response.completed numeric usage only; no session/thread aggregation"
             )
         )
+        latest_lines = ["Latest Response Usage / 最新响应用量"]
+        latest_lines.extend(f"- {label}: {value}" for label, value in build_latest_response_values(snapshot.logs))
+        latest_lines.extend(f"- {label}: {value}" for label, value in build_logs_adapter_metadata(snapshot.logs))
+        self.latest_usage_label.configure(text="\n".join(latest_lines))
         recent = loaded_runs[-5:]
         recent_lines = ["Recent Runs / 最近记录"]
         recent_lines.extend(f"- {run.run_id}: {run.title} ({run.total_tokens} tokens local estimate)" for run in recent)
@@ -266,17 +266,6 @@ def _text_value(widget: tk.Text) -> str:
     return widget.get("1.0", "end").strip()
 
 
-def _run_usage_from_codex_logs(latest_usage) -> RunUsage | None:
-    if latest_usage is None:
-        return None
-    return RunUsage(
-        input_tokens=latest_usage.input_tokens,
-        output_tokens=latest_usage.output_tokens,
-        optional_log_tokens=max(latest_usage.total_tokens - latest_usage.input_tokens - latest_usage.output_tokens, 0),
-        observed_cached_input_tokens=latest_usage.cached_tokens,
-    )
-
-
 def build_dashboard() -> tk.Tk:
     root = tk.Tk()
     Dashboard(root)
@@ -285,15 +274,8 @@ def build_dashboard() -> tk.Tk:
 
 def smoke() -> None:
     pricing = load_pricing(PRICING_PATH)
-    runs = load_runs(RUNS_PATH).runs
-    codex_total = load_latest_thread_total()
-    latest_usage = load_latest_completed_response_usage()
-    summary = summarize_runs(
-        runs,
-        pricing,
-        codex_total.total_tokens if codex_total else None,
-        _run_usage_from_codex_logs(latest_usage),
-    )
+    snapshot = DashboardViewModel(pricing, RUNS_PATH).refresh()
+    summary = snapshot.summary
     total_label = (
         "codex_state_sqlite / real total"
         if summary.total_tokens_source == "codex_state_sqlite"
@@ -310,6 +292,7 @@ def smoke() -> None:
     print(f"current_run_tokens={summary.current_run_tokens} {current_source}")
     print("cache_hit=derived from real usage when codex_logs_sqlite is available, not official cache hit rate")
     print("cost=estimate, not billing")
+    print(f"logs_adapter={snapshot.logs.status.value}")
     print("adapter=logs_2.sqlite latest response.completed usage only; state_5.sqlite session total fallback; no aggregation")
 
 

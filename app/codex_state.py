@@ -33,21 +33,7 @@ def load_latest_thread_total(path: Path | None = None) -> CodexThreadTotal | Non
     if not database.is_file():
         return None
 
-    try:
-        uri = database.resolve().as_uri() + "?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as connection:
-            row = connection.execute(
-                """
-                SELECT id, created_at, updated_at, model, model_provider, tokens_used
-                FROM threads
-                WHERE tokens_used IS NOT NULL
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
-    except (OSError, sqlite3.Error):
-        return None
-
+    row = _fetch_latest_thread(database)
     if row is None:
         return None
     try:
@@ -64,6 +50,29 @@ def load_latest_thread_total(path: Path | None = None) -> CodexThreadTotal | Non
         model_provider=None if row[4] is None else str(row[4]),
         total_tokens=total_tokens,
     )
+
+
+def _fetch_latest_thread(database: Path) -> tuple[object, ...] | None:
+    uri = database.resolve().as_uri() + "?mode=ro"
+    for args, kwargs in [
+        ((uri,), {"uri": True}),
+        ((str(database),), {}),
+    ]:
+        try:
+            with closing(sqlite3.connect(*args, **kwargs)) as connection:
+                connection.execute("PRAGMA query_only=ON")
+                return connection.execute(
+                    """
+                    SELECT id, created_at, updated_at, model, model_provider, tokens_used
+                    FROM threads
+                    WHERE tokens_used IS NOT NULL
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        except (OSError, sqlite3.Error):
+            continue
+    return None
 
 
 def _optional_int(value: object) -> int | None:
