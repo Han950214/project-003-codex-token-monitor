@@ -2,11 +2,13 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import app.codex_logs as codex_logs
 from app.codex_logs import (
+    CodexLogsReader,
     LogsAdapterStatus,
     load_latest_completed_response_result,
     load_latest_completed_response_usage,
@@ -40,10 +42,14 @@ class CodexLogsTests(unittest.TestCase):
         return path
 
     def _insert_body(self, path: Path, ts_nanos: int, body: str) -> None:
+        ts, nanos = divmod(ts_nanos, 1_000_000_000)
+        self._insert_log(path, ts_nanos, ts, nanos, body)
+
+    def _insert_log(self, path: Path, row_id: int, ts: int, ts_nanos: int, body: str) -> None:
         with closing(sqlite3.connect(path)) as connection:
             connection.execute(
                 "INSERT INTO logs VALUES (?, ?, ?, ?, ?, ?)",
-                (ts_nanos, ts_nanos, ts_nanos, "INFO", "codex", body),
+                (row_id, ts, ts_nanos, "INFO", "codex", body),
             )
             connection.commit()
 
@@ -170,7 +176,7 @@ class CodexLogsTests(unittest.TestCase):
         self.assertEqual(result.status, LogsAdapterStatus.CONNECTED)
         parser.assert_called_once()
         returned_row = parser.call_args.args[0]
-        self.assertEqual(len(returned_row), 7)
+        self.assertEqual(len(returned_row), 14)
         self.assertTrue(all(not isinstance(value, str) for value in returned_row))
         for secret in secrets:
             self.assertNotIn(secret, repr(returned_row))
@@ -342,6 +348,198 @@ class CodexLogsTests(unittest.TestCase):
         metadata = build_logs_adapter_metadata(result)
         self.assertEqual(metadata[0][1], "connected")
         self.assertEqual(metadata[1][0], "Latest response at")
+        self.assertEqual(metadata[2][0], "Refreshed at")
+
+    def test_every_logs_connection_enables_query_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_body(
+                path,
+                1,
+                '{"type":"response.completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}}',
+            )
+            real_connect = sqlite3.connect
+            statements = []
+
+            class TrackingConnection:
+                def __init__(self, connection):
+                    self.connection = connection
+
+                def execute(self, statement, parameters=()):
+                    statements.append(statement.strip())
+                    return self.connection.execute(statement, parameters)
+
+                def close(self):
+                    self.connection.close()
+
+            def tracked_connect(*args, **kwargs):
+                return TrackingConnection(real_connect(*args, **kwargs))
+
+            with patch("app.codex_logs.sqlite3.connect", side_effect=tracked_connect):
+                result = load_latest_completed_response_result(path)
+
+        self.assertEqual(result.status, LogsAdapterStatus.CONNECTED)
+        self.assertEqual(statements[0], "PRAGMA query_only=ON")
+
+    def test_incremental_reader_initializes_then_uses_cursor_and_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_log(
+                path,
+                1,
+                1_800_000_000,
+                1,
+                '{"type":"response.completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}}',
+            )
+            reader = CodexLogsReader(batch_limit=2)
+            with patch("app.codex_logs._fetch_scan", wraps=codex_logs._fetch_scan) as scan:
+                first = reader.refresh(path)
+                first_cursor = reader.cursor
+                for row_id in (2, 3, 4):
+                    self._insert_log(
+                        path,
+                        row_id,
+                        1_800_000_000,
+                        row_id,
+                        '{"type":"message.created"}',
+                    )
+                second = reader.refresh(path)
+
+        self.assertEqual(first.status, LogsAdapterStatus.CONNECTED)
+        self.assertTrue(first.incremental_reader_initialized)
+        self.assertIsNone(scan.call_args_list[0].args[1])
+        self.assertEqual(scan.call_args_list[1].args[1], first_cursor)
+        self.assertEqual(scan.call_args_list[1].args[2], 2)
+        self.assertEqual(reader.cursor.row_id, 3)
+        self.assertEqual(second.usage, first.usage)
+        self.assertFalse(second.new_event_found)
+
+    def test_no_new_rows_preserve_usage_and_event_time_but_refresh_time_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_log(
+                path,
+                1,
+                1_800_000_000,
+                10,
+                '{"type":"response.completed","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"cached_tokens":4,"reasoning_tokens":1}}',
+            )
+            reader = CodexLogsReader()
+            first_now = datetime(2026, 7, 11, tzinfo=timezone.utc)
+            first = reader.refresh(path, first_now)
+            second = reader.refresh(path, first_now + timedelta(minutes=1))
+
+        self.assertEqual(second.usage, first.usage)
+        self.assertEqual(second.observed_at, first.observed_at)
+        self.assertEqual(second.refreshed_at, first_now + timedelta(minutes=1))
+        self.assertFalse(second.new_event_found)
+
+    def test_incremental_valid_and_invalid_events_update_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_log(
+                path,
+                1,
+                1_800_000_000,
+                1,
+                '{"type":"response.completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}}',
+            )
+            reader = CodexLogsReader()
+            initial = reader.refresh(path)
+            self._insert_log(
+                path,
+                2,
+                1_800_000_001,
+                2,
+                '{"type":"response.completed","usage":{"input_tokens":20,"output_tokens":3,"total_tokens":23,"cached_tokens":5,"reasoning_tokens":1}}',
+            )
+            updated = reader.refresh(path)
+            self._insert_log(
+                path,
+                3,
+                1_800_000_002,
+                3,
+                '{"type":"response.completed","usage":{"input_tokens":99}}',
+            )
+            invalid = reader.refresh(path)
+
+        self.assertEqual(updated.status, LogsAdapterStatus.CONNECTED)
+        self.assertEqual(updated.usage.input_tokens, 20)
+        self.assertTrue(updated.new_event_found)
+        self.assertGreater(updated.observed_at, initial.observed_at)
+        self.assertEqual(invalid.status, LogsAdapterStatus.PARSE_FAILED)
+        self.assertIsNone(invalid.usage)
+
+    def test_same_timestamp_rows_use_id_as_stable_cursor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_log(path, 1, 100, 5, '{"type":"message.created"}')
+            reader = CodexLogsReader()
+            reader.refresh(path)
+            self._insert_log(
+                path,
+                2,
+                100,
+                5,
+                '{"type":"response.completed","usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9,"cached_tokens":1,"reasoning_tokens":0}}',
+            )
+            result = reader.refresh(path)
+
+        self.assertEqual(result.status, LogsAdapterStatus.CONNECTED)
+        self.assertEqual(result.usage.input_tokens, 7)
+        self.assertEqual(reader.cursor.row_id, 2)
+
+    def test_truncated_database_reinitializes_safely(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_log(
+                path,
+                100,
+                100,
+                0,
+                '{"type":"response.completed","usage":{"input_tokens":100,"output_tokens":2,"total_tokens":102,"cached_tokens":1,"reasoning_tokens":0}}',
+            )
+            reader = CodexLogsReader()
+            reader.refresh(path)
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("DELETE FROM logs")
+                connection.commit()
+            self._insert_log(
+                path,
+                1,
+                1,
+                0,
+                '{"type":"response.completed","usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6,"cached_tokens":0,"reasoning_tokens":0}}',
+            )
+            result = reader.refresh(path)
+
+        self.assertEqual(result.status, LogsAdapterStatus.CONNECTED)
+        self.assertEqual(result.usage.input_tokens, 5)
+        self.assertEqual(reader.cursor.row_id, 1)
+
+    def test_replaced_database_discards_previous_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_log(
+                path,
+                1,
+                100,
+                0,
+                '{"type":"response.completed","usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11,"cached_tokens":0,"reasoning_tokens":0}}',
+            )
+            reader = CodexLogsReader()
+            reader.refresh(path)
+
+            replacement_directory = Path(directory) / "replacement"
+            replacement_directory.mkdir()
+            replacement = self._database(str(replacement_directory))
+            self._insert_log(replacement, 200, 200, 0, '{"type":"message.created"}')
+            replacement.replace(path)
+            result = reader.refresh(path)
+
+        self.assertEqual(result.status, LogsAdapterStatus.NO_RESPONSE_COMPLETED)
+        self.assertIsNone(result.usage)
+        self.assertEqual(reader.cursor.row_id, 200)
 
     def test_source_labels_do_not_mark_cost_as_real_billing(self):
         summary = summarize_runs(

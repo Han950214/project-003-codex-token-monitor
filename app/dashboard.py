@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from app.codex_logs import CodexLogsResult, CodexResponseUsage, load_latest_completed_response_result
+from app.codex_logs import CodexLogsReader, CodexLogsResult, CodexResponseUsage
 from app.codex_state import CodexThreadTotal, load_latest_thread_total
 from app.metrics import PricingConfig, RunUsage, SessionSummary, summarize_runs
 from app.models import AgentRun
@@ -28,13 +28,14 @@ class DashboardViewModel:
         pricing: PricingConfig,
         runs_path: Path,
         runs_loader: Callable[[Path], LoadResult] = load_runs,
-        logs_loader: Callable[[], CodexLogsResult] = load_latest_completed_response_result,
+        logs_loader: Callable[[], CodexLogsResult] | None = None,
         state_loader: Callable[[], CodexThreadTotal | None] = load_latest_thread_total,
     ) -> None:
         self.pricing = pricing
         self.runs_path = runs_path
         self.runs_loader = runs_loader
-        self.logs_loader = logs_loader
+        self.logs_reader = CodexLogsReader() if logs_loader is None else None
+        self.logs_loader = logs_loader or self.logs_reader.refresh
         self.state_loader = state_loader
 
     def refresh(self, runs: list[AgentRun] | None = None) -> DashboardSnapshot:

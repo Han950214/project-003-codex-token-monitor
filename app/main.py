@@ -14,6 +14,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import load_pricing
+from app.auto_refresh import AutoRefreshController, DEFAULT_AUTO_REFRESH_SECONDS
 from app.dashboard import DashboardViewModel
 from app.metrics import build_run_estimates
 from app.models import AgentRun
@@ -41,6 +42,10 @@ class Dashboard:
         self.started_at_var = tk.StringVar(value="")
         self.ended_at_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="本地估算 / local estimate")
+        self.auto_refresh_var = tk.BooleanVar(value=False)
+        self.auto_refresh_status_var = tk.StringVar(
+            value=f"Auto Refresh: Off ({DEFAULT_AUTO_REFRESH_SECONDS}s)"
+        )
         self.fields: dict[str, tk.StringVar] = {}
         self.text_fields: dict[str, tk.Text] = {}
         self.telemetry_frame: tk.Frame | None = None
@@ -49,6 +54,13 @@ class Dashboard:
         self.root.geometry("1180x760")
         self.root.minsize(980, 660)
         self._build()
+        self.auto_refresh = AutoRefreshController(
+            self.root.after,
+            self.root.after_cancel,
+            self.refresh,
+            on_error=self._auto_refresh_error,
+        )
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.refresh()
 
     def _build(self) -> None:
@@ -56,7 +68,14 @@ class Dashboard:
         header.pack(fill="x")
         ttk.Label(header, text="Codex Token Monitor / 本地估算 Dashboard", font=("Segoe UI", 15, "bold")).pack(side="left")
         ttk.Button(header, text="Export Report / 导出报告", command=self.export_report).pack(side="right", padx=(8, 0))
-        ttk.Button(header, text="Refresh / 刷新", command=self.refresh).pack(side="right", padx=(8, 0))
+        ttk.Button(header, text="Refresh / 刷新", command=self.manual_refresh).pack(side="right", padx=(8, 0))
+        ttk.Checkbutton(
+            header,
+            text="Auto Refresh",
+            variable=self.auto_refresh_var,
+            command=self._toggle_auto_refresh,
+        ).pack(side="right", padx=(8, 0))
+        ttk.Label(header, textvariable=self.auto_refresh_status_var).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="Save Run / 保存", command=self.save_run).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="End Run / 结束", command=self.end_run).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="Start Run / 开始", command=self.start_run).pack(side="right")
@@ -164,6 +183,24 @@ class Dashboard:
             return
         path = export_report(snapshot.runs, snapshot.summary, ROOT / "reports" / f"token-waste-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md")
         self.status_var.set(f"Report exported: {path} 本地估算 / local estimate")
+
+    def manual_refresh(self) -> None:
+        self.auto_refresh.manual_refresh()
+
+    def _toggle_auto_refresh(self) -> None:
+        enabled = bool(self.auto_refresh_var.get())
+        self.auto_refresh.set_enabled(enabled)
+        state = "On" if enabled else "Off"
+        self.auto_refresh_status_var.set(
+            f"Auto Refresh: {state} ({self.auto_refresh.interval_seconds}s)"
+        )
+
+    def _auto_refresh_error(self, _error: Exception) -> None:
+        self.status_var.set("Auto refresh failed; next refresh remains scheduled")
+
+    def close(self) -> None:
+        self.auto_refresh.close()
+        self.root.destroy()
 
     def refresh(self, runs: list[AgentRun] | None = None) -> None:
         snapshot = self.view_model.refresh(runs)
@@ -293,6 +330,7 @@ def smoke() -> None:
     print("cache_hit=derived from real usage when codex_logs_sqlite is available, not official cache hit rate")
     print("cost=estimate, not billing")
     print(f"logs_adapter={snapshot.logs.status.value}")
+    print(f"incremental_reader_initialized={snapshot.logs.incremental_reader_initialized}")
     print("adapter=logs_2.sqlite latest response.completed usage only; state_5.sqlite session total fallback; no aggregation")
 
 

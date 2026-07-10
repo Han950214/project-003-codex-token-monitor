@@ -48,19 +48,20 @@ def build_latest_response_values(result: CodexLogsResult) -> list[tuple[str, str
 
 
 def build_logs_adapter_metadata(result: CodexLogsResult) -> list[tuple[str, str]]:
+    values = [("Logs adapter", result.status.value)]
     if result.observed_at is not None:
-        time_label = "Latest response at"
-        timestamp = result.observed_at
-    elif result.status in {LogsAdapterStatus.CONNECTED, LogsAdapterStatus.NO_RESPONSE_COMPLETED}:
-        time_label = "Refreshed at"
-        timestamp = result.refreshed_at
+        values.append(
+            ("Latest response at", result.observed_at.astimezone().isoformat(timespec="seconds"))
+        )
+    if result.status in {LogsAdapterStatus.CONNECTED, LogsAdapterStatus.NO_RESPONSE_COMPLETED}:
+        values.append(
+            ("Refreshed at", result.refreshed_at.astimezone().isoformat(timespec="seconds"))
+        )
     else:
-        time_label = "Refresh attempted at"
-        timestamp = result.refreshed_at
-    return [
-        ("Logs adapter", result.status.value),
-        (time_label, timestamp.astimezone().isoformat(timespec="seconds")),
-    ]
+        values.append(
+            ("Refresh attempted at", result.refreshed_at.astimezone().isoformat(timespec="seconds"))
+        )
+    return values
 
 
 def _known(value: int | None, source: str) -> str:
