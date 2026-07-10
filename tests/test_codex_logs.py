@@ -5,6 +5,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
+import app.codex_logs as codex_logs
 from app.codex_logs import (
     LogsAdapterStatus,
     load_latest_completed_response_result,
@@ -145,6 +146,35 @@ class CodexLogsTests(unittest.TestCase):
             usage = load_latest_completed_response_usage(path)
         self.assertIsNotNone(usage)
         self.assertNotIn(secret, repr(usage))
+
+    def test_sql_returns_only_scalars_and_never_passes_payload_to_python_parser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            secrets = ("PROMPT_SECRET_BEFORE", "OUTPUT_SECRET_AFTER", "CONTENT_SECRET_ADJACENT")
+            self._insert_body(
+                path,
+                1,
+                (
+                    'PROMPT_SECRET_BEFORE event=response.completed usage={'
+                    '"content":"CONTENT_SECRET_ADJACENT","input_tokens":10,'
+                    '"output_tokens":20,"total_tokens":30,"cached_tokens":4,'
+                    '"reasoning_tokens":2} OUTPUT_SECRET_AFTER'
+                ),
+            )
+            with patch(
+                "app.codex_logs._usage_values_from_row",
+                wraps=codex_logs._usage_values_from_row,
+            ) as parser:
+                result = load_latest_completed_response_result(path)
+
+        self.assertEqual(result.status, LogsAdapterStatus.CONNECTED)
+        parser.assert_called_once()
+        returned_row = parser.call_args.args[0]
+        self.assertEqual(len(returned_row), 7)
+        self.assertTrue(all(not isinstance(value, str) for value in returned_row))
+        for secret in secrets:
+            self.assertNotIn(secret, repr(returned_row))
+            self.assertNotIn(secret, repr(result))
 
     def test_missing_field_falls_back_none(self):
         with tempfile.TemporaryDirectory() as directory:

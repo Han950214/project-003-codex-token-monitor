@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import json
-import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -24,7 +22,6 @@ USAGE_FIELDS = (
 )
 REAL_USAGE_SOURCE = "codex_logs_sqlite / real usage"
 UNKNOWN_SOURCE = "unknown"
-_USAGE_OBJECT_PATTERN = re.compile(r'(?:"usage"\s*:|\busage\s*=)\s*(\{)')
 
 
 @dataclass(frozen=True)
@@ -98,16 +95,14 @@ def load_latest_completed_response_result(
             refreshed_at=refreshed_at,
             error_category="response.completed unavailable",
         )
-    if not isinstance(row[0], str):
-        return _parse_failed(refreshed_at)
-    values = _extract_usage_values(row[0])
+    values = _usage_values_from_row(row)
     if values is None:
         return _parse_failed(refreshed_at)
     return CodexLogsResult(
         usage=CodexResponseUsage(**values),
         source=REAL_USAGE_SOURCE,
         status=LogsAdapterStatus.CONNECTED,
-        observed_at=_event_time_from_nanos(row[1] if len(row) > 1 else None),
+        observed_at=_event_time_from_nanos(row[5]),
         refreshed_at=refreshed_at,
     )
 
@@ -123,11 +118,129 @@ def _fetch_latest_completed_response(database: Path) -> tuple[tuple[object, ...]
                 connection.execute("PRAGMA query_only=ON")
                 return connection.execute(
                     """
-                    SELECT feedback_log_body, ts_nanos
-                    FROM logs
-                    WHERE feedback_log_body LIKE '%response.completed%'
-                    ORDER BY ts_nanos DESC
-                    LIMIT 1
+                    WITH RECURSIVE latest AS (
+                        SELECT feedback_log_body AS internal_body, ts_nanos
+                        FROM logs
+                        WHERE feedback_log_body LIKE '%response.completed%'
+                        ORDER BY ts_nanos DESC
+                        LIMIT 1
+                    ),
+                    candidate_starts AS (
+                        SELECT
+                            instr(internal_body, '{') AS first_object_start,
+                            CASE
+                                WHEN instr(internal_body, '"usage"') > 0
+                                THEN instr(internal_body, '"usage"')
+                                WHEN instr(internal_body, 'usage=') > 0
+                                THEN instr(internal_body, 'usage=')
+                                ELSE 0
+                            END AS usage_marker_start,
+                            internal_body,
+                            ts_nanos
+                        FROM latest
+                    ),
+                    candidates(priority, candidate_text, ts_nanos) AS (
+                        SELECT
+                            1,
+                            substr(
+                                internal_body,
+                                usage_marker_start
+                                + instr(substr(internal_body, usage_marker_start), '{')
+                                - 1
+                            ),
+                            ts_nanos
+                        FROM candidate_starts
+                        WHERE usage_marker_start > 0
+                          AND instr(substr(internal_body, usage_marker_start), '{') > 0
+                        UNION ALL
+                        SELECT 2, substr(internal_body, first_object_start), ts_nanos
+                        FROM candidate_starts
+                        WHERE first_object_start > 0
+                    ),
+                    closing_positions(priority, candidate_text, ts_nanos, closing_pos) AS (
+                        SELECT priority, candidate_text, ts_nanos, instr(candidate_text, '}')
+                        FROM candidates
+                        WHERE instr(candidate_text, '}') > 0
+                        UNION ALL
+                        SELECT
+                            priority,
+                            candidate_text,
+                            ts_nanos,
+                            closing_pos + instr(substr(candidate_text, closing_pos + 1), '}')
+                        FROM closing_positions
+                        WHERE instr(substr(candidate_text, closing_pos + 1), '}') > 0
+                    ),
+                    valid_document AS (
+                        SELECT
+                            substr(candidate_text, 1, closing_pos) AS json_document
+                        FROM closing_positions
+                        WHERE json_valid(substr(candidate_text, 1, closing_pos))
+                        ORDER BY priority, closing_pos
+                        LIMIT 1
+                    ),
+                    document AS (
+                        SELECT valid_document.json_document, latest.ts_nanos
+                        FROM latest
+                        LEFT JOIN valid_document ON 1 = 1
+                    ),
+                    usage_document AS (
+                        SELECT
+                            CASE
+                                WHEN json_type(json_document, '$.usage') = 'object'
+                                THEN json_extract(json_document, '$.usage')
+                                WHEN json_type(json_document, '$') = 'object'
+                                THEN json_document
+                            END AS usage_json,
+                            ts_nanos
+                        FROM document
+                    ),
+                    extracted AS (
+                        SELECT
+                            json_extract(usage_json, '$.input_tokens') AS input_tokens,
+                            json_extract(usage_json, '$.output_tokens') AS output_tokens,
+                            json_extract(usage_json, '$.total_tokens') AS total_tokens,
+                            CASE
+                                WHEN json_type(usage_json, '$.cached_tokens') IS NOT NULL
+                                THEN json_extract(usage_json, '$.cached_tokens')
+                                ELSE json_extract(usage_json, '$.input_tokens_details.cached_tokens')
+                            END AS cached_tokens,
+                            CASE
+                                WHEN json_type(usage_json, '$.reasoning_tokens') IS NOT NULL
+                                THEN json_extract(usage_json, '$.reasoning_tokens')
+                                ELSE json_extract(usage_json, '$.output_tokens_details.reasoning_tokens')
+                            END AS reasoning_tokens,
+                            ts_nanos,
+                            json_type(usage_json, '$.input_tokens') AS input_type,
+                            json_type(usage_json, '$.output_tokens') AS output_type,
+                            json_type(usage_json, '$.total_tokens') AS total_type,
+                            CASE
+                                WHEN json_type(usage_json, '$.cached_tokens') IS NOT NULL
+                                THEN json_type(usage_json, '$.cached_tokens')
+                                ELSE json_type(usage_json, '$.input_tokens_details.cached_tokens')
+                            END AS cached_type,
+                            CASE
+                                WHEN json_type(usage_json, '$.reasoning_tokens') IS NOT NULL
+                                THEN json_type(usage_json, '$.reasoning_tokens')
+                                ELSE json_type(usage_json, '$.output_tokens_details.reasoning_tokens')
+                            END AS reasoning_type
+                        FROM usage_document
+                    )
+                    SELECT
+                        input_tokens,
+                        output_tokens,
+                        total_tokens,
+                        cached_tokens,
+                        reasoning_tokens,
+                        ts_nanos,
+                        CASE
+                            WHEN input_type = 'integer'
+                             AND output_type = 'integer'
+                             AND total_type = 'integer'
+                             AND cached_type = 'integer'
+                             AND reasoning_type = 'integer'
+                            THEN 1 ELSE 0
+                        END AS usage_valid
+                    FROM extracted
                     """
                 ).fetchone(), False
         except (OSError, sqlite3.Error):
@@ -160,46 +273,12 @@ def _event_time_from_nanos(value: object) -> datetime | None:
         return None
 
 
-def _extract_usage_values(body: str) -> dict[str, int] | None:
-    marker = _USAGE_OBJECT_PATTERN.search(body)
-    starts = [marker.start(1)] if marker is not None else []
-    first_field = body.find(f'"{USAGE_FIELDS[0]}"')
-    if first_field >= 0:
-        nearest_object = body.rfind("{", 0, first_field)
-        if nearest_object >= 0 and nearest_object not in starts:
-            starts.append(nearest_object)
-    decoder = json.JSONDecoder()
-    for start in starts:
-        try:
-            candidate, _ = decoder.raw_decode(body[start:])
-        except (json.JSONDecodeError, TypeError, ValueError):
-            continue
-        values = _usage_values_from_mapping(candidate)
-        if values is not None:
-            return values
-    return None
-
-
-def _usage_values_from_mapping(candidate: object) -> dict[str, int] | None:
-    if not isinstance(candidate, dict):
+def _usage_values_from_row(row: tuple[object, ...]) -> dict[str, int] | None:
+    if len(row) != 7 or row[6] != 1:
         return None
-    input_details = candidate.get("input_tokens_details")
-    output_details = candidate.get("output_tokens_details")
-    raw_values = {
-        "input_tokens": candidate.get("input_tokens"),
-        "output_tokens": candidate.get("output_tokens"),
-        "total_tokens": candidate.get("total_tokens"),
-        "cached_tokens": candidate.get("cached_tokens")
-        if "cached_tokens" in candidate
-        else input_details.get("cached_tokens") if isinstance(input_details, dict) else None,
-        "reasoning_tokens": candidate.get("reasoning_tokens")
-        if "reasoning_tokens" in candidate
-        else output_details.get("reasoning_tokens") if isinstance(output_details, dict) else None,
-    }
     values: dict[str, int] = {}
-    for field in USAGE_FIELDS:
-        value = raw_values[field]
-        if isinstance(value, bool) or not isinstance(value, int):
+    for field, value in zip(USAGE_FIELDS, row[:5]):
+        if type(value) is not int:
             return None
         if value < 0:
             return None
