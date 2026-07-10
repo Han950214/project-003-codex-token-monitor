@@ -118,81 +118,69 @@ def _fetch_latest_completed_response(database: Path) -> tuple[tuple[object, ...]
                 connection.execute("PRAGMA query_only=ON")
                 return connection.execute(
                     """
-                    WITH RECURSIVE latest AS (
-                        SELECT feedback_log_body AS internal_body, ts_nanos
+                    WITH normalized AS (
+                        SELECT
+                            trim(feedback_log_body) AS full_text,
+                            ltrim(feedback_log_body) AS left_trimmed_text,
+                            ts_nanos
                         FROM logs
-                        WHERE feedback_log_body LIKE '%response.completed%'
+                    ),
+                    validated AS (
+                        SELECT
+                            CASE WHEN json_valid(full_text) THEN full_text END AS full_json,
+                            CASE
+                                WHEN substr(left_trimmed_text, 1, length('SSE event: ')) = 'SSE event: '
+                                THEN CASE
+                                    WHEN json_valid(trim(substr(left_trimmed_text, length('SSE event: ') + 1)))
+                                    THEN trim(substr(left_trimmed_text, length('SSE event: ') + 1))
+                                END
+                            END AS anchored_json,
+                            ts_nanos
+                        FROM normalized
+                    ),
+                    structural_events AS (
+                        SELECT
+                            CASE
+                                WHEN json_type(full_json, '$') = 'object'
+                                 AND json_extract(full_json, '$.type') = 'response.completed'
+                                THEN full_json
+                                WHEN json_type(anchored_json, '$') = 'object'
+                                 AND json_extract(anchored_json, '$.type') = 'response.completed'
+                                THEN anchored_json
+                            END AS event_json,
+                            CASE
+                                WHEN json_type(full_json, '$') = 'object'
+                                 AND json_extract(full_json, '$.type') = 'response.completed'
+                                THEN 1
+                                WHEN json_type(anchored_json, '$') = 'object'
+                                 AND json_extract(anchored_json, '$.type') = 'response.completed'
+                                THEN 2
+                            END AS event_format,
+                            ts_nanos
+                        FROM validated
+                    ),
+                    latest AS (
+                        SELECT
+                            event_json,
+                            event_format,
+                            ts_nanos
+                        FROM structural_events
+                        WHERE event_json IS NOT NULL
                         ORDER BY ts_nanos DESC
                         LIMIT 1
-                    ),
-                    candidate_starts AS (
-                        SELECT
-                            instr(internal_body, '{') AS first_object_start,
-                            CASE
-                                WHEN instr(internal_body, '"usage"') > 0
-                                THEN instr(internal_body, '"usage"')
-                                WHEN instr(internal_body, 'usage=') > 0
-                                THEN instr(internal_body, 'usage=')
-                                ELSE 0
-                            END AS usage_marker_start,
-                            internal_body,
-                            ts_nanos
-                        FROM latest
-                    ),
-                    candidates(priority, candidate_text, ts_nanos) AS (
-                        SELECT
-                            1,
-                            substr(
-                                internal_body,
-                                usage_marker_start
-                                + instr(substr(internal_body, usage_marker_start), '{')
-                                - 1
-                            ),
-                            ts_nanos
-                        FROM candidate_starts
-                        WHERE usage_marker_start > 0
-                          AND instr(substr(internal_body, usage_marker_start), '{') > 0
-                        UNION ALL
-                        SELECT 2, substr(internal_body, first_object_start), ts_nanos
-                        FROM candidate_starts
-                        WHERE first_object_start > 0
-                    ),
-                    closing_positions(priority, candidate_text, ts_nanos, closing_pos) AS (
-                        SELECT priority, candidate_text, ts_nanos, instr(candidate_text, '}')
-                        FROM candidates
-                        WHERE instr(candidate_text, '}') > 0
-                        UNION ALL
-                        SELECT
-                            priority,
-                            candidate_text,
-                            ts_nanos,
-                            closing_pos + instr(substr(candidate_text, closing_pos + 1), '}')
-                        FROM closing_positions
-                        WHERE instr(substr(candidate_text, closing_pos + 1), '}') > 0
-                    ),
-                    valid_document AS (
-                        SELECT
-                            substr(candidate_text, 1, closing_pos) AS json_document
-                        FROM closing_positions
-                        WHERE json_valid(substr(candidate_text, 1, closing_pos))
-                        ORDER BY priority, closing_pos
-                        LIMIT 1
-                    ),
-                    document AS (
-                        SELECT valid_document.json_document, latest.ts_nanos
-                        FROM latest
-                        LEFT JOIN valid_document ON 1 = 1
                     ),
                     usage_document AS (
                         SELECT
                             CASE
-                                WHEN json_type(json_document, '$.usage') = 'object'
-                                THEN json_extract(json_document, '$.usage')
-                                WHEN json_type(json_document, '$') = 'object'
-                                THEN json_document
+                                WHEN event_format = 1
+                                 AND json_type(event_json, '$.usage') = 'object'
+                                THEN json_extract(event_json, '$.usage')
+                                WHEN event_format = 2
+                                 AND json_type(event_json, '$.response.usage') = 'object'
+                                THEN json_extract(event_json, '$.response.usage')
                             END AS usage_json,
                             ts_nanos
-                        FROM document
+                        FROM latest
                     ),
                     extracted AS (
                         SELECT

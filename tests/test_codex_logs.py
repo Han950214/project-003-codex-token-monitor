@@ -84,13 +84,13 @@ class CodexLogsTests(unittest.TestCase):
             (10, 20, 35, 7, 5),
         )
 
-    def test_response_completed_like_does_not_require_quotes(self):
+    def test_reads_confirmed_sse_event_format(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self._database(directory)
             self._insert_body(
                 path,
                 1,
-                'event=response.completed usage={"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}',
+                '  SSE event: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}}}  ',
             )
             usage = load_latest_completed_response_usage(path)
         self.assertIsNotNone(usage)
@@ -155,10 +155,10 @@ class CodexLogsTests(unittest.TestCase):
                 path,
                 1,
                 (
-                    'PROMPT_SECRET_BEFORE event=response.completed usage={'
-                    '"content":"CONTENT_SECRET_ADJACENT","input_tokens":10,'
+                    'SSE event: {"type":"response.completed","prompt":"PROMPT_SECRET_BEFORE",'
+                    '"content":"CONTENT_SECRET_ADJACENT","response":{"usage":{"input_tokens":10,'
                     '"output_tokens":20,"total_tokens":30,"cached_tokens":4,'
-                    '"reasoning_tokens":2} OUTPUT_SECRET_AFTER'
+                    '"reasoning_tokens":2}},"output":"OUTPUT_SECRET_AFTER"}'
                 ),
             )
             with patch(
@@ -191,13 +191,81 @@ class CodexLogsTests(unittest.TestCase):
                 all("unknown / source: unknown" in value for _, value in build_latest_response_values(result))
             )
 
-    def test_invalid_usage_json_has_parse_failed_status(self):
+    def test_invalid_usage_object_has_parse_failed_status(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self._database(directory)
             self._insert_body(
                 path,
                 1,
-                'event=response.completed usage={"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0',
+                '{"type":"response.completed","usage":"invalid usage object"}',
+            )
+            result = load_latest_completed_response_result(path)
+        self.assertEqual(result.status, LogsAdapterStatus.PARSE_FAILED)
+
+    def test_content_collision_is_not_a_structural_completed_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            fake_usage = '{"input_tokens":91,"output_tokens":92,"total_tokens":183,"cached_tokens":9,"reasoning_tokens":8}'
+            self._insert_body(
+                path,
+                1,
+                '{"type":"message.created","content":"response.completed ' + fake_usage.replace('"', '\\"') + '"}',
+            )
+            result = load_latest_completed_response_result(path)
+        self.assertEqual(result.status, LogsAdapterStatus.NO_RESPONSE_COMPLETED)
+
+    def test_unanchored_plain_text_collision_is_not_connected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_body(
+                path,
+                1,
+                'prompt prefix event=response.completed usage={"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}',
+            )
+            result = load_latest_completed_response_result(path)
+        self.assertEqual(result.status, LogsAdapterStatus.NO_RESPONSE_COMPLETED)
+
+    def test_arbitrary_prefix_before_sse_anchor_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_body(
+                path,
+                1,
+                'content prefix SSE event: {"type":"response.completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}}',
+            )
+            result = load_latest_completed_response_result(path)
+        self.assertEqual(result.status, LogsAdapterStatus.NO_RESPONSE_COMPLETED)
+
+    def test_root_usage_wins_over_content_fake_usage_and_json_syntax_collisions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_body(
+                path,
+                1,
+                (
+                    '{"type":"response.completed",'
+                    '"content":"fake usage={\\"input_tokens\\":999} brace } quote \\\"",'
+                    '"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,'
+                    '"cached_tokens":4,"reasoning_tokens":2}}'
+                ),
+            )
+            result = load_latest_completed_response_result(path)
+        self.assertEqual(result.status, LogsAdapterStatus.CONNECTED)
+        self.assertEqual(result.usage.input_tokens, 10)
+        self.assertEqual(result.usage.cached_tokens, 4)
+
+    def test_latest_structural_event_parse_failure_does_not_fall_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            self._insert_body(
+                path,
+                1,
+                '{"type":"response.completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cached_tokens":0,"reasoning_tokens":0}}',
+            )
+            self._insert_body(
+                path,
+                2,
+                '{"type":"response.completed","usage":{"input_tokens":9}}',
             )
             result = load_latest_completed_response_result(path)
         self.assertEqual(result.status, LogsAdapterStatus.PARSE_FAILED)
