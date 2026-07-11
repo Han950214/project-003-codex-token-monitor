@@ -26,7 +26,7 @@ Codex Token Monitor 是 Windows 本地 token usage 监控工具：现代、克�
 | Fallback | system Tk default |
 | Spacing grid | 4px |
 | Common spacing | 4 / 8 / 12 / 16 / 24 |
-| Visual corner radius | 4–8px |
+| Visual corner radius | 8–12px |
 | Border | 1px low-contrast border |
 | Shadow | none or minimal |
 | Gradient | prohibited |

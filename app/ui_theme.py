@@ -24,6 +24,8 @@ class Colors:
     raised_surface: str = "#F8FAFD"
     border: str = "#DDE4EE"
     border_strong: str = "#C8D3E1"
+    scrollbar_thumb: str = "#91A4BE"
+    scrollbar_thumb_hover: str = "#6F849F"
     primary_text: str = "#152033"
     secondary_text: str = "#667085"
     muted_text: str = "#8A96A8"

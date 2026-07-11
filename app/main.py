@@ -64,6 +64,17 @@ MANUAL_RUN_COLUMN_KEYS = (
     "column_title", "column_model", "column_mode", "column_input",
     "column_output", "column_cached", "column_total", "column_ended_at",
 )
+MANUAL_FORM_FIELDS = (
+    "project", "title", "session_id", "model",
+    "mode", "input_tokens", "output_tokens", "cached_tokens",
+)
+
+
+def manual_form_position(index: int) -> tuple[int, int]:
+    """Return the two-field-row position for a manual Run form field."""
+    if not 0 <= index < len(MANUAL_FORM_FIELDS):
+        raise IndexError("manual form field index is out of range")
+    return divmod(index, 2)
 
 
 class Dashboard:
@@ -295,39 +306,48 @@ class Dashboard:
             self.pages, fg_color=COLORS.surface, corner_radius=CARD_RADIUS,
             border_width=1, border_color=COLORS.border,
         )
-        for column in range(8):
-            self.input_page.grid_columnconfigure(column, weight=1 if column % 2 else 0)
+        self.input_page.grid_columnconfigure(0, weight=1)
+        self.input_page.grid_rowconfigure(0, weight=1)
+        self.manual_input_scroll = ctk.CTkScrollableFrame(
+            self.input_page, fg_color="transparent", corner_radius=0,
+            scrollbar_fg_color=COLORS.raised_surface,
+            scrollbar_button_color=COLORS.scrollbar_thumb,
+            scrollbar_button_hover_color=COLORS.scrollbar_thumb_hover,
+        )
+        self.manual_input_scroll.grid(row=0, column=0, sticky="nsew", padx=SPACE_2, pady=SPACE_2)
+        form = self.manual_input_scroll
+        for column in (1, 3):
+            form.grid_columnconfigure(column, weight=1)
         defaults = {
             "project": "project_003_codex_token_monitor", "title": "Manual Codex run",
             "session_id": "default-session", "model": "local-estimate-demo", "mode": "manual",
             "input_tokens": "0", "output_tokens": "0", "cached_tokens": "0",
         }
-        field_keys = ("project", "title", "session_id", "model", "mode", "input_tokens", "output_tokens", "cached_tokens")
-        for index, key in enumerate(field_keys):
-            row, group = divmod(index, 4)
+        for index, key in enumerate(MANUAL_FORM_FIELDS):
+            row, group = manual_form_position(index)
             label_column = group * 2
-            label = ctk.CTkLabel(self.input_page, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
-            label.grid(row=row, column=label_column, sticky="w", padx=(SPACE_3 if group == 0 else SPACE_2, SPACE_1), pady=(SPACE_2, SPACE_1))
+            label = ctk.CTkLabel(form, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
+            label.grid(row=row, column=label_column, sticky="w", padx=(SPACE_3 if group == 0 else SPACE_4, SPACE_1), pady=(SPACE_2, SPACE_1))
             variable = tk.StringVar(value=defaults[key])
             entry = ctk.CTkEntry(
-                self.input_page, textvariable=variable, width=100, height=30, corner_radius=CONTROL_RADIUS,
+                form, textvariable=variable, height=32, corner_radius=CONTROL_RADIUS,
                 border_width=1, border_color=COLORS.border, fg_color=COLORS.raised_surface,
                 text_color=COLORS.primary_text,
             )
-            entry.grid(row=row, column=label_column + 1, sticky="ew", padx=(0, SPACE_3 if group == 3 else SPACE_2), pady=(SPACE_2, SPACE_1))
+            entry.grid(row=row, column=label_column + 1, sticky="ew", padx=(0, SPACE_3), pady=(SPACE_2, SPACE_1))
             self.form_labels[key] = label
             self.fields[key] = variable
 
-        self.form_labels["started"] = ctk.CTkLabel(self.input_page, text="", font=FONT_SMALL, text_color=COLORS.secondary_text)
-        self.form_labels["started"].grid(row=2, column=0, sticky="w", padx=(SPACE_3, SPACE_1), pady=SPACE_1)
-        ctk.CTkLabel(self.input_page, textvariable=self.started_at_var, font=FONT_SMALL, text_color=COLORS.primary_text).grid(row=2, column=1, columnspan=2, sticky="w")
-        self.form_labels["ended"] = ctk.CTkLabel(self.input_page, text="", font=FONT_SMALL, text_color=COLORS.secondary_text)
-        self.form_labels["ended"].grid(row=2, column=4, sticky="w", padx=(SPACE_2, SPACE_1), pady=SPACE_1)
-        ctk.CTkLabel(self.input_page, textvariable=self.ended_at_var, font=FONT_SMALL, text_color=COLORS.primary_text).grid(row=2, column=5, columnspan=3, sticky="w")
+        self.form_labels["started"] = ctk.CTkLabel(form, text="", font=FONT_SMALL, text_color=COLORS.secondary_text)
+        self.form_labels["started"].grid(row=4, column=0, sticky="w", padx=(SPACE_3, SPACE_1), pady=SPACE_1)
+        ctk.CTkLabel(form, textvariable=self.started_at_var, font=FONT_SMALL, text_color=COLORS.primary_text).grid(row=4, column=1, sticky="w")
+        self.form_labels["ended"] = ctk.CTkLabel(form, text="", font=FONT_SMALL, text_color=COLORS.secondary_text)
+        self.form_labels["ended"].grid(row=4, column=2, sticky="w", padx=(SPACE_4, SPACE_1), pady=SPACE_1)
+        ctk.CTkLabel(form, textvariable=self.ended_at_var, font=FONT_SMALL, text_color=COLORS.primary_text).grid(row=4, column=3, sticky="w")
 
         summaries = ("prompt_summary", "output_summary", "note")
-        summary_frame = ctk.CTkFrame(self.input_page, fg_color="transparent", corner_radius=0)
-        summary_frame.grid(row=3, column=0, columnspan=8, sticky="nsew", padx=SPACE_3, pady=(SPACE_1, 0))
+        summary_frame = ctk.CTkFrame(form, fg_color="transparent", corner_radius=0)
+        summary_frame.grid(row=5, column=0, columnspan=4, sticky="nsew", padx=SPACE_3, pady=(SPACE_2, 0))
         for column, key in enumerate(summaries):
             summary_frame.grid_columnconfigure(column, weight=1, uniform="summary")
             cell = ctk.CTkFrame(summary_frame, fg_color="transparent", corner_radius=0)
@@ -344,8 +364,8 @@ class Dashboard:
             self.form_labels[key] = label
             self.text_fields[key] = text
 
-        controls = ctk.CTkFrame(self.input_page, fg_color="transparent", corner_radius=0)
-        controls.grid(row=4, column=0, columnspan=8, sticky="ew", padx=SPACE_3, pady=(SPACE_2, SPACE_2))
+        controls = ctk.CTkFrame(form, fg_color="transparent", corner_radius=0)
+        controls.grid(row=6, column=0, columnspan=4, sticky="ew", padx=SPACE_3, pady=(SPACE_3, SPACE_3))
         controls.grid_columnconfigure(3, weight=1)
         self.start_button = ctk.CTkButton(controls, text="", command=self.start_run, width=100, height=32, corner_radius=CONTROL_RADIUS, fg_color=COLORS.teal, hover_color="#1E7679")
         self.start_button.grid(row=0, column=0)
