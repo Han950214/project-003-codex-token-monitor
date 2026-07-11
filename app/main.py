@@ -240,7 +240,7 @@ class Dashboard:
         )
         panel.grid(row=3, column=0, sticky="ew")
         icons = ("◆", "▤", "▣", "⛓", "◇", "◷")
-        labels = ("Session Total", "Usage Source", "Session Source", "Logs Adapter", "State Adapter", "Freshness / Time")
+        labels = ("Rollout File", "Thread", "Instruction Status", "Model Calls", "Instruction Elapsed", "State/Rollout")
         for column, (icon, label) in enumerate(zip(icons, labels)):
             panel.grid_columnconfigure(column, weight=1, uniform="source")
             cell = ctk.CTkFrame(panel, fg_color="transparent", corner_radius=0)
@@ -489,7 +489,7 @@ class Dashboard:
         foreground, background = TONE_COLORS[presentation.status_tone.value]
         self.data_status_var.set(localize_status(presentation.data_status, self.language))
         self.status_pill.configure(text_color=foreground, fg_color=background)
-        self.status_message_var.set(localize_status_message(presentation.data_status, self.language))
+        self.status_message_var.set(localize_presenter_text(presentation.status_message, self.language))
         self.last_event_var.set(presentation.last_event)
         self.last_refresh_var.set(presentation.last_refresh)
         self.auto_switch.configure(text=localize_auto_refresh(bool(self.auto_refresh_var.get()), self.language, DEFAULT_AUTO_REFRESH_SECONDS))
@@ -559,7 +559,7 @@ def smoke() -> None:
     _safe_print(f"session_total={presentation.telemetry_session_total}")
     _safe_print(f"current_total={presentation.telemetry_current_total}")
     _safe_print("view=CustomTkinter; language=zh-CN default with runtime switch")
-    _safe_print(f"logs_adapter={snapshot.logs.status.value}")
+    _safe_print(f"rollout_available={snapshot.rollout.available}")
 
 
 def _safe_print(message: str) -> None:

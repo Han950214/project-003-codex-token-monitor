@@ -5,7 +5,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from app.codex_state import load_latest_thread_total
+from app.codex_state import load_latest_thread_total, load_thread_total
 
 
 class CodexStateTests(unittest.TestCase):
@@ -72,6 +72,16 @@ class CodexStateTests(unittest.TestCase):
                 connection.commit()
             result = load_latest_thread_total(path)
         self.assertIsNone(result)
+
+    def test_reads_requested_thread_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            with closing(sqlite3.connect(path)) as connection:
+                connection.executemany("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)", [("wanted", 1, 1, "gpt", "openai", 99), ("newer", 2, 3, "gpt", "openai", 500)])
+                connection.commit()
+            result = load_thread_total("wanted", path)
+        self.assertEqual(result.thread_id, "wanted")
+        self.assertEqual(result.total_tokens, 99)
 
     def test_preview_is_not_read(self):
         with tempfile.TemporaryDirectory() as directory:

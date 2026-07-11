@@ -52,6 +52,23 @@ def load_latest_thread_total(path: Path | None = None) -> CodexThreadTotal | Non
     )
 
 
+def load_thread_total(thread_id: str, path: Path | None = None) -> CodexThreadTotal | None:
+    """Load only the total for the rollout's exact thread identifier."""
+    database = path or configured_state_path()
+    if not thread_id or not database.is_file():
+        return None
+    row = _fetch_thread(database, thread_id)
+    if row is None:
+        return None
+    try:
+        total_tokens = int(row[5])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if total_tokens < 0:
+        return None
+    return CodexThreadTotal(str(row[0]), _optional_int(row[1]), _optional_int(row[2]), None if row[3] is None else str(row[3]), None if row[4] is None else str(row[4]), total_tokens)
+
+
 def _fetch_latest_thread(database: Path) -> tuple[object, ...] | None:
     uri = database.resolve().as_uri() + "?mode=ro"
     for args, kwargs in [
@@ -69,6 +86,26 @@ def _fetch_latest_thread(database: Path) -> tuple[object, ...] | None:
                     ORDER BY updated_at DESC
                     LIMIT 1
                     """
+                ).fetchone()
+        except (OSError, sqlite3.Error):
+            continue
+    return None
+
+
+def _fetch_thread(database: Path, thread_id: str) -> tuple[object, ...] | None:
+    uri = database.resolve().as_uri() + "?mode=ro"
+    for args, kwargs in [((uri,), {"uri": True}), ((str(database),), {})]:
+        try:
+            with closing(sqlite3.connect(*args, **kwargs)) as connection:
+                connection.execute("PRAGMA query_only=ON")
+                return connection.execute(
+                    """
+                    SELECT id, created_at, updated_at, model, model_provider, tokens_used
+                    FROM threads
+                    WHERE id = ? AND tokens_used IS NOT NULL
+                    LIMIT 1
+                    """,
+                    (thread_id,),
                 ).fetchone()
         except (OSError, sqlite3.Error):
             continue

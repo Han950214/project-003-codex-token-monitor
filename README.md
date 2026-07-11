@@ -61,6 +61,8 @@ dist\CodexTokenMonitor\CodexTokenMonitor.exe
 
 ## Current Status
 
+Phase 2.7-A reads privacy-safe numeric metadata from the active Codex rollout and shows exact per-instruction usage only after cumulative-token reconciliation. `logs_2.sqlite` is retained as a legacy adapter but is no longer the Dashboard current-usage source; see [Rollout instruction usage](docs/rollout-instruction-usage.md).
+
 Phase 2-MVP adds manual local run records, JSON persistence, session summaries, and Markdown report export. It saves prompt/output summaries and manual token counts only by default; do not store credentials or private prompt/output full text.
 
 Phase 2.4-B presents the latest `response.completed` input, output, total, cached, and reasoning token values independently in the Dashboard. It also shows a cache hit estimate derived from real cached/input values, the logs adapter status, and either the reliable event time (`Latest response at`) or the successful refresh time (`Refreshed at`). Missing values are shown as `unknown`, never invented as zero.

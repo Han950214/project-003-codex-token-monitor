@@ -1,7 +1,5 @@
 import unittest
-from datetime import datetime, timezone
-
-from app.codex_logs import CodexLogsResult, LogsAdapterStatus
+from app.codex_rollout import RolloutUsageResult
 from app.dashboard import DashboardSnapshot
 from app.metrics import PricingConfig, SessionSummary
 from app.telemetry_bar import (
@@ -29,14 +27,7 @@ class TelemetryBarTests(unittest.TestCase):
 
     def test_no_data_telemetry_uses_dashes_not_zero(self):
         summary = SessionSummary(0, 0, 0, 0, 0, 0, 0, 0, 0)
-        logs = CodexLogsResult(
-            None,
-            "unknown",
-            LogsAdapterStatus.NO_RESPONSE_COMPLETED,
-            None,
-            datetime(2026, 7, 11, tzinfo=timezone.utc),
-        )
-        presentation = present_dashboard(DashboardSnapshot([], summary, logs, None), False)
+        presentation = present_dashboard(DashboardSnapshot([], summary, RolloutUsageResult(None, None, None, False), None, False), False)
         values = build_telemetry_values(presentation, "zh-CN")
         self.assertEqual(tuple(label for label, _ in values), telemetry_field_labels("zh-CN"))
         self.assertEqual(values[1][1], "—")
