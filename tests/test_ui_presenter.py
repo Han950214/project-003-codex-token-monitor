@@ -22,7 +22,7 @@ class UiPresenterTests(unittest.TestCase):
         self.assertEqual(view.latest_usage[5].value, "25.0%")
         self.assertEqual(view.telemetry_current_total, "120")
         self.assertEqual(view.telemetry_session_total, "999")
-        self.assertEqual(tuple(item.label for item in view.source_details), ("Rollout File", "Thread", "Instruction Status", "Model Calls", "Instruction Elapsed", "State/Rollout"))
+        self.assertEqual(tuple(item.label for item in view.source_details), ("Rollout File", "Thread", "Instruction Status", "Model Calls", "Instruction Elapsed", "Thread Total Reconciliation"))
 
     def test_unavailable_rollout_uses_dashes_without_manual_fallback(self):
         view = present_dashboard(snapshot(), False)
@@ -51,6 +51,14 @@ class UiPresenterTests(unittest.TestCase):
         self.assertNotEqual(view.last_event, view.last_refresh)
         self.assertNotEqual(view.last_event, "—")
         self.assertNotEqual(view.last_refresh, "—")
+
+    def test_completed_incomplete_is_not_rollout_unavailable(self):
+        instruction = InstructionUsage("turn", "incomplete", TokenUsage(3, 1, 2, 1, 5), 1, 1234, 0, 0, 1, False, False)
+        view = present_dashboard(snapshot(instruction), False)
+        self.assertEqual(view.data_status, DataStatus.INCOMPLETE)
+        self.assertNotIn("unavailable", view.status_message.lower())
+        self.assertEqual(view.latest_usage[2].value, "5")
+        self.assertEqual(next(item for item in view.source_details if item.label == "Instruction Elapsed").value, "1.2s")
 
 
 if __name__ == "__main__":

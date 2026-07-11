@@ -39,6 +39,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "model_calls": "模型调用数",
         "instruction_elapsed": "指令耗时",
         "state_rollout": "State/Rollout 对账",
+        "thread_total_reconciliation": "Thread 总计对账",
         "rollout_exact": "已从 Codex Rollout 获取精确指令 usage。",
         "rollout_in_progress": "指令进行中，已验证数值仍可能增长。",
         "rollout_unavailable": "Rollout 指令 usage 不可用。",
@@ -160,6 +161,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "model_calls": "Model Calls",
         "instruction_elapsed": "Instruction Elapsed",
         "state_rollout": "State/Rollout",
+        "thread_total_reconciliation": "Thread Total Reconciliation",
         "rollout_exact": "Exact instruction usage is available from the Codex rollout.",
         "rollout_in_progress": "Instruction is in progress; verified values can still increase.",
         "rollout_unavailable": "Rollout instruction usage is unavailable.",
@@ -315,6 +317,7 @@ PRESENTER_LABEL_KEYS = {
     "Model Calls": "model_calls",
     "Instruction Elapsed": "instruction_elapsed",
     "State/Rollout": "state_rollout",
+    "Thread Total Reconciliation": "thread_total_reconciliation",
 }
 
 PRESENTER_TEXT_KEYS = {

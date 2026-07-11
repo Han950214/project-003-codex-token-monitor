@@ -71,7 +71,7 @@ def present_dashboard(snapshot: DashboardSnapshot, auto_refresh_enabled: bool, r
     elif instruction.exact:
         status, tone, message = DataStatus.FRESH_REAL, UiTone.FRESH, "Exact instruction usage is available from the Codex rollout."
     else:
-        status, tone, message = DataStatus.NO_DATA, UiTone.UNKNOWN, "Rollout instruction usage is incomplete."
+        status, tone, message = DataStatus.INCOMPLETE, UiTone.ERROR, "Instruction usage is incomplete; only verified calls are shown."
     latest = _latest_metrics(instruction)
     current, cache = _telemetry_current(instruction)
     session_total = f"{snapshot.state_total.total_tokens:,}" if snapshot.state_total else "—"
@@ -84,7 +84,7 @@ def present_dashboard(snapshot: DashboardSnapshot, auto_refresh_enabled: bool, r
             SourceDisplay("Instruction Status", instruction.status if instruction else "unavailable", tone),
             SourceDisplay("Model Calls", str(instruction.model_calls) if instruction else "—", tone),
             SourceDisplay("Instruction Elapsed", _duration(instruction.duration_ms) if instruction else "—", tone),
-            SourceDisplay("State/Rollout", snapshot.state_reconciliation, _reconciliation_tone(snapshot.state_reconciliation)),
+            SourceDisplay("Thread Total Reconciliation", snapshot.state_reconciliation, _reconciliation_tone(snapshot.state_reconciliation)),
         ),
         _format_time(snapshot.rollout.observed_at), _format_time(snapshot.rollout.refreshed_at), format_auto_refresh(auto_refresh_enabled), tuple(manual_run_row(run) for run in snapshot.runs), current, cache, session_total,
     )

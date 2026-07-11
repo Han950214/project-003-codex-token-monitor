@@ -51,7 +51,7 @@ class DashboardViewModel:
 
 def instruction_usage(snapshot: DashboardSnapshot) -> InstructionUsage | None:
     instruction = snapshot.rollout.instruction
-    return instruction if instruction and (instruction.exact or instruction.in_progress) else None
+    return instruction
 
 
 def _state_reconciliation(rollout: RolloutUsageResult, state_total: CodexThreadTotal | None) -> str:

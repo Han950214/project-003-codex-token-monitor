@@ -240,7 +240,7 @@ class Dashboard:
         )
         panel.grid(row=3, column=0, sticky="ew")
         icons = ("◆", "▤", "▣", "⛓", "◇", "◷")
-        labels = ("Rollout File", "Thread", "Instruction Status", "Model Calls", "Instruction Elapsed", "State/Rollout")
+        labels = ("Rollout File", "Thread", "Instruction Status", "Model Calls", "Instruction Elapsed", "Thread Total Reconciliation")
         for column, (icon, label) in enumerate(zip(icons, labels)):
             panel.grid_columnconfigure(column, weight=1, uniform="source")
             cell = ctk.CTkFrame(panel, fg_color="transparent", corner_radius=0)

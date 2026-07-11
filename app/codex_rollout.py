@@ -151,24 +151,39 @@ def _instruction_from_events(events: list[tuple[str, dict[str, Any], datetime | 
     cumulative: TokenUsage | None = None
     epoch = 0
     turns: dict[str, dict[str, Any]] = {}
-    last_turn: str | None = None
+    current_turn: str | None = None
     for name, payload, when in events:
         turn_id = _string(payload.get("turn_id"))
         if name == "task_started" and turn_id:
-            turns[turn_id] = {"started": True, "completed": False, "baseline": cumulative, "end": None, "calls": [], "duplicates": 0, "rejected": 0, "unreconciled": 0, "when": when, "duration": None}
-            last_turn = turn_id
+            # A new start closes the preceding turn's association. Its end was
+            # continuously updated by token snapshots, including post-complete
+            # snapshots that arrived before this boundary.
+            turns[turn_id] = {
+                "completed": False,
+                "baseline": cumulative,
+                "baseline_epoch": epoch,
+                "end": None,
+                "calls": [],
+                "duplicates": 0,
+                "rejected": 0,
+                "unreconciled": 0,
+                "when": when,
+                "duration": None,
+            }
+            current_turn = turn_id
             continue
         if name == "task_complete" and turn_id in turns:
             turn = turns[turn_id]
             turn["completed"] = True
-            turn["end"] = cumulative
             duration = payload.get("duration_ms")
             turn["duration"] = duration if _integer(duration) is not None and _integer(duration) >= 0 else _duration_from_times(turn["when"], when)
-            last_turn = turn_id
             continue
         if name != "token_count":
             continue
-        active_id = turn_id if turn_id in turns else last_turn
+        # An explicit event turn wins. Otherwise token snapshots continue to
+        # belong to the most recently started turn after task_complete, until
+        # the next task_started or EOF closes that association.
+        active_id = turn_id if turn_id in turns else current_turn
         current = _usage_from_payload(payload)
         if current is None:
             if active_id in turns:
@@ -185,9 +200,13 @@ def _instruction_from_events(events: list[tuple[str, dict[str, Any], datetime | 
             if total.values() == cumulative.values():
                 if active_id in turns:
                     turns[active_id]["duplicates"] += 1
+                    turns[active_id]["end"] = total
                 continue
             if any(value < 0 for value in delta.values()):
                 epoch += 1
+                if active_id in turns:
+                    turns[active_id]["unreconciled"] += 1
+                    turns[active_id]["end"] = total
                 cumulative = total
                 continue
             if delta == current:
@@ -195,16 +214,31 @@ def _instruction_from_events(events: list[tuple[str, dict[str, Any], datetime | 
                     turns[active_id]["calls"].append(ModelCallUsage(current, epoch))
             elif active_id in turns:
                 turns[active_id]["unreconciled"] += 1
+            if active_id in turns:
+                turns[active_id]["end"] = total
+        elif active_id in turns:
+            turns[active_id]["end"] = total
         cumulative = total
     if not turns:
         return None
     candidates = list(turns.items())
     complete = [(turn_id, turn) for turn_id, turn in candidates if turn["completed"]]
+    # Keep an active instruction preferred; otherwise retain the most recent
+    # completed instruction, even when it is incomplete, instead of falling
+    # through to an unavailable Rollout state.
     turn_id, turn = (next(((key, value) for key, value in reversed(candidates) if not value["completed"]), None) or (complete[-1] if complete else candidates[-1]))
     calls = tuple(turn["calls"])
     usage = _sum_usage(call.usage for call in calls) if calls else None
-    baseline, end = turn["baseline"], turn["end"] if turn["completed"] else cumulative
-    exact = bool(turn["completed"] and baseline is not None and end is not None and not turn["unreconciled"] and usage is not None and usage == end.minus(baseline))
+    baseline, end = turn["baseline"], turn["end"]
+    exact = bool(
+        turn["completed"]
+        and baseline is not None
+        and end is not None
+        and turn["baseline_epoch"] == (calls[-1].epoch if calls else turn["baseline_epoch"])
+        and not turn["unreconciled"]
+        and usage is not None
+        and usage == end.minus(baseline)
+    )
     status = "exact" if exact else ("in_progress" if not turn["completed"] else "incomplete")
     return InstructionUsage(turn_id, status, usage, len(calls), turn["duration"], turn["duplicates"], turn["rejected"], turn["unreconciled"], exact, not turn["completed"])
 

@@ -89,6 +89,52 @@ class RolloutReaderTests(unittest.TestCase):
         self.assertIsNotNone(result.observed_at)
         self.assertIsNotNone(result.refreshed_at)
 
+    def test_task_complete_uses_final_token_count_at_eof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first, final = usage(10, 4, 2, 1), usage(20, 8, 4, 2)
+            events = [
+                event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)),
+                event("task_started", "turn"),
+                event("token_count", last=first, total=first),
+                event("task_complete", "turn", duration_ms=321),
+                event("token_count", last=final, total=usage(30, 12, 6, 3)),
+            ]
+            self.write(directory, events)
+            result = CodexRolloutReader().refresh(Path(directory))
+        self.assertTrue(result.instruction.exact)
+        self.assertEqual(result.instruction.model_calls, 2)
+        self.assertEqual(result.instruction.usage, TokenUsage(30, 12, 6, 3, 36))
+        self.assertEqual(result.instruction.duration_ms, 321)
+
+    def test_post_complete_duplicate_does_not_add_a_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            call = usage(10, 4, 2, 1)
+            events = [
+                event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)),
+                event("task_started", "turn"),
+                event("token_count", last=call, total=call),
+                event("task_complete", "turn", duration_ms=321),
+                event("token_count", last=call, total=call),
+            ]
+            self.write(directory, events)
+            result = CodexRolloutReader().refresh(Path(directory))
+        self.assertTrue(result.instruction.exact)
+        self.assertEqual(result.instruction.model_calls, 1)
+        self.assertEqual(result.instruction.duplicate_snapshots, 1)
+
+    def test_next_turn_does_not_replace_completed_instruction_with_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            call = usage(10, 4, 2, 1)
+            events = [
+                event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)),
+                event("task_started", "one"), event("token_count", last=call, total=call), event("task_complete", "one", duration_ms=321),
+                event("task_started", "two"),
+            ]
+            self.write(directory, events)
+            result = CodexRolloutReader().refresh(Path(directory))
+        self.assertTrue(result.instruction.in_progress)
+        self.assertEqual(result.instruction.turn_id, "two")
+
 
 if __name__ == "__main__":
     unittest.main()

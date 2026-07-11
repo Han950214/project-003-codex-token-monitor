@@ -4,6 +4,7 @@ from app.i18n import (
     DEFAULT_LANGUAGE,
     TRANSLATIONS,
     localize_auto_refresh,
+    localize_presenter_label,
     localize_status,
     translate,
 )
@@ -43,6 +44,10 @@ class I18nTests(unittest.TestCase):
         self.assertEqual(localize_auto_refresh(True, "zh-CN"), "自动刷新：开启（60 秒）")
         self.assertEqual(localize_auto_refresh(False, "zh-CN"), "自动刷新：关闭（60 秒）")
         self.assertEqual(localize_auto_refresh(True, "en"), "Auto Refresh: On (60s)")
+
+    def test_thread_total_reconciliation_label_is_explicit(self):
+        self.assertEqual(localize_presenter_label("Thread Total Reconciliation", "zh-CN"), "Thread 总计对账")
+        self.assertEqual(localize_presenter_label("Thread Total Reconciliation", "en"), "Thread Total Reconciliation")
         self.assertEqual(localize_auto_refresh(False, "en"), "Auto Refresh: Off (60s)")
 
 
