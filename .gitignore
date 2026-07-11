@@ -1,5 +1,8 @@
 __pycache__/
 *.py[cod]
+.venv*/
+build/
+dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -8,4 +11,5 @@ reports/*.md
 data/*.json
 data/ui-settings.json*
 *.log
+*.spec.tmp
 .reasonix/

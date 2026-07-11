@@ -30,8 +30,9 @@ from app.i18n import (
 )
 from app.metrics import build_run_estimates
 from app.models import AgentRun
+from app.paths import pricing_path, reports_dir, runs_path, ui_settings_path
 from app.reporting import export_report
-from app.storage import DEFAULT_RUNS_PATH, append_run
+from app.storage import append_run
 from app.telemetry_bar import TelemetryBar, build_telemetry_values
 from app.ui_presenter import DashboardPresentation, present_dashboard
 from app.ui_settings import LanguageController
@@ -56,9 +57,10 @@ from app.ui_theme import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
-RUNS_PATH = ROOT / DEFAULT_RUNS_PATH
-PRICING_PATH = ROOT / "resources" / "pricing-config.sample.json"
+RUNS_PATH = runs_path()
+PRICING_PATH = pricing_path()
+REPORTS_DIR = reports_dir()
+UI_SETTINGS_PATH = ui_settings_path()
 MANUAL_RUN_COLUMNS = ("Title", "Model", "Mode", "Input", "Output", "Cached", "Total", "Ended At")
 MANUAL_RUN_COLUMN_KEYS = (
     "column_title", "column_model", "column_mode", "column_input",
@@ -83,7 +85,7 @@ class Dashboard:
         configure_view(root)
         self.pricing = load_pricing(PRICING_PATH)
         self.view_model = DashboardViewModel(self.pricing, RUNS_PATH)
-        self.language_controller = LanguageController(self._apply_language)
+        self.language_controller = LanguageController(self._apply_language, UI_SETTINGS_PATH)
         self.language = self.language_controller.language
         self.started_at: datetime | None = None
         self.snapshot = None
@@ -451,7 +453,7 @@ class Dashboard:
         if snapshot.storage_error:
             messagebox.showerror(translate("storage_error", self.language), snapshot.storage_error)
             return
-        path = export_report(snapshot.runs, snapshot.summary, ROOT / "reports" / f"token-waste-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md")
+        path = export_report(snapshot.runs, snapshot.summary, REPORTS_DIR / f"token-waste-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md")
         self.status_message_var.set(translate("report_exported", self.language, path=path))
 
     def manual_refresh(self) -> None:
@@ -552,12 +554,18 @@ def smoke() -> None:
     pricing = load_pricing(PRICING_PATH)
     snapshot = DashboardViewModel(pricing, RUNS_PATH).refresh()
     presentation = present_dashboard(snapshot, False)
-    print("Codex Token Monitor smoke OK")
-    print(f"data_status={presentation.data_status.value}")
-    print(f"session_total={presentation.telemetry_session_total}")
-    print(f"current_total={presentation.telemetry_current_total}")
-    print("view=CustomTkinter; language=zh-CN default with runtime switch")
-    print(f"logs_adapter={snapshot.logs.status.value}")
+    _safe_print("Codex Token Monitor smoke OK")
+    _safe_print(f"data_status={presentation.data_status.value}")
+    _safe_print(f"session_total={presentation.telemetry_session_total}")
+    _safe_print(f"current_total={presentation.telemetry_current_total}")
+    _safe_print("view=CustomTkinter; language=zh-CN default with runtime switch")
+    _safe_print(f"logs_adapter={snapshot.logs.status.value}")
+
+
+def _safe_print(message: str) -> None:
+    """Keep windowed PyInstaller smoke checks independent of stdout."""
+    if sys.stdout is not None:
+        print(message)
 
 
 def main() -> None:

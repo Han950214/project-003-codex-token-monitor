@@ -7,17 +7,18 @@ from pathlib import Path
 
 from app.metrics import SessionSummary
 from app.models import AgentRun
+from app.paths import reports_dir
 
 
-DEFAULT_REPORTS_DIR = Path("reports")
+DEFAULT_REPORTS_DIR = reports_dir()
 LOCAL_ESTIMATE = "本地估算 / local estimate"
 REAL_TOTAL = "codex_state_sqlite / real total"
 REAL_USAGE = "codex_logs_sqlite / real usage"
 
 
-def default_report_path(now: datetime | None = None, reports_dir: Path = DEFAULT_REPORTS_DIR) -> Path:
+def default_report_path(now: datetime | None = None, output_dir: Path | None = None) -> Path:
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
-    return reports_dir / f"token-waste-report-{stamp}.md"
+    return (output_dir or reports_dir()) / f"token-waste-report-{stamp}.md"
 
 
 def render_report(runs: list[AgentRun], summary: SessionSummary, generated_at: datetime | None = None) -> str:

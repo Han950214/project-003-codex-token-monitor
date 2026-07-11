@@ -36,6 +36,29 @@ python app\main.py
 
 `python app\main.py` opens the local Dashboard if Tkinter is available.
 
+## 从源码运行
+
+```powershell
+python -m pip install -r requirements.txt
+python app\main.py
+```
+
+## 构建 Windows 便携版
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+```
+
+## 启动便携版
+
+```text
+dist\CodexTokenMonitor\CodexTokenMonitor.exe
+```
+
+便携版目标电脑不需要安装 Python。用户数据默认保存在 `%LOCALAPPDATA%\CodexTokenMonitor`，删除便携版目录不会自动删除用户数据。本阶段只提供 one-folder 便携版，不是安装器；尚未实现代码签名、自动更新、开机启动和系统托盘。Windows 可能对未签名的新 exe 显示安全提示，详见 [Windows 便携版构建](docs/windows-portable-build.md)。
+
 ## Current Status
 
 Phase 2-MVP adds manual local run records, JSON persistence, session summaries, and Markdown report export. It saves prompt/output summaries and manual token counts only by default; do not store credentials or private prompt/output full text.

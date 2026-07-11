@@ -7,12 +7,14 @@ from pathlib import Path
 from typing import Callable
 
 from app.i18n import DEFAULT_LANGUAGE, normalize_language
+from app.paths import ui_settings_path
 
 
-DEFAULT_UI_SETTINGS_PATH = Path(__file__).resolve().parents[1] / "data" / "ui-settings.json"
+DEFAULT_UI_SETTINGS_PATH = ui_settings_path()
 
 
-def load_language(path: Path = DEFAULT_UI_SETTINGS_PATH) -> str:
+def load_language(path: Path | None = None) -> str:
+    path = path or ui_settings_path()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -22,7 +24,8 @@ def load_language(path: Path = DEFAULT_UI_SETTINGS_PATH) -> str:
     return normalize_language(payload.get("language"))
 
 
-def save_language(language: str, path: Path = DEFAULT_UI_SETTINGS_PATH) -> bool:
+def save_language(language: str, path: Path | None = None) -> bool:
+    path = path or ui_settings_path()
     language = normalize_language(language)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,11 +46,11 @@ class LanguageController:
     def __init__(
         self,
         on_change: Callable[[str], None],
-        path: Path = DEFAULT_UI_SETTINGS_PATH,
+        path: Path | None = None,
     ) -> None:
-        self.path = path
+        self.path = path or ui_settings_path()
         self.on_change = on_change
-        self.language = load_language(path)
+        self.language = load_language(self.path)
 
     def set_language(self, language: str) -> str:
         self.language = normalize_language(language)
