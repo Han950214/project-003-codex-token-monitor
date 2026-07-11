@@ -1,26 +1,58 @@
-"""Tkinter telemetry bar for local-estimate values."""
+"""Fixed six-field telemetry bar for the Dashboard."""
 
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import ttk
 
-from app.codex_logs import CodexLogsResult, LogsAdapterStatus
+from app.codex_logs import CodexLogsResult
+from app.metrics import PricingConfig, RunUsage, SessionSummary
+from app.ui_presenter import DashboardPresentation
+from app.ui_theme import SPACE_2, SPACE_3
 
-from app.metrics import (
-    PricingConfig,
-    RunUsage,
-    SessionSummary,
-    average_hit,
-    budget_remaining,
-    context_usage,
-    current_cost,
-    current_hit,
-    current_tokens,
-    session_cost,
-    session_tokens,
+
+TELEMETRY_FIELD_LABELS = (
+    "Codex Token Monitor",
+    "Current Total",
+    "Cache Hit",
+    "Session Total",
+    "Data Status",
+    "Auto Refresh",
 )
 
 
+def build_telemetry_values(presentation: DashboardPresentation) -> tuple[tuple[str, str], ...]:
+    return (
+        (TELEMETRY_FIELD_LABELS[0], "Local monitor"),
+        (TELEMETRY_FIELD_LABELS[1], presentation.telemetry_current_total),
+        (TELEMETRY_FIELD_LABELS[2], presentation.telemetry_cache_hit),
+        (TELEMETRY_FIELD_LABELS[3], presentation.telemetry_session_total),
+        (TELEMETRY_FIELD_LABELS[4], presentation.data_status.value),
+        (TELEMETRY_FIELD_LABELS[5], presentation.auto_refresh.removeprefix("Auto Refresh: ")),
+    )
+
+
+class TelemetryBar(ttk.Frame):
+    """A stable widget tree; refreshes only update StringVars."""
+
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent, style="Telemetry.TFrame", padding=(SPACE_3, SPACE_2))
+        self.value_vars = tuple(tk.StringVar(value="—") for _ in TELEMETRY_FIELD_LABELS)
+        for column, (label, variable) in enumerate(zip(TELEMETRY_FIELD_LABELS, self.value_vars)):
+            cell = ttk.Frame(self, style="Telemetry.TFrame", padding=(SPACE_2, 0))
+            ttk.Label(cell, text=label, style="TelemetryLabel.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(cell, textvariable=variable, style="TelemetryValue.TLabel").grid(row=1, column=0, sticky="w")
+            cell.grid(row=0, column=column, sticky="nsew")
+            self.grid_columnconfigure(column, weight=1, uniform="telemetry")
+
+    def update_values(self, values: tuple[tuple[str, str], ...]) -> None:
+        if tuple(label for label, _ in values) != TELEMETRY_FIELD_LABELS:
+            raise ValueError("telemetry fields must use the fixed six-field order")
+        for variable, (_, value) in zip(self.value_vars, values):
+            variable.set(value)
+
+
+# Compatibility formatters retained for existing non-GUI callers and reports tests.
 def format_percent(value: float) -> str:
     return f"{value * 100:.1f}%"
 
@@ -36,120 +68,52 @@ def build_latest_response_values(result: CodexLogsResult) -> list[tuple[str, str
         ("Reasoning tokens", _known(usage.reasoning_tokens if usage else None, source)),
     ]
     if usage is not None and usage.input_tokens > 0:
-        cache_hit = min(max(usage.cached_tokens, 0), usage.input_tokens) / usage.input_tokens
-        cache_value = (
-            f"{format_percent(cache_hit)} derived from codex_logs_sqlite / real usage; "
-            "not official cache hit rate"
-        )
+        hit = min(max(usage.cached_tokens, 0), usage.input_tokens) / usage.input_tokens
+        cache = f"{format_percent(hit)} derived from codex_logs_sqlite / real usage; not official cache hit rate"
     else:
-        cache_value = "unknown / source: unknown"
-    values.append(("Derived cache hit", cache_value))
+        cache = "unknown / source: unknown"
+    values.append(("Derived cache hit", cache))
     return values
 
 
 def build_logs_adapter_metadata(result: CodexLogsResult) -> list[tuple[str, str]]:
     values = [("Logs adapter", result.status.value)]
     if result.observed_at is not None:
-        values.append(
-            ("Latest response at", result.observed_at.astimezone().isoformat(timespec="seconds"))
-        )
-    if result.status in {LogsAdapterStatus.CONNECTED, LogsAdapterStatus.NO_RESPONSE_COMPLETED}:
-        values.append(
-            ("Refreshed at", result.refreshed_at.astimezone().isoformat(timespec="seconds"))
-        )
-    else:
-        values.append(
-            ("Refresh attempted at", result.refreshed_at.astimezone().isoformat(timespec="seconds"))
-        )
+        values.append(("Latest response at", result.observed_at.astimezone().isoformat(timespec="seconds")))
+    label = "Refreshed at" if result.status.value in {"connected", "no response.completed"} else "Refresh attempted at"
+    values.append((label, result.refreshed_at.astimezone().isoformat(timespec="seconds")))
     return values
+
+
+def build_telemetry_values_from_summary(summary: SessionSummary, _pricing: PricingConfig) -> list[tuple[str, str]]:
+    cache = f"{format_percent(summary.current_cache_hit)} local estimate, not real Codex cache"
+    current = f"{summary.current_run_tokens} local estimate"
+    session = f"{summary.session_tokens} local estimate"
+    if summary.current_usage_source == "codex_logs_sqlite":
+        current = f"{summary.current_run_tokens} codex_logs_sqlite / real usage"
+    if summary.current_cache_hit_source == "codex_logs_sqlite":
+        cache = f"{format_percent(summary.current_cache_hit)} derived from codex_logs_sqlite / real usage, not official cache hit rate"
+    if summary.total_tokens_source == "codex_state_sqlite":
+        session = f"{summary.session_tokens} codex_state_sqlite / real total"
+    return [
+        ("本次命中率 / current cache hit", cache),
+        ("平均命中率 / average cache hit", f"{format_percent(summary.average_cache_hit)} local estimate, not real Codex cache"),
+        ("会话 tokens / session tokens", session),
+        ("本次 tokens / current run tokens", current),
+        ("本次费用 / current cost", f"${summary.current_cost:.6f} local estimate, not billing"),
+        ("当前会话轮数 / session rounds", f"{summary.rounds} local estimate"),
+        ("上下文占用 / context usage", f"{format_percent(summary.context_usage)} local estimate"),
+        ("压缩阈值 / compression threshold", "local estimate"),
+        ("会话费用 / session cost", f"${summary.session_cost:.6f} local estimate, not billing"),
+        ("预算剩余 / budget remaining", f"${summary.budget_remaining:.6f} local estimate"),
+    ]
+
+
+def build_legacy_telemetry_values(usages: list[RunUsage], pricing: PricingConfig) -> list[tuple[str, str]]:
+    from app.metrics import summarize_runs
+
+    return build_telemetry_values_from_summary(summarize_runs([], pricing, latest_response_usage=usages[-1] if usages else None), pricing)
 
 
 def _known(value: int | None, source: str) -> str:
     return "unknown / source: unknown" if value is None else f"{value} {source}"
-
-
-def build_telemetry_values(usages: list[RunUsage], pricing: PricingConfig) -> list[tuple[str, str]]:
-    if not usages:
-        values = [
-            ("本次命中率 / current cache hit", "0.0%"),
-            ("平均命中率 / average cache hit", "0.0%"),
-            ("会话 tokens / session tokens", "0"),
-            ("本次 tokens / current run tokens", "0"),
-            ("本次费用 / current cost", "$0.000000"),
-            ("当前会话轮数 / session rounds", "0"),
-            ("上下文占用 / context usage", "0.0%"),
-            ("压缩阈值 / compression threshold", format_percent(pricing.compression_threshold)),
-            ("会话费用 / session cost", "$0.000000"),
-            ("预算剩余 / budget remaining", f"${pricing.configured_budget:.6f}"),
-        ]
-        return [(label, f"{value} 本地估算 / local estimate") for label, value in values]
-    current = usages[-1]
-    spent = session_cost(usages, pricing)
-    current_context_tokens = session_tokens(usages)
-    values = [
-        ("本次命中率 / current cache hit", format_percent(current_hit(current))),
-        ("平均命中率 / average cache hit", format_percent(average_hit(usages))),
-        ("会话 tokens / session tokens", str(session_tokens(usages))),
-        ("本次 tokens / current run tokens", str(current_tokens(current))),
-        ("本次费用 / current cost", f"${current_cost(current, pricing):.6f}"),
-        ("当前会话轮数 / session rounds", str(len(usages))),
-        ("上下文占用 / context usage", format_percent(context_usage(current_context_tokens, pricing.configured_context_window))),
-        ("压缩阈值 / compression threshold", format_percent(pricing.compression_threshold)),
-        ("会话费用 / session cost", f"${spent:.6f}"),
-        ("预算剩余 / budget remaining", f"${budget_remaining(pricing.configured_budget, spent):.6f}"),
-    ]
-    return [(label, f"{value} 本地估算 / local estimate") for label, value in values]
-
-
-def build_telemetry_values_from_summary(summary: SessionSummary, pricing: PricingConfig) -> list[tuple[str, str]]:
-    values = [
-        ("本次命中率 / current cache hit", format_percent(summary.current_cache_hit)),
-        ("平均命中率 / average cache hit", format_percent(summary.average_cache_hit)),
-        ("会话 tokens / session tokens", str(summary.session_tokens)),
-        ("本次 tokens / current run tokens", str(summary.current_run_tokens)),
-        ("本次费用 / current cost", f"${summary.current_cost:.6f}"),
-        ("当前会话轮数 / session rounds", str(summary.rounds)),
-        ("上下文占用 / context usage", format_percent(summary.context_usage)),
-        ("压缩阈值 / compression threshold", format_percent(pricing.compression_threshold)),
-        ("会话费用 / session cost", f"${summary.session_cost:.6f}"),
-        ("预算剩余 / budget remaining", f"${summary.budget_remaining:.6f}"),
-    ]
-    labeled_values = [(label, f"{value} 本地估算 / local estimate") for label, value in values]
-    labeled_values[0] = (labeled_values[0][0], f"{values[0][1]} local estimate, not real Codex cache")
-    labeled_values[1] = (labeled_values[1][0], f"{values[1][1]} local estimate, not real Codex cache")
-    labeled_values[4] = (labeled_values[4][0], f"{values[4][1]} local estimate, not billing")
-    labeled_values[8] = (labeled_values[8][0], f"{values[8][1]} local estimate, not billing")
-    if summary.total_tokens_source == "codex_state_sqlite":
-        session_label, session_value = labeled_values[2]
-        labeled_values[2] = (session_label, f"{summary.session_tokens} codex_state_sqlite / real total")
-    if summary.current_usage_source == "codex_logs_sqlite":
-        current_label, current_value = labeled_values[3]
-        labeled_values[3] = (current_label, f"{summary.current_run_tokens} codex_logs_sqlite / real usage")
-        cost_label, cost_value = labeled_values[4]
-        labeled_values[4] = (cost_label, f"{values[4][1]} estimate from codex_logs_sqlite / real usage, not billing")
-    if summary.current_cache_hit_source == "codex_logs_sqlite":
-        cache_label, cache_value = labeled_values[0]
-        labeled_values[0] = (cache_label, f"{values[0][1]} derived from codex_logs_sqlite / real usage, not official cache hit rate")
-    return labeled_values
-
-
-def create_telemetry_bar(parent: tk.Widget, usages: list[RunUsage], pricing: PricingConfig) -> tk.Frame:
-    frame = tk.Frame(parent, bg="#15202b", padx=8, pady=6)
-    for column, (label, value) in enumerate(build_telemetry_values(usages, pricing)):
-        cell = tk.Frame(frame, bg="#15202b", padx=6)
-        tk.Label(cell, text=label, fg="#c8d3df", bg="#15202b", font=("Segoe UI", 8)).pack(anchor="w")
-        tk.Label(cell, text=value, fg="#ffffff", bg="#15202b", font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        cell.grid(row=0, column=column, sticky="nsew")
-        frame.grid_columnconfigure(column, weight=1)
-    return frame
-
-
-def create_telemetry_bar_from_values(parent: tk.Widget, values: list[tuple[str, str]]) -> tk.Frame:
-    frame = tk.Frame(parent, bg="#15202b", padx=8, pady=6)
-    for column, (label, value) in enumerate(values):
-        cell = tk.Frame(frame, bg="#15202b", padx=6)
-        tk.Label(cell, text=label, fg="#c8d3df", bg="#15202b", font=("Segoe UI", 8)).pack(anchor="w")
-        tk.Label(cell, text=value, fg="#ffffff", bg="#15202b", font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        cell.grid(row=0, column=column, sticky="nsew")
-        frame.grid_columnconfigure(column, weight=1)
-    return frame

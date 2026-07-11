@@ -1,10 +1,49 @@
 import unittest
+from datetime import datetime, timezone
 
+from app.codex_logs import CodexLogsResult, LogsAdapterStatus
+from app.dashboard import DashboardSnapshot
 from app.metrics import PricingConfig, SessionSummary
-from app.telemetry_bar import build_telemetry_values_from_summary
+from app.telemetry_bar import (
+    TELEMETRY_FIELD_LABELS,
+    build_telemetry_values,
+    build_telemetry_values_from_summary,
+)
+from app.ui_presenter import present_dashboard
 
 
 class TelemetryBarTests(unittest.TestCase):
+    def test_field_count_and_order_are_fixed(self):
+        self.assertEqual(
+            TELEMETRY_FIELD_LABELS,
+            (
+                "Codex Token Monitor",
+                "Current Total",
+                "Cache Hit",
+                "Session Total",
+                "Data Status",
+                "Auto Refresh",
+            ),
+        )
+
+    def test_no_data_telemetry_uses_dashes_not_zero(self):
+        summary = SessionSummary(0, 0, 0, 0, 0, 0, 0, 0, 0)
+        logs = CodexLogsResult(
+            None,
+            "unknown",
+            LogsAdapterStatus.NO_RESPONSE_COMPLETED,
+            None,
+            datetime(2026, 7, 11, tzinfo=timezone.utc),
+        )
+        presentation = present_dashboard(DashboardSnapshot([], summary, logs, None), False)
+        values = build_telemetry_values(presentation)
+        self.assertEqual(tuple(label for label, _ in values), TELEMETRY_FIELD_LABELS)
+        self.assertEqual(values[1][1], "—")
+        self.assertEqual(values[2][1], "—")
+        self.assertEqual(values[3][1], "—")
+        self.assertEqual(values[4][1], "No Data")
+        self.assertEqual(values[5][1], "Off (60s)")
+
     def test_real_session_total_has_distinct_source_label(self):
         summary = SessionSummary(
             rounds=1,
