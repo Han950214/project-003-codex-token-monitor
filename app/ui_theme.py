@@ -1,10 +1,11 @@
-"""Central Tkinter/ttk theme for the Dashboard."""
+"""Central visual tokens for the CustomTkinter Dashboard."""
 
 from __future__ import annotations
 
-import tkinter as tk
 from dataclasses import dataclass
-from tkinter import font as tkfont, ttk
+from tkinter import ttk
+
+import customtkinter as ctk
 
 
 SPACE_1 = 4
@@ -12,98 +13,111 @@ SPACE_2 = 8
 SPACE_3 = 12
 SPACE_4 = 16
 SPACE_6 = 24
+CARD_RADIUS = 12
+CONTROL_RADIUS = 8
 
 
 @dataclass(frozen=True)
 class Colors:
-    window: str = "#F3F5F7"
+    window: str = "#F4F7FB"
     surface: str = "#FFFFFF"
-    raised_surface: str = "#F8FAFC"
-    border: str = "#D8DEE6"
-    primary_text: str = "#182230"
-    secondary_text: str = "#5E6B7A"
-    accent: str = "#2563EB"
-    real: str = "#16794A"
-    estimate: str = "#9A6700"
-    stale: str = "#8A5A13"
-    error: str = "#B42318"
-    unknown: str = "#7A8696"
-    telemetry: str = "#172231"
-    telemetry_muted: str = "#AAB6C4"
-    telemetry_text: str = "#FFFFFF"
+    raised_surface: str = "#F8FAFD"
+    border: str = "#DDE4EE"
+    border_strong: str = "#C8D3E1"
+    primary_text: str = "#152033"
+    secondary_text: str = "#667085"
+    muted_text: str = "#8A96A8"
+    accent: str = "#3978F6"
+    accent_hover: str = "#2D66D4"
+    accent_soft: str = "#EAF1FF"
+    real: str = "#248A52"
+    real_soft: str = "#E8F6ED"
+    estimate: str = "#A76812"
+    estimate_soft: str = "#FFF4DC"
+    stale: str = "#9A6417"
+    stale_soft: str = "#FFF1D8"
+    error: str = "#BC3A32"
+    error_soft: str = "#FDECEB"
+    unknown: str = "#728096"
+    unknown_soft: str = "#EEF1F5"
+    purple: str = "#7A4FD1"
+    purple_soft: str = "#F1EBFF"
+    teal: str = "#258E92"
+    teal_soft: str = "#E4F6F5"
+    orange: str = "#C87917"
+    orange_soft: str = "#FFF0D6"
+    telemetry: str = "#17263A"
+    telemetry_muted: str = "#9FB0C5"
+    telemetry_text: str = "#F7FAFC"
 
 
 COLORS = Colors()
 FONT_FAMILY = "Segoe UI"
-FALLBACK_FONT = "TkDefaultFont"
+FONT_BODY = (FONT_FAMILY, 13)
+FONT_SMALL = (FONT_FAMILY, 11)
+FONT_SECTION = (FONT_FAMILY, 15, "bold")
+FONT_TITLE = (FONT_FAMILY, 25, "bold")
+FONT_METRIC = (FONT_FAMILY, 22, "bold")
 
-TONE_STYLES = {
-    "fresh": "Fresh.TLabel",
-    "estimate": "Estimate.TLabel",
-    "stale": "Stale.TLabel",
-    "error": "Error.TLabel",
-    "unknown": "Unknown.TLabel",
-    "disabled": "Unknown.TLabel",
+TONE_COLORS = {
+    "fresh": (COLORS.real, COLORS.real_soft),
+    "estimate": (COLORS.estimate, COLORS.estimate_soft),
+    "stale": (COLORS.stale, COLORS.stale_soft),
+    "error": (COLORS.error, COLORS.error_soft),
+    "unknown": (COLORS.unknown, COLORS.unknown_soft),
+    "disabled": (COLORS.unknown, COLORS.unknown_soft),
+}
+
+METRIC_ICONS = {
+    "Input": "↳",
+    "Output": "↗",
+    "Total": "◆",
+    "Cached": "▣",
+    "Reasoning": "✦",
+    "Cache Hit": "%",
+}
+
+METRIC_ACCENTS = {
+    "Input": ("#4F8FEF", "#E8F1FF"),
+    "Output": ("#3B9B55", "#E9F7EC"),
+    "Total": (COLORS.purple, COLORS.purple_soft),
+    "Cached": (COLORS.orange, COLORS.orange_soft),
+    "Reasoning": ("#627ED0", "#ECF0FF"),
+    "Cache Hit": (COLORS.teal, COLORS.teal_soft),
 }
 
 
-def configure_theme(root: tk.Misc) -> ttk.Style:
-    """Configure all Dashboard styles, with a safe system-theme fallback."""
+def configure_view(root: ctk.CTk) -> None:
+    ctk.set_appearance_mode("light")
+    ctk.set_default_color_theme("blue")
+    root.configure(fg_color=COLORS.window)
+    configure_treeview(root)
+
+
+def configure_treeview(root: ctk.CTk) -> ttk.Style:
+    """Keep ttk styling isolated to the one allowed native table widget."""
     style = ttk.Style(root)
     if "clam" in style.theme_names():
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-
-    family = FONT_FAMILY
-    try:
-        if family not in tkfont.families(root):
-            family = tkfont.nametofont(FALLBACK_FONT, root=root).actual("family")
-    except tk.TclError:
-        family = FALLBACK_FONT
-
-    try:
-        tkfont.nametofont(FALLBACK_FONT, root=root).configure(family=family, size=9)
-    except tk.TclError:
-        pass
-    root.configure(background=COLORS.window)
-    style.configure(".", font=(family, 9), foreground=COLORS.primary_text)
-    style.configure("Window.TFrame", background=COLORS.window)
-    style.configure("Surface.TFrame", background=COLORS.surface)
-    style.configure("Raised.TFrame", background=COLORS.raised_surface)
-    style.configure("Card.TFrame", background=COLORS.surface, relief="solid", borderwidth=1)
-    style.configure("Header.TLabel", background=COLORS.window, foreground=COLORS.primary_text, font=(family, 17, "bold"))
-    style.configure("Section.TLabel", background=COLORS.window, foreground=COLORS.primary_text, font=(family, 11, "bold"))
-    style.configure("CardLabel.TLabel", background=COLORS.surface, foreground=COLORS.secondary_text, font=(family, 8))
-    style.configure("CardValue.TLabel", background=COLORS.surface, foreground=COLORS.primary_text, font=(family, 15, "bold"))
-    style.configure("TotalCardValue.TLabel", background=COLORS.surface, foreground=COLORS.accent, font=(family, 17, "bold"))
-    for name, color in (
-        ("Fresh", COLORS.real),
-        ("Estimate", COLORS.estimate),
-        ("Stale", COLORS.stale),
-        ("Error", COLORS.error),
-        ("Unknown", COLORS.unknown),
-        ("Disabled", COLORS.unknown),
-    ):
-        style.configure(f"Card{name}.TLabel", background=COLORS.surface, foreground=color, font=(family, 15, "bold"))
-        style.configure(f"TotalCard{name}.TLabel", background=COLORS.surface, foreground=color, font=(family, 17, "bold"))
-        style.configure(f"Source{name}.TLabel", background=COLORS.surface, foreground=color, font=(family, 9, "bold"))
-    style.configure("CardDetail.TLabel", background=COLORS.surface, foreground=COLORS.secondary_text, font=(family, 8))
-    style.configure("Secondary.TLabel", background=COLORS.window, foreground=COLORS.secondary_text)
-    style.configure("Fresh.TLabel", background=COLORS.window, foreground=COLORS.real, font=(family, 9, "bold"))
-    style.configure("Estimate.TLabel", background=COLORS.window, foreground=COLORS.estimate, font=(family, 9, "bold"))
-    style.configure("Stale.TLabel", background=COLORS.window, foreground=COLORS.stale, font=(family, 9, "bold"))
-    style.configure("Error.TLabel", background=COLORS.window, foreground=COLORS.error, font=(family, 9, "bold"))
-    style.configure("Unknown.TLabel", background=COLORS.window, foreground=COLORS.unknown, font=(family, 9, "bold"))
-    style.configure("Accent.TButton", padding=(SPACE_3, SPACE_2))
-    style.configure("TButton", padding=(SPACE_3, SPACE_2))
-    style.configure("TEntry", padding=SPACE_1)
-    style.configure("Treeview", rowheight=24, background=COLORS.surface, fieldbackground=COLORS.surface, bordercolor=COLORS.border)
-    style.configure("Treeview.Heading", font=(family, 9, "bold"))
-    style.configure("TNotebook", background=COLORS.window, borderwidth=0)
-    style.configure("TNotebook.Tab", padding=(SPACE_4, SPACE_2))
-    style.configure("Telemetry.TFrame", background=COLORS.telemetry)
-    style.configure("TelemetryLabel.TLabel", background=COLORS.telemetry, foreground=COLORS.telemetry_muted, font=(family, 8))
-    style.configure("TelemetryValue.TLabel", background=COLORS.telemetry, foreground=COLORS.telemetry_text, font=(family, 9, "bold"))
+        style.theme_use("clam")
+    style.configure(
+        "Monitor.Treeview",
+        background=COLORS.surface,
+        fieldbackground=COLORS.surface,
+        foreground=COLORS.primary_text,
+        borderwidth=0,
+        relief="flat",
+        rowheight=28,
+        font=(FONT_FAMILY, 10),
+    )
+    style.map("Monitor.Treeview", background=[("selected", COLORS.accent_soft)], foreground=[("selected", COLORS.primary_text)])
+    style.configure(
+        "Monitor.Treeview.Heading",
+        background=COLORS.raised_surface,
+        foreground=COLORS.secondary_text,
+        borderwidth=0,
+        relief="flat",
+        font=(FONT_FAMILY, 10, "bold"),
+        padding=(SPACE_2, SPACE_2),
+    )
+    style.map("Monitor.Treeview.Heading", background=[("active", COLORS.raised_surface)])
     return style

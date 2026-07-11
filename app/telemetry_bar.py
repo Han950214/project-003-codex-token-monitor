@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+
+import customtkinter as ctk
 
 from app.codex_logs import CodexLogsResult
 from app.metrics import PricingConfig, RunUsage, SessionSummary
+from app.i18n import DEFAULT_LANGUAGE, localize_auto_refresh, localize_status, translate
 from app.ui_presenter import DashboardPresentation
-from app.ui_theme import SPACE_2, SPACE_3
+from app.ui_theme import COLORS, FONT_FAMILY, SPACE_2, SPACE_3
 
 
 TELEMETRY_FIELD_LABELS = (
@@ -21,35 +23,70 @@ TELEMETRY_FIELD_LABELS = (
 )
 
 
-def build_telemetry_values(presentation: DashboardPresentation) -> tuple[tuple[str, str], ...]:
-    return (
-        (TELEMETRY_FIELD_LABELS[0], "Local monitor"),
-        (TELEMETRY_FIELD_LABELS[1], presentation.telemetry_current_total),
-        (TELEMETRY_FIELD_LABELS[2], presentation.telemetry_cache_hit),
-        (TELEMETRY_FIELD_LABELS[3], presentation.telemetry_session_total),
-        (TELEMETRY_FIELD_LABELS[4], presentation.data_status.value),
-        (TELEMETRY_FIELD_LABELS[5], presentation.auto_refresh.removeprefix("Auto Refresh: ")),
+TELEMETRY_FIELD_KEYS = (
+    None,
+    "telemetry_current_total",
+    "telemetry_cache_hit",
+    "telemetry_session_total",
+    "telemetry_data_status",
+    "telemetry_auto_refresh",
+)
+
+
+def telemetry_field_labels(language: str = DEFAULT_LANGUAGE) -> tuple[str, ...]:
+    return tuple(
+        "Codex Token Monitor" if key is None else translate(key, language)
+        for key in TELEMETRY_FIELD_KEYS
     )
 
 
-class TelemetryBar(ttk.Frame):
+def build_telemetry_values(
+    presentation: DashboardPresentation,
+    language: str = DEFAULT_LANGUAGE,
+) -> tuple[tuple[str, str], ...]:
+    labels = telemetry_field_labels(language)
+    auto_enabled = "On" in presentation.auto_refresh
+    return (
+        (labels[0], translate("telemetry_local_monitor", language)),
+        (labels[1], _localize_value(presentation.telemetry_current_total, language)),
+        (labels[2], _localize_value(presentation.telemetry_cache_hit, language)),
+        (labels[3], _localize_value(presentation.telemetry_session_total, language)),
+        (labels[4], localize_status(presentation.data_status, language)),
+        (labels[5], localize_auto_refresh(auto_enabled, language).replace("自动刷新：", "").replace("Auto Refresh: ", "")),
+    )
+
+
+class TelemetryBar(ctk.CTkFrame):
     """A stable widget tree; refreshes only update StringVars."""
 
-    def __init__(self, parent: tk.Misc) -> None:
-        super().__init__(parent, style="Telemetry.TFrame", padding=(SPACE_3, SPACE_2))
+    def __init__(self, parent: tk.Misc, language: str = DEFAULT_LANGUAGE) -> None:
+        # Let the two text rows determine the final height so Windows DPI scaling
+        # cannot clip the value row. All six cells still share one compact row.
+        super().__init__(parent, fg_color=COLORS.telemetry, corner_radius=0, height=64)
+        self.label_vars = tuple(tk.StringVar(value=value) for value in telemetry_field_labels(language))
         self.value_vars = tuple(tk.StringVar(value="—") for _ in TELEMETRY_FIELD_LABELS)
-        for column, (label, variable) in enumerate(zip(TELEMETRY_FIELD_LABELS, self.value_vars)):
-            cell = ttk.Frame(self, style="Telemetry.TFrame", padding=(SPACE_2, 0))
-            ttk.Label(cell, text=label, style="TelemetryLabel.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(cell, textvariable=variable, style="TelemetryValue.TLabel").grid(row=1, column=0, sticky="w")
-            cell.grid(row=0, column=column, sticky="nsew")
+        self.grid_rowconfigure(0, weight=1)
+        for column, (label_var, value_var) in enumerate(zip(self.label_vars, self.value_vars)):
+            cell = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+            ctk.CTkLabel(cell, textvariable=label_var, text_color=COLORS.telemetry_muted, font=(FONT_FAMILY, 10), anchor="w").grid(row=0, column=0, sticky="ew")
+            ctk.CTkLabel(cell, textvariable=value_var, text_color=COLORS.telemetry_text, font=(FONT_FAMILY, 12, "bold"), anchor="w").grid(row=1, column=0, sticky="ew")
+            cell.grid(row=0, column=column, sticky="nsew", padx=(SPACE_3, SPACE_2), pady=(6, 10))
+            cell.grid_columnconfigure(0, weight=1)
             self.grid_columnconfigure(column, weight=1, uniform="telemetry")
 
     def update_values(self, values: tuple[tuple[str, str], ...]) -> None:
-        if tuple(label for label, _ in values) != TELEMETRY_FIELD_LABELS:
-            raise ValueError("telemetry fields must use the fixed six-field order")
-        for variable, (_, value) in zip(self.value_vars, values):
-            variable.set(value)
+        if len(values) != len(TELEMETRY_FIELD_LABELS):
+            raise ValueError("telemetry must contain exactly six fields")
+        for label_var, value_var, (label, value) in zip(self.label_vars, self.value_vars, values):
+            label_var.set(label)
+            value_var.set(value)
+
+
+def _localize_value(value: str, language: str) -> str:
+    for suffix, key in ((" real", "value_real"), (" estimate", "value_estimate"), (" derived", "value_derived")):
+        if value.endswith(suffix):
+            return translate(key, language, value=value[: -len(suffix)])
+    return value
 
 
 # Compatibility formatters retained for existing non-GUI callers and reports tests.

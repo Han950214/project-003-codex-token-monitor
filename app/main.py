@@ -1,4 +1,4 @@
-"""Windows Dashboard for Codex Token Monitor."""
+"""Modern localized Windows Dashboard for Codex Token Monitor."""
 
 from __future__ import annotations
 
@@ -10,26 +10,49 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+import customtkinter as ctk
+
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.auto_refresh import AutoRefreshController, DEFAULT_AUTO_REFRESH_SECONDS
 from app.config import load_pricing
 from app.dashboard import DashboardViewModel
+from app.i18n import (
+    LANGUAGE_LABELS,
+    language_from_label,
+    localize_auto_refresh,
+    localize_presenter_label,
+    localize_presenter_text,
+    localize_status,
+    localize_status_message,
+    translate,
+)
 from app.metrics import build_run_estimates
 from app.models import AgentRun
 from app.reporting import export_report
 from app.storage import DEFAULT_RUNS_PATH, append_run
 from app.telemetry_bar import TelemetryBar, build_telemetry_values
 from app.ui_presenter import DashboardPresentation, present_dashboard
+from app.ui_settings import LanguageController
 from app.ui_theme import (
+    CARD_RADIUS,
     COLORS,
+    CONTROL_RADIUS,
+    FONT_BODY,
+    FONT_FAMILY,
+    FONT_METRIC,
+    FONT_SECTION,
+    FONT_SMALL,
+    FONT_TITLE,
+    METRIC_ACCENTS,
+    METRIC_ICONS,
     SPACE_1,
     SPACE_2,
     SPACE_3,
     SPACE_4,
-    TONE_STYLES,
-    configure_theme,
+    TONE_COLORS,
+    configure_view,
 )
 
 
@@ -37,31 +60,37 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNS_PATH = ROOT / DEFAULT_RUNS_PATH
 PRICING_PATH = ROOT / "resources" / "pricing-config.sample.json"
 MANUAL_RUN_COLUMNS = ("Title", "Model", "Mode", "Input", "Output", "Cached", "Total", "Ended At")
+MANUAL_RUN_COLUMN_KEYS = (
+    "column_title", "column_model", "column_mode", "column_input",
+    "column_output", "column_cached", "column_total", "column_ended_at",
+)
 
 
 class Dashboard:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: ctk.CTk) -> None:
         self.root = root
-        configure_theme(root)
+        configure_view(root)
         self.pricing = load_pricing(PRICING_PATH)
         self.view_model = DashboardViewModel(self.pricing, RUNS_PATH)
+        self.language_controller = LanguageController(self._apply_language)
+        self.language = self.language_controller.language
         self.started_at: datetime | None = None
-        self.started_at_var = tk.StringVar(value="—")
-        self.ended_at_var = tk.StringVar(value="—")
-        self.auto_refresh_var = tk.BooleanVar(value=False)
-        self.data_status_var = tk.StringVar(value="No Data")
-        self.status_message_var = tk.StringVar(value="No response usage is available yet.")
-        self.last_event_var = tk.StringVar(value="—")
-        self.last_refresh_var = tk.StringVar(value="—")
-        self.auto_refresh_status_var = tk.StringVar(value=f"Auto Refresh: Off ({DEFAULT_AUTO_REFRESH_SECONDS}s)")
-        self.fields: dict[str, tk.StringVar] = {}
-        self.text_fields: dict[str, tk.Text] = {}
-        self.metric_vars: list[tuple[tk.StringVar, tk.StringVar]] = []
-        self.metric_value_labels: list[ttk.Label] = []
-        self.source_vars: dict[str, tk.StringVar] = {}
-        self.source_value_labels: dict[str, ttk.Label] = {}
         self.snapshot = None
         self.presentation: DashboardPresentation | None = None
+        self.active_page = "saved"
+
+        self.auto_refresh_var = tk.BooleanVar(value=False)
+        self.data_status_var = tk.StringVar(value="")
+        self.status_message_var = tk.StringVar(value="")
+        self.last_event_var = tk.StringVar(value="—")
+        self.last_refresh_var = tk.StringVar(value="—")
+        self.started_at_var = tk.StringVar(value="—")
+        self.ended_at_var = tk.StringVar(value="—")
+        self.fields: dict[str, tk.StringVar] = {}
+        self.text_fields: dict[str, ctk.CTkTextbox] = {}
+        self.form_labels: dict[str, ctk.CTkLabel] = {}
+        self.metric_widgets: list[dict[str, object]] = []
+        self.source_widgets: dict[str, dict[str, object]] = {}
 
         self.root.title("Codex Token Monitor")
         self.root.geometry("1180x760")
@@ -74,186 +103,336 @@ class Dashboard:
             on_error=self._auto_refresh_error,
         )
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self._apply_language(self.language)
         self.refresh()
 
     def _build(self) -> None:
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(1, weight=1)
+        self.root.grid_rowconfigure(2, weight=0, minsize=64)
         self._build_header()
         self._build_content()
-        self.telemetry = TelemetryBar(self.root)
+        self.telemetry = TelemetryBar(self.root, self.language)
         self.telemetry.grid(row=2, column=0, sticky="ew")
 
     def _build_header(self) -> None:
-        header = ttk.Frame(self.root, style="Window.TFrame", padding=(SPACE_4, SPACE_3))
-        header.grid(row=0, column=0, sticky="ew")
+        header = ctk.CTkFrame(self.root, fg_color="transparent", corner_radius=0)
+        header.grid(row=0, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_3, SPACE_2))
         header.grid_columnconfigure(0, weight=1)
-        title_row = ttk.Frame(header, style="Window.TFrame")
-        title_row.grid(row=0, column=0, sticky="w")
-        ttk.Label(title_row, text="Codex Token Monitor", style="Header.TLabel").grid(row=0, column=0, sticky="w")
-        self.data_status_label = ttk.Label(title_row, textvariable=self.data_status_var, style="Unknown.TLabel")
-        self.data_status_label.grid(row=0, column=1, padx=(SPACE_4, 0), sticky="w")
-        ttk.Label(header, textvariable=self.status_message_var, style="Secondary.TLabel").grid(row=1, column=0, sticky="w", pady=(SPACE_1, 0))
 
-        meta = ttk.Frame(header, style="Window.TFrame")
-        meta.grid(row=2, column=0, columnspan=3, sticky="w", pady=(SPACE_2, 0))
-        ttk.Label(meta, text="Last Event", style="Secondary.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(meta, textvariable=self.last_event_var).grid(row=0, column=1, padx=(SPACE_2, SPACE_4), sticky="w")
-        ttk.Label(meta, text="Last Refresh", style="Secondary.TLabel").grid(row=0, column=2, sticky="w")
-        ttk.Label(meta, textvariable=self.last_refresh_var).grid(row=0, column=3, padx=(SPACE_2, SPACE_4), sticky="w")
+        identity = ctk.CTkFrame(header, fg_color="transparent")
+        identity.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(identity, text="Codex Token Monitor", font=FONT_TITLE, text_color=COLORS.primary_text).grid(row=0, column=0, sticky="w")
+        self.status_pill = ctk.CTkLabel(
+            identity, textvariable=self.data_status_var, font=(FONT_FAMILY, 12, "bold"),
+            corner_radius=9, height=30, padx=SPACE_3,
+        )
+        self.status_pill.grid(row=0, column=1, padx=(SPACE_4, 0), sticky="w")
 
-        actions = ttk.Frame(header, style="Window.TFrame")
-        actions.grid(row=0, column=2, rowspan=2, sticky="e")
-        ttk.Button(actions, text="Manual Refresh", command=self.manual_refresh, style="Accent.TButton").grid(row=0, column=0, rowspan=2, padx=(0, SPACE_2))
-        ttk.Checkbutton(actions, variable=self.auto_refresh_var, command=self._toggle_auto_refresh).grid(row=0, column=1, rowspan=2)
-        self.auto_refresh_label = ttk.Label(actions, textvariable=self.auto_refresh_status_var, style="Unknown.TLabel")
-        self.auto_refresh_label.grid(row=0, column=2, rowspan=2, padx=(SPACE_1, SPACE_2))
-        ttk.Button(actions, text="Export Report", command=self.export_report).grid(row=0, column=3, rowspan=2)
+        actions = ctk.CTkFrame(header, fg_color="transparent")
+        actions.grid(row=0, column=1, sticky="e")
+        self.refresh_button = ctk.CTkButton(
+            actions, text="", command=self.manual_refresh, width=112, height=34,
+            corner_radius=CONTROL_RADIUS, fg_color="transparent", border_width=1,
+            border_color=COLORS.accent, text_color=COLORS.accent, hover_color=COLORS.accent_soft,
+        )
+        self.refresh_button.grid(row=0, column=0, padx=(0, SPACE_2))
+        self.auto_switch = ctk.CTkSwitch(
+            actions, text="", variable=self.auto_refresh_var, command=self._toggle_auto_refresh,
+            width=168, font=FONT_SMALL, progress_color=COLORS.real, button_color=COLORS.surface,
+            button_hover_color=COLORS.raised_surface,
+        )
+        self.auto_switch.grid(row=0, column=1, padx=(0, SPACE_2))
+        self.export_button = ctk.CTkButton(
+            actions, text="", command=self.export_report, width=104, height=34,
+            corner_radius=CONTROL_RADIUS, fg_color=COLORS.surface, border_width=1,
+            border_color=COLORS.border, text_color=COLORS.primary_text, hover_color=COLORS.raised_surface,
+        )
+        self.export_button.grid(row=0, column=2, padx=(0, SPACE_2))
+        self.language_menu = ctk.CTkOptionMenu(
+            actions, values=list(LANGUAGE_LABELS.values()), command=self._change_language,
+            width=112, height=34, corner_radius=CONTROL_RADIUS, fg_color=COLORS.surface,
+            button_color=COLORS.raised_surface, button_hover_color=COLORS.border,
+            text_color=COLORS.primary_text, dropdown_fg_color=COLORS.surface,
+            dropdown_text_color=COLORS.primary_text, dropdown_hover_color=COLORS.accent_soft,
+        )
+        self.language_menu.grid(row=0, column=3)
+
+        self.status_message_label = ctk.CTkLabel(
+            header, textvariable=self.status_message_var, font=FONT_BODY,
+            text_color=COLORS.secondary_text, anchor="w",
+        )
+        self.status_message_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(SPACE_1, 0))
+        meta = ctk.CTkFrame(header, fg_color="transparent")
+        meta.grid(row=2, column=0, columnspan=2, sticky="w", pady=(SPACE_1, 0))
+        self.last_event_title = ctk.CTkLabel(meta, text="", font=FONT_SMALL, text_color=COLORS.secondary_text)
+        self.last_event_title.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(meta, textvariable=self.last_event_var, font=FONT_SMALL, text_color=COLORS.primary_text).grid(row=0, column=1, padx=(SPACE_2, SPACE_4), sticky="w")
+        self.last_refresh_title = ctk.CTkLabel(meta, text="", font=FONT_SMALL, text_color=COLORS.secondary_text)
+        self.last_refresh_title.grid(row=0, column=2, sticky="w")
+        ctk.CTkLabel(meta, textvariable=self.last_refresh_var, font=FONT_SMALL, text_color=COLORS.primary_text).grid(row=0, column=3, padx=(SPACE_2, 0), sticky="w")
 
     def _build_content(self) -> None:
-        content = ttk.Frame(self.root, style="Window.TFrame", padding=(SPACE_4, 0, SPACE_4, SPACE_3))
-        content.grid(row=1, column=0, sticky="nsew")
+        content = ctk.CTkFrame(self.root, fg_color="transparent", corner_radius=0)
+        content.grid(row=1, column=0, sticky="nsew", padx=SPACE_4, pady=(0, SPACE_2))
         content.grid_columnconfigure(0, weight=1)
-        content.grid_rowconfigure(4, weight=1)
+        content.grid_rowconfigure(5, weight=1)
 
-        ttk.Label(content, text="Latest Response Usage", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, SPACE_2))
-        cards = ttk.Frame(content, style="Window.TFrame")
+        self.latest_title = ctk.CTkLabel(content, text="", font=FONT_SECTION, text_color=COLORS.primary_text, anchor="w")
+        self.latest_title.grid(row=0, column=0, sticky="ew", pady=(0, SPACE_1))
+        self._build_metric_cards(content)
+        self.sources_title = ctk.CTkLabel(content, text="", font=FONT_SECTION, text_color=COLORS.primary_text, anchor="w")
+        self.sources_title.grid(row=2, column=0, sticky="ew", pady=(SPACE_2, SPACE_1))
+        self._build_source_panel(content)
+        self._build_segmented_pages(content)
+
+    def _build_metric_cards(self, parent: ctk.CTkFrame) -> None:
+        cards = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
         cards.grid(row=1, column=0, sticky="ew")
-        for column, label in enumerate(("Input", "Output", "Total", "Cached", "Reasoning", "Cache Hit")):
+        for column, label in enumerate(METRIC_ICONS):
             cards.grid_columnconfigure(column, weight=1, uniform="metric")
-            card = ttk.Frame(cards, style="Card.TFrame", padding=(SPACE_3, SPACE_2))
-            card.grid(row=0, column=column, padx=(0 if column == 0 else SPACE_1, 0), sticky="nsew")
+            accent, soft = METRIC_ACCENTS[label]
+            card = ctk.CTkFrame(
+                cards, fg_color=COLORS.surface, corner_radius=CARD_RADIUS,
+                border_width=2 if label == "Total" else 1,
+                border_color=accent if label == "Total" else COLORS.border,
+            )
+            card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else SPACE_1, 0), pady=1)
+            card.grid_columnconfigure(1, weight=1)
+            icon = ctk.CTkLabel(
+                card, text=METRIC_ICONS[label], width=38, height=38, corner_radius=19,
+                fg_color=soft, text_color=accent, font=(FONT_FAMILY, 19, "bold"),
+            )
+            icon.grid(row=0, column=0, rowspan=2, padx=(SPACE_3, SPACE_2), pady=(SPACE_3, SPACE_1))
+            label_var = tk.StringVar(value=label)
             value_var = tk.StringVar(value="—")
-            detail_var = tk.StringVar(value="Unknown")
-            ttk.Label(card, text=label, style="CardLabel.TLabel").grid(row=0, column=0, sticky="w")
-            value_style = "TotalCardValue.TLabel" if label == "Total" else "CardValue.TLabel"
-            value_label = ttk.Label(card, textvariable=value_var, style=value_style, anchor="e")
-            value_label.grid(row=1, column=0, sticky="ew", pady=(SPACE_1, 0))
-            ttk.Label(card, textvariable=detail_var, style="CardDetail.TLabel", wraplength=155).grid(row=2, column=0, sticky="w", pady=(SPACE_1, 0))
-            card.grid_columnconfigure(0, weight=1)
-            self.metric_vars.append((value_var, detail_var))
-            self.metric_value_labels.append(value_label)
+            detail_var = tk.StringVar(value="")
+            ctk.CTkLabel(card, textvariable=label_var, font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w").grid(row=0, column=1, sticky="sw", padx=(0, SPACE_2), pady=(SPACE_2, 0))
+            value_label = ctk.CTkLabel(card, textvariable=value_var, font=FONT_METRIC, text_color=accent, anchor="w")
+            value_label.grid(row=1, column=1, sticky="nw", padx=(0, SPACE_2))
+            detail_label = ctk.CTkLabel(
+                card, textvariable=detail_var, font=(FONT_FAMILY, 10), text_color=COLORS.secondary_text,
+                anchor="w", justify="left", wraplength=120,
+            )
+            detail_label.grid(row=2, column=0, columnspan=2, sticky="ew", padx=SPACE_3, pady=(SPACE_1, SPACE_2))
+            self.metric_widgets.append({
+                "semantic": label, "label_var": label_var, "value_var": value_var,
+                "detail_var": detail_var, "value_label": value_label, "accent": accent,
+            })
 
-        ttk.Label(content, text="Session & Source Status", style="Section.TLabel").grid(row=2, column=0, sticky="w", pady=(SPACE_3, SPACE_2))
-        sources = ttk.Frame(content, style="Surface.TFrame", padding=(SPACE_3, SPACE_2))
-        sources.grid(row=3, column=0, sticky="ew")
-        for column, label in enumerate(("Session Total", "Usage Source", "Session Source", "Logs Adapter", "State Adapter", "Freshness / Time")):
-            sources.grid_columnconfigure(column, weight=1, uniform="sources")
-            ttk.Label(sources, text=label, style="CardLabel.TLabel").grid(row=0, column=column, padx=SPACE_2, sticky="w")
-            variable = tk.StringVar(value="—")
-            value_label = ttk.Label(sources, textvariable=variable, style="Unknown.TLabel", wraplength=180)
-            value_label.grid(row=1, column=column, padx=SPACE_2, sticky="w")
-            self.source_vars[label] = variable
-            self.source_value_labels[label] = value_label
+    def _build_source_panel(self, parent: ctk.CTkFrame) -> None:
+        panel = ctk.CTkFrame(
+            parent, fg_color=COLORS.surface, corner_radius=CARD_RADIUS,
+            border_width=1, border_color=COLORS.border,
+        )
+        panel.grid(row=3, column=0, sticky="ew")
+        icons = ("◆", "▤", "▣", "⛓", "◇", "◷")
+        labels = ("Session Total", "Usage Source", "Session Source", "Logs Adapter", "State Adapter", "Freshness / Time")
+        for column, (icon, label) in enumerate(zip(icons, labels)):
+            panel.grid_columnconfigure(column, weight=1, uniform="source")
+            cell = ctk.CTkFrame(panel, fg_color="transparent", corner_radius=0)
+            cell.grid(row=0, column=column, sticky="nsew", padx=SPACE_2, pady=SPACE_2)
+            icon_label = ctk.CTkLabel(cell, text=icon, width=24, font=(FONT_FAMILY, 16), text_color=COLORS.secondary_text)
+            icon_label.grid(row=0, column=0, rowspan=2, padx=(0, SPACE_1), sticky="n")
+            label_var = tk.StringVar(value=label)
+            value_var = tk.StringVar(value="—")
+            ctk.CTkLabel(cell, textvariable=label_var, font=(FONT_FAMILY, 10), text_color=COLORS.secondary_text, anchor="w").grid(row=0, column=1, sticky="ew")
+            value_label = ctk.CTkLabel(
+                cell, textvariable=value_var, font=(FONT_FAMILY, 10, "bold"),
+                text_color=COLORS.unknown, anchor="w", justify="left", wraplength=116,
+            )
+            value_label.grid(row=1, column=1, sticky="ew")
+            cell.grid_columnconfigure(1, weight=1)
+            self.source_widgets[label] = {"label_var": label_var, "value_var": value_var, "value_label": value_label}
 
-        notebook = ttk.Notebook(content)
-        notebook.grid(row=4, column=0, sticky="nsew", pady=(SPACE_3, 0))
-        self._build_saved_runs_tab(notebook)
-        self._build_manual_input_tab(notebook)
+    def _build_segmented_pages(self, parent: ctk.CTkFrame) -> None:
+        self.segmented = ctk.CTkSegmentedButton(
+            parent, values=["saved", "input"], command=self._show_page,
+            height=34, corner_radius=CONTROL_RADIUS, fg_color=COLORS.raised_surface,
+            selected_color=COLORS.accent, selected_hover_color=COLORS.accent_hover,
+            unselected_color=COLORS.raised_surface, unselected_hover_color=COLORS.accent_soft,
+            text_color=COLORS.primary_text,
+        )
+        self.segmented.grid(row=4, column=0, sticky="w", pady=(SPACE_2, SPACE_1))
+        self.pages = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
+        self.pages.grid(row=5, column=0, sticky="nsew")
+        self.pages.grid_columnconfigure(0, weight=1)
+        self.pages.grid_rowconfigure(0, weight=1)
+        self._build_saved_runs_page()
+        self._build_manual_input_page()
+        self.saved_page.grid(row=0, column=0, sticky="nsew")
 
-    def _build_saved_runs_tab(self, notebook: ttk.Notebook) -> None:
-        tab = ttk.Frame(notebook, style="Window.TFrame", padding=SPACE_3)
-        notebook.add(tab, text="Manual Saved Runs")
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(2, weight=1)
-        ttk.Label(tab, text="Manual Saved Runs", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(tab, text="Only runs explicitly saved by the user appear here.", style="Secondary.TLabel").grid(row=1, column=0, sticky="w", pady=(SPACE_1, SPACE_2))
-        tree_frame = ttk.Frame(tab, style="Window.TFrame")
-        tree_frame.grid(row=2, column=0, sticky="nsew")
+    def _build_saved_runs_page(self) -> None:
+        self.saved_page = ctk.CTkFrame(
+            self.pages, fg_color=COLORS.surface, corner_radius=CARD_RADIUS,
+            border_width=1, border_color=COLORS.border,
+        )
+        self.saved_page.grid_columnconfigure(0, weight=1)
+        self.saved_page.grid_rowconfigure(2, weight=1)
+        self.saved_page_title = ctk.CTkLabel(self.saved_page, text="", font=FONT_SECTION, text_color=COLORS.primary_text, anchor="w")
+        self.saved_page_title.grid(row=0, column=0, sticky="ew", padx=SPACE_3, pady=(SPACE_2, 0))
+        self.saved_note = ctk.CTkLabel(self.saved_page, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
+        self.saved_note.grid(row=1, column=0, sticky="ew", padx=SPACE_3, pady=(0, SPACE_1))
+        tree_frame = ctk.CTkFrame(self.saved_page, fg_color=COLORS.surface, corner_radius=0)
+        tree_frame.grid(row=2, column=0, sticky="nsew", padx=SPACE_3, pady=(0, SPACE_3))
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
-        self.runs_tree = ttk.Treeview(tree_frame, columns=MANUAL_RUN_COLUMNS, show="headings", selectmode="browse")
-        widths = (180, 120, 85, 80, 80, 80, 80, 160)
+        self.runs_tree = ttk.Treeview(
+            tree_frame, columns=MANUAL_RUN_COLUMNS, show="headings", selectmode="browse",
+            style="Monitor.Treeview", height=5,
+        )
+        widths = (160, 100, 70, 64, 64, 64, 64, 140)
         for column, width in zip(MANUAL_RUN_COLUMNS, widths):
             self.runs_tree.heading(column, text=column)
-            self.runs_tree.column(column, width=width, minwidth=60, anchor="e" if column in {"Input", "Output", "Cached", "Total"} else "w")
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.runs_tree.yview)
+            self.runs_tree.column(column, width=width, minwidth=58, anchor="e" if column in {"Input", "Output", "Cached", "Total"} else "w")
+        scrollbar = ctk.CTkScrollbar(tree_frame, command=self.runs_tree.yview, width=12)
         self.runs_tree.configure(yscrollcommand=scrollbar.set)
         self.runs_tree.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(SPACE_1, 0))
 
-    def _build_manual_input_tab(self, notebook: ttk.Notebook) -> None:
-        form = ttk.Frame(notebook, style="Window.TFrame", padding=SPACE_3)
-        notebook.add(form, text="Manual Run Input")
-        for column in (1, 3):
-            form.grid_columnconfigure(column, weight=1)
-        defaults = {
-            "project": "project_003_codex_token_monitor",
-            "title": "Manual Codex run",
-            "session_id": "default-session",
-            "model": "local-estimate-demo",
-            "mode": "manual",
-            "input_tokens": "0",
-            "output_tokens": "0",
-            "cached_tokens": "0",
-        }
-        fields = (
-            ("project", "Project"), ("title", "Title"),
-            ("session_id", "Session ID"), ("model", "Model"),
-            ("mode", "Mode"), ("input_tokens", "Input Tokens"),
-            ("output_tokens", "Output Tokens"), ("cached_tokens", "Cached Tokens"),
+    def _build_manual_input_page(self) -> None:
+        self.input_page = ctk.CTkFrame(
+            self.pages, fg_color=COLORS.surface, corner_radius=CARD_RADIUS,
+            border_width=1, border_color=COLORS.border,
         )
-        for index, (key, label) in enumerate(fields):
-            row, pair = divmod(index, 2)
-            label_column = pair * 2
+        for column in range(8):
+            self.input_page.grid_columnconfigure(column, weight=1 if column % 2 else 0)
+        defaults = {
+            "project": "project_003_codex_token_monitor", "title": "Manual Codex run",
+            "session_id": "default-session", "model": "local-estimate-demo", "mode": "manual",
+            "input_tokens": "0", "output_tokens": "0", "cached_tokens": "0",
+        }
+        field_keys = ("project", "title", "session_id", "model", "mode", "input_tokens", "output_tokens", "cached_tokens")
+        for index, key in enumerate(field_keys):
+            row, group = divmod(index, 4)
+            label_column = group * 2
+            label = ctk.CTkLabel(self.input_page, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
+            label.grid(row=row, column=label_column, sticky="w", padx=(SPACE_3 if group == 0 else SPACE_2, SPACE_1), pady=(SPACE_2, SPACE_1))
             variable = tk.StringVar(value=defaults[key])
+            entry = ctk.CTkEntry(
+                self.input_page, textvariable=variable, width=100, height=30, corner_radius=CONTROL_RADIUS,
+                border_width=1, border_color=COLORS.border, fg_color=COLORS.raised_surface,
+                text_color=COLORS.primary_text,
+            )
+            entry.grid(row=row, column=label_column + 1, sticky="ew", padx=(0, SPACE_3 if group == 3 else SPACE_2), pady=(SPACE_2, SPACE_1))
+            self.form_labels[key] = label
             self.fields[key] = variable
-            ttk.Label(form, text=label, style="Secondary.TLabel").grid(row=row, column=label_column, sticky="w", padx=(0, SPACE_2), pady=SPACE_1)
-            ttk.Entry(form, textvariable=variable).grid(row=row, column=label_column + 1, sticky="ew", padx=(0, SPACE_4), pady=SPACE_1)
 
-        ttk.Label(form, text="Started", style="Secondary.TLabel").grid(row=4, column=0, sticky="w", pady=SPACE_1)
-        ttk.Label(form, textvariable=self.started_at_var).grid(row=4, column=1, sticky="w")
-        ttk.Label(form, text="Ended", style="Secondary.TLabel").grid(row=4, column=2, sticky="w", pady=SPACE_1)
-        ttk.Label(form, textvariable=self.ended_at_var).grid(row=4, column=3, sticky="w")
+        self.form_labels["started"] = ctk.CTkLabel(self.input_page, text="", font=FONT_SMALL, text_color=COLORS.secondary_text)
+        self.form_labels["started"].grid(row=2, column=0, sticky="w", padx=(SPACE_3, SPACE_1), pady=SPACE_1)
+        ctk.CTkLabel(self.input_page, textvariable=self.started_at_var, font=FONT_SMALL, text_color=COLORS.primary_text).grid(row=2, column=1, columnspan=2, sticky="w")
+        self.form_labels["ended"] = ctk.CTkLabel(self.input_page, text="", font=FONT_SMALL, text_color=COLORS.secondary_text)
+        self.form_labels["ended"].grid(row=2, column=4, sticky="w", padx=(SPACE_2, SPACE_1), pady=SPACE_1)
+        ctk.CTkLabel(self.input_page, textvariable=self.ended_at_var, font=FONT_SMALL, text_color=COLORS.primary_text).grid(row=2, column=5, columnspan=3, sticky="w")
 
-        summaries = (("prompt_summary", "Prompt summary"), ("output_summary", "Output summary"), ("note", "Note"))
-        summaries_frame = ttk.Frame(form, style="Window.TFrame")
-        summaries_frame.grid(row=5, column=0, columnspan=4, sticky="nsew", pady=(SPACE_2, 0))
-        for column, (key, label) in enumerate(summaries):
-            summaries_frame.grid_columnconfigure(column, weight=1, uniform="summaries")
-            cell = ttk.Frame(summaries_frame, style="Window.TFrame")
+        summaries = ("prompt_summary", "output_summary", "note")
+        summary_frame = ctk.CTkFrame(self.input_page, fg_color="transparent", corner_radius=0)
+        summary_frame.grid(row=3, column=0, columnspan=8, sticky="nsew", padx=SPACE_3, pady=(SPACE_1, 0))
+        for column, key in enumerate(summaries):
+            summary_frame.grid_columnconfigure(column, weight=1, uniform="summary")
+            cell = ctk.CTkFrame(summary_frame, fg_color="transparent", corner_radius=0)
             cell.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else SPACE_2, 0))
-            ttk.Label(cell, text=label, style="Secondary.TLabel").grid(row=0, column=0, sticky="w")
-            text = tk.Text(cell, wrap="word", height=4, relief="solid", borderwidth=1, background=COLORS.surface, foreground=COLORS.primary_text)
-            text.grid(row=1, column=0, sticky="nsew", pady=(SPACE_1, 0))
+            label = ctk.CTkLabel(cell, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
+            label.grid(row=0, column=0, sticky="ew")
+            text = ctk.CTkTextbox(
+                cell, height=66, corner_radius=CONTROL_RADIUS, border_width=1,
+                border_color=COLORS.border, fg_color=COLORS.raised_surface,
+                text_color=COLORS.primary_text, font=FONT_SMALL,
+            )
+            text.grid(row=1, column=0, sticky="nsew")
             cell.grid_columnconfigure(0, weight=1)
+            self.form_labels[key] = label
             self.text_fields[key] = text
 
-        controls = ttk.Frame(form, style="Window.TFrame")
-        controls.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(SPACE_2, 0))
-        ttk.Button(controls, text="Start Run", command=self.start_run).pack(side="left")
-        ttk.Button(controls, text="End Run", command=self.end_run).pack(side="left", padx=SPACE_2)
-        ttk.Button(controls, text="Save Run", command=self.save_run, style="Accent.TButton").pack(side="left")
-        ttk.Label(controls, text="默认仅保存摘要和手动 token 数；不要保存凭据或 prompt/output 全文。", style="Secondary.TLabel").pack(side="right")
+        controls = ctk.CTkFrame(self.input_page, fg_color="transparent", corner_radius=0)
+        controls.grid(row=4, column=0, columnspan=8, sticky="ew", padx=SPACE_3, pady=(SPACE_2, SPACE_2))
+        controls.grid_columnconfigure(3, weight=1)
+        self.start_button = ctk.CTkButton(controls, text="", command=self.start_run, width=100, height=32, corner_radius=CONTROL_RADIUS, fg_color=COLORS.teal, hover_color="#1E7679")
+        self.start_button.grid(row=0, column=0)
+        self.end_button = ctk.CTkButton(controls, text="", command=self.end_run, width=100, height=32, corner_radius=CONTROL_RADIUS, fg_color="transparent", border_width=1, border_color=COLORS.orange, text_color=COLORS.orange, hover_color=COLORS.orange_soft)
+        self.end_button.grid(row=0, column=1, padx=SPACE_2)
+        self.save_button = ctk.CTkButton(controls, text="", command=self.save_run, width=100, height=32, corner_radius=CONTROL_RADIUS, fg_color="transparent", border_width=1, border_color=COLORS.accent, text_color=COLORS.accent, hover_color=COLORS.accent_soft)
+        self.save_button.grid(row=0, column=2)
+        self.privacy_label = ctk.CTkLabel(
+            controls, text="", font=(FONT_FAMILY, 10), text_color=COLORS.secondary_text,
+            anchor="e", justify="right", wraplength=500,
+        )
+        self.privacy_label.grid(row=0, column=3, sticky="e", padx=(SPACE_3, 0))
+
+    def _show_page(self, selected: str) -> None:
+        saved_label = translate("manual_saved_runs", self.language)
+        self.active_page = "saved" if selected == saved_label else "input"
+        if self.active_page == "saved":
+            self.input_page.grid_remove()
+            self.saved_page.grid(row=0, column=0, sticky="nsew")
+        else:
+            self.saved_page.grid_remove()
+            self.input_page.grid(row=0, column=0, sticky="nsew")
+
+    def _change_language(self, selected: str) -> None:
+        self.language_controller.set_language(language_from_label(selected))
+
+    def _apply_language(self, language: str) -> None:
+        self.language = language
+        if not hasattr(self, "refresh_button"):
+            return
+        self.refresh_button.configure(text=translate("manual_refresh", language))
+        self.export_button.configure(text=translate("export_report", language))
+        self.auto_switch.configure(text=localize_auto_refresh(bool(self.auto_refresh_var.get()), language, DEFAULT_AUTO_REFRESH_SECONDS))
+        self.language_menu.set(LANGUAGE_LABELS[language])
+        self.last_event_title.configure(text=translate("last_event", language))
+        self.last_refresh_title.configure(text=translate("last_refresh", language))
+        self.latest_title.configure(text=translate("latest_usage", language))
+        self.sources_title.configure(text=translate("session_sources", language))
+        saved = translate("manual_saved_runs", language)
+        manual_input = translate("manual_run_input", language)
+        self.segmented.configure(values=[saved, manual_input])
+        self.segmented.set(saved if self.active_page == "saved" else manual_input)
+        self.saved_page_title.configure(text=saved)
+        self.saved_note.configure(text=translate("saved_runs_note", language))
+        for widget in self.metric_widgets:
+            widget["label_var"].set(localize_presenter_label(widget["semantic"], language))
+        for semantic, widget in self.source_widgets.items():
+            widget["label_var"].set(localize_presenter_label(semantic, language))
+        for key, label in self.form_labels.items():
+            label.configure(text=translate(key, language))
+        self.start_button.configure(text=translate("start_run", language))
+        self.end_button.configure(text=translate("end_run", language))
+        self.save_button.configure(text=translate("save_run", language))
+        self.privacy_label.configure(text=translate("privacy_note", language))
+        for column, key in zip(MANUAL_RUN_COLUMNS, MANUAL_RUN_COLUMN_KEYS):
+            self.runs_tree.heading(column, text=translate(key, language))
+        if self.presentation is not None:
+            self._apply_presentation(self.presentation)
 
     def start_run(self) -> None:
         self.started_at = datetime.now()
         self.started_at_var.set(self.started_at.isoformat(timespec="seconds"))
         self.ended_at_var.set("—")
-        self.status_message_var.set("Manual Run started. Values remain local estimates until explicitly saved.")
+        self.status_message_var.set(translate("run_started", self.language))
 
     def end_run(self) -> None:
         if self.started_at is None:
             self.start_run()
         self.ended_at_var.set(datetime.now().isoformat(timespec="seconds"))
-        self.status_message_var.set("Manual Run ended. Use Save Run to store it locally.")
+        self.status_message_var.set(translate("run_ended", self.language))
 
     def save_run(self) -> None:
         run = self._run_from_form()
         result = append_run(run, RUNS_PATH)
         if result.error:
-            messagebox.showerror("Storage error", result.error)
-            self.status_message_var.set(f"Save failed: {result.error}")
+            messagebox.showerror(translate("storage_error", self.language), result.error)
+            self.status_message_var.set(translate("save_failed", self.language, error=result.error))
             return
         self.refresh(result.runs)
 
     def export_report(self) -> None:
         snapshot = self.view_model.refresh()
         if snapshot.storage_error:
-            messagebox.showerror("Storage error", snapshot.storage_error)
+            messagebox.showerror(translate("storage_error", self.language), snapshot.storage_error)
             return
         path = export_report(snapshot.runs, snapshot.summary, ROOT / "reports" / f"token-waste-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md")
-        self.status_message_var.set(f"Report exported: {path}")
+        self.status_message_var.set(translate("report_exported", self.language, path=path))
 
     def manual_refresh(self) -> None:
         self.auto_refresh.manual_refresh()
@@ -261,14 +440,13 @@ class Dashboard:
     def _toggle_auto_refresh(self) -> None:
         enabled = bool(self.auto_refresh_var.get())
         self.auto_refresh.set_enabled(enabled)
-        self.auto_refresh_status_var.set(f"Auto Refresh: {'On' if enabled else 'Off'} ({self.auto_refresh.interval_seconds}s)")
-        self.auto_refresh_label.configure(style="Fresh.TLabel" if enabled else "Unknown.TLabel")
+        self.auto_switch.configure(text=localize_auto_refresh(enabled, self.language, self.auto_refresh.interval_seconds))
         if self.snapshot is not None:
             self.presentation = present_dashboard(self.snapshot, enabled)
             self._apply_presentation(self.presentation)
 
     def _auto_refresh_error(self, _error: Exception) -> None:
-        self.status_message_var.set("Auto refresh failed; the next refresh remains scheduled.")
+        self.status_message_var.set(translate("auto_refresh_failed", self.language))
 
     def close(self) -> None:
         self.auto_refresh.close()
@@ -277,10 +455,7 @@ class Dashboard:
     def refresh(self, runs: list[AgentRun] | None = None) -> None:
         if self.presentation is not None and self.snapshot is not None:
             refreshing = present_dashboard(
-                self.snapshot,
-                bool(self.auto_refresh_var.get()),
-                refreshing=True,
-                previous=self.presentation,
+                self.snapshot, bool(self.auto_refresh_var.get()), refreshing=True, previous=self.presentation,
             )
             self._apply_presentation(refreshing)
             self.root.update_idletasks()
@@ -289,27 +464,29 @@ class Dashboard:
         self._apply_presentation(self.presentation)
 
     def _apply_presentation(self, presentation: DashboardPresentation) -> None:
-        top_status = "Refreshing…" if presentation.data_status.value == "Refreshing" else presentation.data_status.value
-        self.data_status_var.set(top_status)
-        self.data_status_label.configure(style=TONE_STYLES[presentation.status_tone.value])
-        self.status_message_var.set(presentation.status_message)
+        foreground, background = TONE_COLORS[presentation.status_tone.value]
+        self.data_status_var.set(localize_status(presentation.data_status, self.language))
+        self.status_pill.configure(text_color=foreground, fg_color=background)
+        self.status_message_var.set(localize_status_message(presentation.data_status, self.language))
         self.last_event_var.set(presentation.last_event)
         self.last_refresh_var.set(presentation.last_refresh)
-        self.auto_refresh_status_var.set(presentation.auto_refresh)
-        for (value_var, detail_var), value_label, metric in zip(self.metric_vars, self.metric_value_labels, presentation.latest_usage):
-            value_var.set(metric.value)
-            detail_var.set(metric.detail)
-            tone = metric.tone.value.title()
-            prefix = "TotalCard" if metric.label == "Total" else "Card"
-            value_label.configure(style=f"{prefix}{tone}.TLabel")
+        self.auto_switch.configure(text=localize_auto_refresh(bool(self.auto_refresh_var.get()), self.language, DEFAULT_AUTO_REFRESH_SECONDS))
+        for widget, metric in zip(self.metric_widgets, presentation.latest_usage):
+            widget["label_var"].set(localize_presenter_label(metric.label, self.language))
+            widget["value_var"].set(metric.value)
+            widget["detail_var"].set(localize_presenter_text(metric.detail, self.language))
+            color = TONE_COLORS[metric.tone.value][0] if metric.tone.value in {"error", "unknown"} else widget["accent"]
+            widget["value_label"].configure(text_color=color)
         for source in presentation.source_details:
-            self.source_vars[source.label].set(source.value)
-            self.source_value_labels[source.label].configure(style=f"Source{source.tone.value.title()}.TLabel")
+            widget = self.source_widgets[source.label]
+            widget["label_var"].set(localize_presenter_label(source.label, self.language))
+            widget["value_var"].set(localize_presenter_text(source.value, self.language))
+            widget["value_label"].configure(text_color=TONE_COLORS[source.tone.value][0])
         for item in self.runs_tree.get_children():
             self.runs_tree.delete(item)
         for row in presentation.manual_runs:
             self.runs_tree.insert("", "end", values=row.values())
-        self.telemetry.update_values(build_telemetry_values(presentation))
+        self.telemetry.update_values(build_telemetry_values(presentation, self.language))
 
     def _run_from_form(self) -> AgentRun:
         if self.started_at is None:
@@ -329,8 +506,8 @@ class Dashboard:
             elapsed_seconds=max(round((ended - self.started_at).total_seconds()), 0), model=self.fields["model"].get().strip(),
             mode=self.fields["mode"].get().strip(), prompt_summary=_text_value(self.text_fields["prompt_summary"]),
             output_summary=_text_value(self.text_fields["output_summary"]), note=_text_value(self.text_fields["note"]),
-            input_tokens=input_tokens, output_tokens=output_tokens, cached_tokens=cached_tokens, total_tokens=total_tokens,
-            estimated_cost=estimated_cost, cache_hit=cache_hit,
+            input_tokens=input_tokens, output_tokens=output_tokens, cached_tokens=cached_tokens,
+            total_tokens=total_tokens, estimated_cost=estimated_cost, cache_hit=cache_hit,
         )
 
 
@@ -341,12 +518,12 @@ def _parse_int(value: str) -> int:
         return 0
 
 
-def _text_value(widget: tk.Text) -> str:
+def _text_value(widget: ctk.CTkTextbox) -> str:
     return widget.get("1.0", "end").strip()
 
 
-def build_dashboard() -> tk.Tk:
-    root = tk.Tk()
+def build_dashboard() -> ctk.CTk:
+    root = ctk.CTk()
     Dashboard(root)
     return root
 
@@ -359,7 +536,7 @@ def smoke() -> None:
     print(f"data_status={presentation.data_status.value}")
     print(f"session_total={presentation.telemetry_session_total}")
     print(f"current_total={presentation.telemetry_current_total}")
-    print("cache_hit=derived from real usage when available; not an official rate")
+    print("view=CustomTkinter; language=zh-CN default with runtime switch")
     print(f"logs_adapter={snapshot.logs.status.value}")
 
 

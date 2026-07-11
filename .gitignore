@@ -6,5 +6,6 @@ __pycache__/
 reports/
 reports/*.md
 data/*.json
+data/ui-settings.json*
 *.log
 .reasonix/

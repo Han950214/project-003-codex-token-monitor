@@ -1,0 +1,304 @@
+"""Centralized Simplified Chinese and English UI translations."""
+
+from __future__ import annotations
+
+
+DEFAULT_LANGUAGE = "zh-CN"
+SUPPORTED_LANGUAGES = ("zh-CN", "en")
+LANGUAGE_LABELS = {"zh-CN": "简体中文", "en": "English"}
+LANGUAGE_CODES = {label: code for code, label in LANGUAGE_LABELS.items()}
+
+
+TRANSLATIONS: dict[str, dict[str, str]] = {
+    "zh-CN": {
+        "language": "语言",
+        "manual_refresh": "手动刷新",
+        "export_report": "导出报告",
+        "last_event": "最后事件",
+        "last_refresh": "最后刷新",
+        "latest_usage": "最新响应 Usage",
+        "session_sources": "会话与数据源状态",
+        "manual_saved_runs": "手动保存记录",
+        "manual_run_input": "手动 Run 输入",
+        "saved_runs_note": "这里只显示用户明确保存的 Run。",
+        "input": "输入",
+        "output": "输出",
+        "total": "总计",
+        "cached": "缓存",
+        "reasoning": "推理",
+        "cache_hit": "缓存命中率",
+        "session_total": "会话总计",
+        "usage_source": "Usage 来源",
+        "session_source": "会话来源",
+        "logs_adapter": "日志适配器",
+        "state_adapter": "状态适配器",
+        "freshness_time": "新鲜度 / 时间",
+        "status_fresh_real": "实时 · 真实数据",
+        "status_local_estimate": "本地估算",
+        "status_no_data": "暂无数据",
+        "status_refreshing": "正在刷新…",
+        "status_stale": "数据已陈旧",
+        "status_logs_error": "日志适配器错误",
+        "status_state_error": "状态适配器错误",
+        "message_fresh_real": "最新响应 usage 已从 Codex 日志读取。",
+        "message_local_estimate": "正在显示用户最近保存的手动 Run 本地估算。",
+        "message_no_data": "暂无响应 usage。请手动刷新或等待 Codex usage 数据。",
+        "message_refreshing": "加载新 usage 时保留上一次的显示值。",
+        "message_logs_error": "日志适配器无法读取有效数据，响应 usage 暂不可用。",
+        "message_stale": "保留上一次的数据；请手动刷新以获取最新 usage。",
+        "message_state_error": "状态总计暂不可用；最新响应 usage 仍可继续显示。",
+        "auto_refresh_on": "自动刷新：开启（{seconds} 秒）",
+        "auto_refresh_off": "自动刷新：关闭（{seconds} 秒）",
+        "real_usage": "真实 usage",
+        "derived_real_cache": "由真实 usage 推导；不是官方命中率",
+        "local_estimate": "本地估算",
+        "manual_reasoning_unknown": "手动 Run 未记录此项",
+        "local_cache_note": "本地估算；不是真实 Codex 缓存指标",
+        "logs_unavailable": "日志适配器不可用",
+        "unknown_display": "未知",
+        "available": "可用",
+        "no_state_total": "没有可用的状态总计",
+        "connected": "已连接",
+        "database_missing": "数据库不存在",
+        "open_failed": "打开失败",
+        "no_response_completed": "没有 response.completed",
+        "parse_failed": "解析失败",
+        "project": "项目",
+        "title": "标题",
+        "session_id": "会话 ID",
+        "model": "模型",
+        "mode": "模式",
+        "input_tokens": "输入 Tokens",
+        "output_tokens": "输出 Tokens",
+        "cached_tokens": "缓存 Tokens",
+        "started": "开始时间",
+        "ended": "结束时间",
+        "prompt_summary": "指令摘要",
+        "output_summary": "输出摘要",
+        "note": "备注",
+        "start_run": "开始 Run",
+        "end_run": "结束 Run",
+        "save_run": "保存 Run",
+        "privacy_note": "默认仅保存摘要和手动 token 数；不要保存凭据或 prompt/output 全文。",
+        "column_title": "标题",
+        "column_model": "模型",
+        "column_mode": "模式",
+        "column_input": "输入",
+        "column_output": "输出",
+        "column_cached": "缓存",
+        "column_total": "总计",
+        "column_ended_at": "结束时间",
+        "telemetry_local_monitor": "本地监控器",
+        "telemetry_current_total": "当前总计",
+        "telemetry_cache_hit": "缓存命中率",
+        "telemetry_session_total": "会话总计",
+        "telemetry_data_status": "数据状态",
+        "telemetry_auto_refresh": "自动刷新",
+        "value_real": "{value} 真实",
+        "value_estimate": "{value} 估算",
+        "value_derived": "{value} 推导值",
+        "run_started": "手动 Run 已开始；明确保存前仅作为本地估算。",
+        "run_ended": "手动 Run 已结束；点击“保存 Run”后才会写入本地。",
+        "storage_error": "存储错误",
+        "save_failed": "保存失败：{error}",
+        "report_exported": "报告已导出：{path}",
+        "auto_refresh_failed": "自动刷新失败；下一次刷新仍会按计划执行。",
+    },
+    "en": {
+        "language": "Language",
+        "manual_refresh": "Manual Refresh",
+        "export_report": "Export Report",
+        "last_event": "Last Event",
+        "last_refresh": "Last Refresh",
+        "latest_usage": "Latest Response Usage",
+        "session_sources": "Session & Data Sources",
+        "manual_saved_runs": "Manual Saved Runs",
+        "manual_run_input": "Manual Run Input",
+        "saved_runs_note": "Only runs explicitly saved by the user appear here.",
+        "input": "Input",
+        "output": "Output",
+        "total": "Total",
+        "cached": "Cached",
+        "reasoning": "Reasoning",
+        "cache_hit": "Cache Hit",
+        "session_total": "Session Total",
+        "usage_source": "Usage Source",
+        "session_source": "Session Source",
+        "logs_adapter": "Logs Adapter",
+        "state_adapter": "State Adapter",
+        "freshness_time": "Freshness / Time",
+        "status_fresh_real": "Fresh · Real",
+        "status_local_estimate": "Local Estimate",
+        "status_no_data": "No Data",
+        "status_refreshing": "Refreshing…",
+        "status_stale": "Stale Data",
+        "status_logs_error": "Logs Adapter Error",
+        "status_state_error": "State Adapter Error",
+        "message_fresh_real": "Latest response usage is available from Codex logs.",
+        "message_local_estimate": "Showing the latest user-saved manual Run as a local estimate.",
+        "message_no_data": "No response usage is available yet. Use Manual Refresh or wait for Codex usage data.",
+        "message_refreshing": "Previous values remain visible while new usage is loaded.",
+        "message_logs_error": "Response usage is unavailable because the logs adapter could not read valid data.",
+        "message_stale": "Previous data remains visible; use Manual Refresh to load current usage.",
+        "message_state_error": "The state total is unavailable; latest response usage remains visible.",
+        "auto_refresh_on": "Auto Refresh: On ({seconds}s)",
+        "auto_refresh_off": "Auto Refresh: Off ({seconds}s)",
+        "real_usage": "Real usage",
+        "derived_real_cache": "Derived from real usage; not an official rate",
+        "local_estimate": "Local estimate",
+        "manual_reasoning_unknown": "Not recorded by manual Runs",
+        "local_cache_note": "Local estimate; not real Codex cache",
+        "logs_unavailable": "Logs adapter unavailable",
+        "unknown_display": "Unknown",
+        "available": "Available",
+        "no_state_total": "No state total available",
+        "connected": "Connected",
+        "database_missing": "Database missing",
+        "open_failed": "Open failed",
+        "no_response_completed": "No response.completed",
+        "parse_failed": "Parse failed",
+        "project": "Project",
+        "title": "Title",
+        "session_id": "Session ID",
+        "model": "Model",
+        "mode": "Mode",
+        "input_tokens": "Input Tokens",
+        "output_tokens": "Output Tokens",
+        "cached_tokens": "Cached Tokens",
+        "started": "Started",
+        "ended": "Ended",
+        "prompt_summary": "Prompt summary",
+        "output_summary": "Output summary",
+        "note": "Note",
+        "start_run": "Start Run",
+        "end_run": "End Run",
+        "save_run": "Save Run",
+        "privacy_note": "By default, save summaries and manual token counts only; never store credentials or full prompt/output text.",
+        "column_title": "Title",
+        "column_model": "Model",
+        "column_mode": "Mode",
+        "column_input": "Input",
+        "column_output": "Output",
+        "column_cached": "Cached",
+        "column_total": "Total",
+        "column_ended_at": "Ended At",
+        "telemetry_local_monitor": "Local monitor",
+        "telemetry_current_total": "Current Total",
+        "telemetry_cache_hit": "Cache Hit",
+        "telemetry_session_total": "Session Total",
+        "telemetry_data_status": "Data Status",
+        "telemetry_auto_refresh": "Auto Refresh",
+        "value_real": "{value} real",
+        "value_estimate": "{value} estimate",
+        "value_derived": "{value} derived",
+        "run_started": "Manual Run started. Values remain local estimates until explicitly saved.",
+        "run_ended": "Manual Run ended. Use Save Run to store it locally.",
+        "storage_error": "Storage error",
+        "save_failed": "Save failed: {error}",
+        "report_exported": "Report exported: {path}",
+        "auto_refresh_failed": "Auto refresh failed; the next refresh remains scheduled.",
+    },
+}
+
+
+def normalize_language(language: str | None) -> str:
+    return language if language in SUPPORTED_LANGUAGES else DEFAULT_LANGUAGE
+
+
+def language_from_label(label: str) -> str:
+    return LANGUAGE_CODES.get(label, DEFAULT_LANGUAGE)
+
+
+def translate(key: str, language: str = DEFAULT_LANGUAGE, **values: object) -> str:
+    language = normalize_language(language)
+    template = TRANSLATIONS.get(language, {}).get(key)
+    if template is None:
+        template = TRANSLATIONS[DEFAULT_LANGUAGE].get(key, key)
+    try:
+        return template.format(**values)
+    except (KeyError, ValueError):
+        return template
+
+
+STATUS_KEYS = {
+    "Fresh · Real": "status_fresh_real",
+    "Local Estimate": "status_local_estimate",
+    "No Data": "status_no_data",
+    "Refreshing": "status_refreshing",
+    "Stale Data": "status_stale",
+    "Logs Error": "status_logs_error",
+    "State Error": "status_state_error",
+}
+
+STATUS_MESSAGE_KEYS = {
+    "Fresh · Real": "message_fresh_real",
+    "Local Estimate": "message_local_estimate",
+    "No Data": "message_no_data",
+    "Refreshing": "message_refreshing",
+    "Stale Data": "message_stale",
+    "Logs Error": "message_logs_error",
+    "State Error": "message_state_error",
+}
+
+PRESENTER_LABEL_KEYS = {
+    "Input": "input",
+    "Output": "output",
+    "Total": "total",
+    "Cached": "cached",
+    "Reasoning": "reasoning",
+    "Cache Hit": "cache_hit",
+    "Session Total": "session_total",
+    "Usage Source": "usage_source",
+    "Session Source": "session_source",
+    "Logs Adapter": "logs_adapter",
+    "State Adapter": "state_adapter",
+    "Freshness / Time": "freshness_time",
+}
+
+PRESENTER_TEXT_KEYS = {
+    "Real usage": "real_usage",
+    "Derived from real usage; not an official rate": "derived_real_cache",
+    "Local estimate": "local_estimate",
+    "Not recorded by manual Runs": "manual_reasoning_unknown",
+    "Local estimate; not real Codex cache": "local_cache_note",
+    "Logs adapter unavailable": "logs_unavailable",
+    "Unknown": "unknown_display",
+    "Available": "available",
+    "No state total available": "no_state_total",
+    "connected": "connected",
+    "database missing": "database_missing",
+    "open failed": "open_failed",
+    "no response.completed": "no_response_completed",
+    "parse failed": "parse_failed",
+}
+
+TECHNICAL_SOURCE_VALUES = {
+    "codex_logs_sqlite / real usage",
+    "codex_state_sqlite / real total",
+    "local estimate",
+    "unknown",
+}
+
+
+def localize_status(status: object, language: str) -> str:
+    value = getattr(status, "value", str(status))
+    return translate(STATUS_KEYS.get(value, value), language)
+
+
+def localize_status_message(status: object, language: str) -> str:
+    value = getattr(status, "value", str(status))
+    return translate(STATUS_MESSAGE_KEYS.get(value, "unknown_display"), language)
+
+
+def localize_presenter_label(label: str, language: str) -> str:
+    return translate(PRESENTER_LABEL_KEYS.get(label, label), language)
+
+
+def localize_presenter_text(value: str, language: str) -> str:
+    if value in TECHNICAL_SOURCE_VALUES:
+        return value
+    return translate(PRESENTER_TEXT_KEYS.get(value, value), language)
+
+
+def localize_auto_refresh(enabled: bool, language: str, seconds: int = 60) -> str:
+    return translate("auto_refresh_on" if enabled else "auto_refresh_off", language, seconds=seconds)

@@ -8,6 +8,7 @@ from app.telemetry_bar import (
     TELEMETRY_FIELD_LABELS,
     build_telemetry_values,
     build_telemetry_values_from_summary,
+    telemetry_field_labels,
 )
 from app.ui_presenter import present_dashboard
 
@@ -36,13 +37,20 @@ class TelemetryBarTests(unittest.TestCase):
             datetime(2026, 7, 11, tzinfo=timezone.utc),
         )
         presentation = present_dashboard(DashboardSnapshot([], summary, logs, None), False)
-        values = build_telemetry_values(presentation)
-        self.assertEqual(tuple(label for label, _ in values), TELEMETRY_FIELD_LABELS)
+        values = build_telemetry_values(presentation, "zh-CN")
+        self.assertEqual(tuple(label for label, _ in values), telemetry_field_labels("zh-CN"))
         self.assertEqual(values[1][1], "—")
         self.assertEqual(values[2][1], "—")
         self.assertEqual(values[3][1], "—")
-        self.assertEqual(values[4][1], "No Data")
-        self.assertEqual(values[5][1], "Off (60s)")
+        self.assertEqual(values[4][1], "暂无数据")
+        self.assertEqual(values[5][1], "关闭（60 秒）")
+
+    def test_chinese_and_english_labels_preserve_six_field_order(self):
+        self.assertEqual(
+            telemetry_field_labels("zh-CN"),
+            ("Codex Token Monitor", "当前总计", "缓存命中率", "会话总计", "数据状态", "自动刷新"),
+        )
+        self.assertEqual(telemetry_field_labels("en"), TELEMETRY_FIELD_LABELS)
 
     def test_real_session_total_has_distinct_source_label(self):
         summary = SessionSummary(

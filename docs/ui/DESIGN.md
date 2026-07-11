@@ -1,10 +1,10 @@
 # Codex Token Monitor 设计合同
 
-本文件是 Phase 2.5-UI-A 的唯一设计合同。当前运行时数据合同优先；本合同只冻结视觉层级、状态表达和 Tkinter/ttk 翻译边界。
+本文件是 Phase 2.5-UI-A/A2 的唯一设计合同。当前运行时数据合同优先；本合同只冻结视觉层级、状态表达和桌面 View 翻译边界。
 
 ## 产品定位
 
-Codex Token Monitor 是 Windows 本地 token usage 监控工具：现代、克制、低干扰且高信息密度。保持 Tkinter/ttk 技术栈；它不是 SaaS 后台、不是完整 Codex 工作台，也不模仿 Reasonix。
+Codex Token Monitor 是 Windows 本地 token usage 监控工具：现代、克制、低干扰且高信息密度。View 层使用 CustomTkinter，表格保留 `ttk.Treeview`；它不是 SaaS 后台、不是完整 Codex 工作台，也不模仿 Reasonix。
 
 ## 冻结参考
 
@@ -90,8 +90,8 @@ Codex Token Monitor 是 Windows 本地 token usage 监控工具：现代、克�
 - telemetry bar 保持固定且紧凑的高度。
 - 不依赖网页响应式布局。
 
-## Tkinter 翻译边界
+## 桌面 View 翻译边界
 
-允许使用 `ttk.Frame`、`ttk.Label`、`ttk.Button`、`ttk.Checkbutton`、`ttk.Entry`、`ttk.Treeview`、`ttk.Separator`，以及集中式 `ttk.Style` 和 design token 常量。
+CustomTkinter 是唯一允许的轻量第三方 View 层依赖；卡片、按钮、输入、开关、分段标签和主要容器优先使用其原生组件。`ttk.Treeview` 可继续承担表格，集中式 `ttk.Style` 只用于统一表格外观。
 
-不得复制 HTML/CSS；不得改用 Electron、WebView、Qt 或网页应用；不得引入重型 UI 依赖；不得以复杂 Canvas 模拟网页视觉；不得使用毛玻璃、阴影动画或渐变；不得修改 usage、refresh、storage 或 adapter 数据合同。
+不得复制 HTML/CSS/JavaScript；不得改用 Electron、WebView、Qt、React 或浏览器 UI；不得引入其他第三方 UI 框架；不得以复杂 Canvas 模拟网页视觉；不得使用毛玻璃、阴影动画或渐变。数据、adapter、storage、refresh、report 与 presenter 合同保持不变，参考图中的虚构数据不得进入运行时。
