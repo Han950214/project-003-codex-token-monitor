@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.codex_rollout import CodexRolloutReader, TokenUsage, configured_sessions_dir
+from app.codex_rollout import CodexRolloutReader, TokenUsage, _event_time, configured_sessions_dir
 
 
 def event(kind, turn=None, last=None, total=None, timestamp=1, duration_ms=None):
@@ -73,6 +73,21 @@ class RolloutReaderTests(unittest.TestCase):
                 handle.write("\n{\"bad\"")
             result = CodexRolloutReader().refresh(Path(directory))
         self.assertTrue(result.available)
+
+    def test_iso_z_and_offset_describe_the_same_utc_time(self):
+        zulu = _event_time({"timestamp": "2026-07-11T12:48:34.418Z"}, {})
+        offset = _event_time({"timestamp": "2026-07-11T20:48:34.418+08:00"}, {})
+        self.assertEqual(zulu, offset)
+        self.assertEqual(zulu.tzinfo.utcoffset(zulu).total_seconds(), 0)
+
+    def test_result_retains_latest_cumulative_usage_and_event_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = [event("token_count", last=usage(0, 0, 0, 0), total=usage(3, 1, 1, 0), timestamp="2026-07-11T12:00:00Z"), event("task_started", "t"), event("token_count", "t", usage(2, 1, 1, 0), usage(5, 2, 2, 0), timestamp="2026-07-11T12:01:00Z")]
+            self.write(directory, events)
+            result = CodexRolloutReader().refresh(Path(directory))
+        self.assertEqual(result.thread_cumulative_usage, TokenUsage(5, 2, 2, 0, 7))
+        self.assertIsNotNone(result.observed_at)
+        self.assertIsNotNone(result.refreshed_at)
 
 
 if __name__ == "__main__":

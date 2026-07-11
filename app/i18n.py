@@ -16,7 +16,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "export_report": "导出报告",
         "last_event": "最后事件",
         "last_refresh": "最后刷新",
-        "latest_usage": "最新响应 Usage",
+        "latest_usage": "当前 / 最近指令 Usage",
         "session_sources": "会话与数据源状态",
         "manual_saved_runs": "手动保存记录",
         "manual_run_input": "手动 Run 输入",
@@ -48,6 +48,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "cache_derived_input": "由 Input 推导；不是官方命中率",
         "reconciled": "已对账",
         "unavailable": "不可用",
+        "mismatch": "不匹配",
+        "instruction_partial": "部分已验证的指令 usage；对账未完成",
+        "instruction_input_scope": "该指令全部模型调用输入上下文",
+        "instruction_output_scope": "该指令全部模型调用输出，包含推理",
+        "instruction_total_scope": "该指令 Input + Output",
+        "instruction_cached_scope": "该指令 Input 的缓存子集",
+        "instruction_reasoning_scope": "该指令 Output 的推理子集",
+        "instruction_exact_suffix": "精确指令 usage",
+        "instruction_growing_suffix": "已验证数值仍可能增长",
+        "instruction_partial_suffix": "部分已验证数据；对账未完成",
         "status_fresh_real": "实时 · 真实数据",
         "status_local_estimate": "本地估算",
         "status_no_data": "暂无数据",
@@ -55,6 +65,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status_stale": "数据已陈旧",
         "status_logs_error": "日志适配器错误",
         "status_state_error": "状态适配器错误",
+        "status_instruction_incomplete": "指令 Usage 不完整",
         "message_fresh_real": "最新响应 usage 已从 Codex 日志读取。",
         "message_local_estimate": "正在显示用户最近保存的手动 Run 本地估算。",
         "message_no_data": "暂无响应 usage。请手动刷新或等待 Codex usage 数据。",
@@ -62,6 +73,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "message_logs_error": "日志适配器无法读取有效数据，响应 usage 暂不可用。",
         "message_stale": "保留上一次的数据；请手动刷新以获取最新 usage。",
         "message_state_error": "状态总计暂不可用；最新响应 usage 仍可继续显示。",
+        "message_instruction_incomplete": "指令 usage 不完整；仅显示已验证的模型调用。",
         "auto_refresh_on": "自动刷新：开启（{seconds} 秒）",
         "auto_refresh_off": "自动刷新：关闭（{seconds} 秒）",
         "real_usage": "真实 usage",
@@ -125,7 +137,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "export_report": "Export Report",
         "last_event": "Last Event",
         "last_refresh": "Last Refresh",
-        "latest_usage": "Latest Response Usage",
+        "latest_usage": "Current / Latest Instruction Usage",
         "session_sources": "Session & Data Sources",
         "manual_saved_runs": "Manual Saved Runs",
         "manual_run_input": "Manual Run Input",
@@ -157,6 +169,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "cache_derived_input": "Derived from Input; not an official rate",
         "reconciled": "reconciled",
         "unavailable": "unavailable",
+        "mismatch": "mismatch",
+        "instruction_partial": "Partial verified instruction usage; reconciliation incomplete",
+        "instruction_input_scope": "All model-call input context for this instruction",
+        "instruction_output_scope": "All model-call output for this instruction, including Reasoning",
+        "instruction_total_scope": "Input + Output for this instruction",
+        "instruction_cached_scope": "Cached subset of this instruction Input",
+        "instruction_reasoning_scope": "Reasoning subset of this instruction Output",
+        "instruction_exact_suffix": "exact instruction usage",
+        "instruction_growing_suffix": "verified values can still grow",
+        "instruction_partial_suffix": "partial verified data; reconciliation incomplete",
         "status_fresh_real": "Fresh · Real",
         "status_local_estimate": "Local Estimate",
         "status_no_data": "No Data",
@@ -164,6 +186,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status_stale": "Stale Data",
         "status_logs_error": "Logs Adapter Error",
         "status_state_error": "State Adapter Error",
+        "status_instruction_incomplete": "Instruction Usage Incomplete",
         "message_fresh_real": "Latest response usage is available from Codex logs.",
         "message_local_estimate": "Showing the latest user-saved manual Run as a local estimate.",
         "message_no_data": "No response usage is available yet. Use Manual Refresh or wait for Codex usage data.",
@@ -171,6 +194,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "message_logs_error": "Response usage is unavailable because the logs adapter could not read valid data.",
         "message_stale": "Previous data remains visible; use Manual Refresh to load current usage.",
         "message_state_error": "The state total is unavailable; latest response usage remains visible.",
+        "message_instruction_incomplete": "Instruction usage is incomplete; only verified model calls are shown.",
         "auto_refresh_on": "Auto Refresh: On ({seconds}s)",
         "auto_refresh_off": "Auto Refresh: Off ({seconds}s)",
         "real_usage": "Real usage",
@@ -258,6 +282,7 @@ STATUS_KEYS = {
     "Stale Data": "status_stale",
     "Logs Error": "status_logs_error",
     "State Error": "status_state_error",
+    "Instruction Usage Incomplete": "status_instruction_incomplete",
 }
 
 STATUS_MESSAGE_KEYS = {
@@ -268,6 +293,7 @@ STATUS_MESSAGE_KEYS = {
     "Stale Data": "message_stale",
     "Logs Error": "message_logs_error",
     "State Error": "message_state_error",
+    "Instruction Usage Incomplete": "message_instruction_incomplete",
 }
 
 PRESENTER_LABEL_KEYS = {
@@ -315,6 +341,14 @@ PRESENTER_TEXT_KEYS = {
     "Derived from Input; not an official rate": "cache_derived_input",
     "reconciled": "reconciled",
     "unavailable": "unavailable",
+    "mismatch": "mismatch",
+    "Instruction usage is incomplete; only verified calls are shown.": "message_instruction_incomplete",
+    "Partial verified instruction usage; reconciliation incomplete": "instruction_partial",
+    "All model-call input context for this instruction": "instruction_input_scope",
+    "All model-call output for this instruction, including Reasoning": "instruction_output_scope",
+    "Input + Output for this instruction": "instruction_total_scope",
+    "Cached subset of this instruction Input": "instruction_cached_scope",
+    "Reasoning subset of this instruction Output": "instruction_reasoning_scope",
 }
 
 TECHNICAL_SOURCE_VALUES = {
@@ -342,6 +376,13 @@ def localize_presenter_label(label: str, language: str) -> str:
 def localize_presenter_text(value: str, language: str) -> str:
     if value in TECHNICAL_SOURCE_VALUES:
         return value
+    for suffix, key in (
+        ("; exact instruction usage", "instruction_exact_suffix"),
+        ("; verified values can still grow", "instruction_growing_suffix"),
+        ("; partial verified data; reconciliation incomplete", "instruction_partial_suffix"),
+    ):
+        if value.endswith(suffix):
+            return f"{localize_presenter_text(value[: -len(suffix)], language)}；{translate(key, language)}"
     return translate(PRESENTER_TEXT_KEYS.get(value, value), language)
 
 

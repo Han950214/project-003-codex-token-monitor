@@ -2,9 +2,9 @@
 
 Codex Token Monitor Skill is an independent local-first project for estimating and visualizing token usage in Codex Desktop workflows. It is designed as a GitHub-agent-skill-style toolkit with a Windows desktop floating window / Dashboard as the first user-facing surface.
 
-Boundary: session total tokens may be labeled `codex_state_sqlite / real total`, and latest `response.completed` numeric usage may be labeled `codex_logs_sqlite / real usage`. Cache hit is derived from usage numbers, not an official cache hit rate; cost, budget, and context remain estimates, not real billing.
+Current boundary: the Dashboard reads privacy-safe numeric metadata from Rollout JSONL and displays a current or latest instruction aggregate. `logs_2.sqlite` is a legacy adapter, not the current usage source. State Thread Total is reconciled only when the same Thread's cumulative total matches exactly. Cache hit is derived from usage numbers, not an official rate; cost, budget, and context remain estimates.
 
-关键边界：本项目当前独立开发，不修改 AOS 主仓库，不接入云端，不读取真实凭据，不读取 Codex hidden reasoning tokens，不做真实扣费。session total tokens 可明确标注为 `codex_state_sqlite / real total`；latest `response.completed` numeric usage 可明确标注为 `codex_logs_sqlite / real usage`。cache hit 只是由 usage 数字推导，不是官方命中率；cost/budget/context 仍不能当作真实账单、真实余额或 provider 官方 usage。
+关键边界：本项目当前独立开发，不修改 AOS 主仓库，不接入云端，不读取真实凭据，不做真实扣费。当前 Dashboard 从 Rollout JSONL 读取安全的数字元数据，展示当前或最近的单指令聚合；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。State Thread Total 仅在同一 Thread 的累计数值完全一致时标记为已对账。
 
 ## MVP
 
@@ -20,7 +20,7 @@ Boundary: session total tokens may be labeled `codex_state_sqlite / real total`,
 ## Project Layout
 
 ```text
-app/        Minimal Python stdlib mock Dashboard and metric logic.
+app/        CustomTkinter Dashboard and metric logic.
 docs/       Product, UI, telemetry model, advisor, and AOS integration notes.
 resources/  Sample run data, report template, and pricing config sample.
 tests/      Metric tests and validation notes.
@@ -61,11 +61,13 @@ dist\CodexTokenMonitor\CodexTokenMonitor.exe
 
 ## Current Status
 
-Phase 2.7-A reads privacy-safe numeric metadata from the active Codex rollout and shows exact per-instruction usage only after cumulative-token reconciliation. `logs_2.sqlite` is retained as a legacy adapter but is no longer the Dashboard current-usage source; see [Rollout instruction usage](docs/rollout-instruction-usage.md).
+Phase 2.7-A reads privacy-safe numeric metadata from the active Codex rollout and shows exact per-instruction usage only after cumulative-token reconciliation. State is marked reconciled only when its total exactly matches the selected Rollout Thread cumulative total. `logs_2.sqlite` is retained as a legacy adapter but is no longer the Dashboard current-usage source; see [Rollout instruction usage](docs/rollout-instruction-usage.md).
 
 Phase 2-MVP adds manual local run records, JSON persistence, session summaries, and Markdown report export. It saves prompt/output summaries and manual token counts only by default; do not store credentials or private prompt/output full text.
 
-Phase 2.4-B presents the latest `response.completed` input, output, total, cached, and reasoning token values independently in the Dashboard. It also shows a cache hit estimate derived from real cached/input values, the logs adapter status, and either the reliable event time (`Latest response at`) or the successful refresh time (`Refreshed at`). Missing values are shown as `unknown`, never invented as zero.
+### Historical Phase 2.4 logs adapter notes
+
+Phase 2.4-B presented the latest `response.completed` values from `logs_2.sqlite`; this is historical behavior, not the current Dashboard usage source.
 
 Phase 2.4-C adds a stateful logs reader and optional low-frequency automatic refresh. The first read performs one initial lookup; later refreshes use the indexed `(ts, ts_nanos, id)` cursor and process at most 500 new rows per scan instead of revalidating the full log. Auto Refresh defaults to Off with a fixed 60-second interval, can be enabled or disabled in the Dashboard, and never saves a Run, exports a report, or writes to Codex SQLite. Recent Runs still comes only from explicit `Save Run / 保存` actions.
 

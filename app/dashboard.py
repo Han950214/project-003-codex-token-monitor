@@ -20,6 +20,7 @@ class DashboardSnapshot:
     rollout: RolloutUsageResult
     state_total: CodexThreadTotal | None
     state_reconciled: bool
+    state_reconciliation: str = "unavailable"
     storage_error: str | None = None
 
 
@@ -43,12 +44,19 @@ class DashboardViewModel:
         load_result = self.runs_loader(self.runs_path) if runs is None else LoadResult(runs)
         rollout = self.rollout_loader()
         state_total = self.state_loader(rollout.thread_id) if rollout.thread_id else None
-        usage = rollout.instruction.usage if rollout.instruction and rollout.instruction.exact else None
         summary = summarize_runs(load_result.runs, self.pricing, state_total.total_tokens if state_total else None)
-        state_reconciled = bool(state_total and rollout.instruction and usage and state_total.thread_id == rollout.thread_id)
-        return DashboardSnapshot(load_result.runs, summary, rollout, state_total, state_reconciled, load_result.error)
+        reconciliation = _state_reconciliation(rollout, state_total)
+        return DashboardSnapshot(load_result.runs, summary, rollout, state_total, reconciliation == "reconciled", reconciliation, load_result.error)
 
 
 def instruction_usage(snapshot: DashboardSnapshot) -> InstructionUsage | None:
     instruction = snapshot.rollout.instruction
     return instruction if instruction and (instruction.exact or instruction.in_progress) else None
+
+
+def _state_reconciliation(rollout: RolloutUsageResult, state_total: CodexThreadTotal | None) -> str:
+    if state_total is None or not rollout.thread_id or rollout.thread_cumulative_usage is None:
+        return "unavailable"
+    if state_total.thread_id != rollout.thread_id:
+        return "unavailable"
+    return "reconciled" if state_total.total_tokens == rollout.thread_cumulative_usage.total_tokens else "mismatch"

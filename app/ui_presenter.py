@@ -26,6 +26,7 @@ class DataStatus(str, Enum):
     STALE_DATA = "Stale Data"
     LOGS_ERROR = "Logs Error"
     STATE_ERROR = "State Error"
+    INCOMPLETE = "Instruction Usage Incomplete"
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,8 @@ def present_dashboard(snapshot: DashboardSnapshot, auto_refresh_enabled: bool, r
     instruction = instruction_usage(snapshot)
     if instruction is None:
         status, tone, message = DataStatus.NO_DATA, UiTone.UNKNOWN, "Rollout instruction usage is unavailable."
+    elif instruction.in_progress and instruction.unreconciled_events:
+        status, tone, message = DataStatus.INCOMPLETE, UiTone.ERROR, "Instruction usage is incomplete; only verified calls are shown."
     elif instruction.in_progress:
         status, tone, message = DataStatus.FRESH_REAL, UiTone.FRESH, "Instruction is in progress; verified values can still increase."
     elif instruction.exact:
@@ -81,9 +84,9 @@ def present_dashboard(snapshot: DashboardSnapshot, auto_refresh_enabled: bool, r
             SourceDisplay("Instruction Status", instruction.status if instruction else "unavailable", tone),
             SourceDisplay("Model Calls", str(instruction.model_calls) if instruction else "—", tone),
             SourceDisplay("Instruction Elapsed", _duration(instruction.duration_ms) if instruction else "—", tone),
-            SourceDisplay("State/Rollout", "reconciled" if snapshot.state_reconciled else "unavailable", UiTone.FRESH if snapshot.state_reconciled else UiTone.UNKNOWN),
+            SourceDisplay("State/Rollout", snapshot.state_reconciliation, _reconciliation_tone(snapshot.state_reconciliation)),
         ),
-        "—", "—", format_auto_refresh(auto_refresh_enabled), tuple(manual_run_row(run) for run in snapshot.runs), current, cache, session_total,
+        _format_time(snapshot.rollout.observed_at), _format_time(snapshot.rollout.refreshed_at), format_auto_refresh(auto_refresh_enabled), tuple(manual_run_row(run) for run in snapshot.runs), current, cache, session_total,
     )
     return replace(result, data_status=DataStatus.REFRESHING, status_tone=UiTone.FRESH, status_message="Previous values remain visible while new usage is loaded.") if refreshing else result
 
@@ -101,10 +104,22 @@ def _latest_metrics(instruction) -> tuple[MetricDisplay, ...]:
         return tuple(MetricDisplay(label, "—", "Rollout unavailable", UiTone.UNKNOWN) for label in ("Input", "Output", "Total", "Cached", "Reasoning", "Cache Hit"))
     usage = instruction.usage
     hit = "—" if usage.input_tokens == 0 else f"{usage.cached_input_tokens / usage.input_tokens * 100:.1f}%"
-    detail = "Verified instruction usage; still growing" if instruction.in_progress else "Exact instruction usage"
+    if instruction.unreconciled_events:
+        suffix, tone = "; partial verified data; reconciliation incomplete", UiTone.ESTIMATE
+    elif instruction.in_progress:
+        suffix, tone = "; verified values can still grow", UiTone.FRESH
+    else:
+        suffix, tone = "; exact instruction usage", UiTone.FRESH
     values = (usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.cached_input_tokens, usage.reasoning_output_tokens)
-    metrics = [MetricDisplay(label, f"{value:,}", detail, UiTone.FRESH) for label, value in zip(("Input", "Output", "Total", "Cached", "Reasoning"), values)]
-    metrics.append(MetricDisplay("Cache Hit", hit, "Derived from Input; not an official rate", UiTone.FRESH if hit != "—" else UiTone.UNKNOWN))
+    scopes = (
+        "All model-call input context for this instruction",
+        "All model-call output for this instruction, including Reasoning",
+        "Input + Output for this instruction",
+        "Cached subset of this instruction Input",
+        "Reasoning subset of this instruction Output",
+    )
+    metrics = [MetricDisplay(label, f"{value:,}", scope + suffix, tone) for label, value, scope in zip(("Input", "Output", "Total", "Cached", "Reasoning"), values, scopes)]
+    metrics.append(MetricDisplay("Cache Hit", hit, "Derived from Input; not an official rate", tone if hit != "—" else UiTone.UNKNOWN))
     return tuple(metrics)
 
 
@@ -118,3 +133,11 @@ def _telemetry_current(instruction) -> tuple[str, str]:
 
 def _duration(value: int | None) -> str:
     return f"{value / 1000:.1f}s" if value is not None else "—"
+
+
+def _format_time(value) -> str:
+    return value.astimezone().isoformat(timespec="seconds") if value else "—"
+
+
+def _reconciliation_tone(value: str) -> UiTone:
+    return UiTone.FRESH if value == "reconciled" else (UiTone.ESTIMATE if value == "mismatch" else UiTone.UNKNOWN)

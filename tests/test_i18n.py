@@ -18,7 +18,7 @@ class I18nTests(unittest.TestCase):
     def test_key_translations_are_complete_in_both_languages(self):
         self.assertEqual(set(TRANSLATIONS["zh-CN"]), set(TRANSLATIONS["en"]))
         expected = {
-            "latest_usage": ("最新响应 Usage", "Latest Response Usage"),
+            "latest_usage": ("当前 / 最近指令 Usage", "Current / Latest Instruction Usage"),
             "manual_saved_runs": ("手动保存记录", "Manual Saved Runs"),
             "manual_run_input": ("手动 Run 输入", "Manual Run Input"),
             "export_report": ("导出报告", "Export Report"),
@@ -26,6 +26,8 @@ class I18nTests(unittest.TestCase):
         for key, (zh, en) in expected.items():
             self.assertEqual(translate(key, "zh-CN"), zh)
             self.assertEqual(translate(key, "en"), en)
+        self.assertNotIn("最新响应", translate("latest_usage", "zh-CN"))
+        self.assertNotIn("Latest Response", translate("latest_usage", "en"))
 
     def test_unknown_language_and_missing_key_fall_back_safely(self):
         self.assertEqual(translate("manual_refresh", "xx"), "手动刷新")

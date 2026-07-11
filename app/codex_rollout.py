@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -63,6 +63,9 @@ class RolloutUsageResult:
     thread_id: str | None
     instruction: InstructionUsage | None
     available: bool
+    thread_cumulative_usage: TokenUsage | None = None
+    observed_at: datetime | None = None
+    refreshed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def thread_suffix(self) -> str | None:
@@ -81,20 +84,22 @@ class CodexRolloutReader:
         self.candidate_limit = candidate_limit
 
     def refresh(self, sessions_dir: Path | None = None) -> RolloutUsageResult:
+        refreshed_at = datetime.now(timezone.utc)
         root = sessions_dir or configured_sessions_dir()
         if not root.is_dir():
-            return RolloutUsageResult(None, None, None, False)
+            return RolloutUsageResult(None, None, None, False, refreshed_at=refreshed_at)
         candidates = sorted(root.rglob("rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[: self.candidate_limit]
-        parsed = [self._read(path) for path in candidates]
+        parsed = [self._read(path, refreshed_at) for path in candidates]
         valid = [item for item in parsed if item[1].available]
         if not valid:
-            return RolloutUsageResult(None, None, None, False)
+            return RolloutUsageResult(None, None, None, False, refreshed_at=refreshed_at)
         # Event time, rather than file name or mtime, chooses the active compatible rollout.
         return max(valid, key=lambda item: item[0])[1]
 
-    def _read(self, path: Path) -> tuple[float, RolloutUsageResult]:
-        events: list[tuple[str, dict[str, Any], float]] = []
-        newest_token_time = -1.0
+    def _read(self, path: Path, refreshed_at: datetime) -> tuple[datetime, RolloutUsageResult]:
+        events: list[tuple[str, dict[str, Any], datetime | None]] = []
+        newest_token_time: datetime | None = None
+        thread_cumulative_usage: TokenUsage | None = None
         thread_id: str | None = None
         try:
             with path.open("r", encoding="utf-8") as handle:
@@ -123,18 +128,26 @@ class CodexRolloutReader:
                     when = _event_time(record, payload)
                     events.append((name, payload, when))
                     if name == "token_count" and _usage_from_payload(payload) is not None:
-                        newest_token_time = max(newest_token_time, when)
+                        info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+                        total = _usage_from_mapping(info.get("total_token_usage"))
+                        if total is not None:
+                            if when is None:
+                                thread_cumulative_usage = thread_cumulative_usage or total
+                            elif newest_token_time is None or when > newest_token_time:
+                                thread_cumulative_usage = total
+                                newest_token_time = when
         except OSError:
-            return -1.0, RolloutUsageResult(None, None, None, False)
-        if newest_token_time < 0:
-            return -1.0, RolloutUsageResult(None, None, None, False)
+            return datetime.min.replace(tzinfo=timezone.utc), RolloutUsageResult(None, None, None, False, refreshed_at=refreshed_at)
+        if thread_cumulative_usage is None:
+            return datetime.min.replace(tzinfo=timezone.utc), RolloutUsageResult(None, None, None, False, refreshed_at=refreshed_at)
         instruction = _instruction_from_events(events)
         if instruction is None:
-            return -1.0, RolloutUsageResult(None, thread_id, None, False)
-        return newest_token_time, RolloutUsageResult(path.name, thread_id, instruction, True)
+            return datetime.min.replace(tzinfo=timezone.utc), RolloutUsageResult(path.name, thread_id, None, False, thread_cumulative_usage, newest_token_time, refreshed_at)
+        result = RolloutUsageResult(path.name, thread_id, instruction, True, thread_cumulative_usage, newest_token_time, refreshed_at)
+        return newest_token_time or datetime.min.replace(tzinfo=timezone.utc), result
 
 
-def _instruction_from_events(events: list[tuple[str, dict[str, Any], float]]) -> InstructionUsage | None:
+def _instruction_from_events(events: list[tuple[str, dict[str, Any], datetime | None]]) -> InstructionUsage | None:
     cumulative: TokenUsage | None = None
     epoch = 0
     turns: dict[str, dict[str, Any]] = {}
@@ -225,20 +238,24 @@ def _string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _event_time(record: dict[str, Any], payload: dict[str, Any]) -> float:
+def _event_time(record: dict[str, Any], payload: dict[str, Any]) -> datetime | None:
     value = record.get("timestamp", record.get("ts", payload.get("timestamp")))
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
+        try:
+            return datetime.fromtimestamp(value, timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=timezone.utc if "+" not in value and "Z" not in value else None).timestamp()
+            parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+            return (parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed).astimezone(timezone.utc)
         except ValueError:
             pass
-    return 0.0
+    return None
 
 
-def _duration_from_times(start: float, end: float) -> int | None:
-    return max(round((end - start) * 1000), 0) if start and end else None
+def _duration_from_times(start: datetime | None, end: datetime | None) -> int | None:
+    return max(round((end - start).total_seconds() * 1000), 0) if start and end else None
 
 
 def _sum_usage(usages: Any) -> TokenUsage:
