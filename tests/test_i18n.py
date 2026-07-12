@@ -7,6 +7,7 @@ from app.i18n import (
     localize_presenter_label,
     localize_status,
     translate,
+    translate,
 )
 from app.ui_presenter import DataStatus
 
@@ -27,6 +28,7 @@ class I18nTests(unittest.TestCase):
             "last_7_days": ("最近 7 天", "Last 7 days"),
             "recent_sessions_note": ("显示最近检测到的 Codex 会话，最多检查 500 条近期记录。", "Showing recently detected Codex sessions; up to 500 recent records are checked."),
             "recent_sessions_note_truncated": ("记录较多，本次仅检查最近 500 条；可缩小时间范围以提高速度。", "Many records were found. Only the latest 500 were checked; choose a shorter time range for faster loading."),
+            "thread_cumulative_usage_title": ("会话累计 Usage（当前指令不可用）", "Session Cumulative Usage (Instruction Unavailable)"),
         }
         for key, (zh, en) in expected.items():
             self.assertEqual(translate(key, "zh-CN"), zh)
@@ -49,6 +51,19 @@ class I18nTests(unittest.TestCase):
         self.assertEqual(localize_auto_refresh(True, "zh-CN"), "自动刷新：开启（60 秒）")
         self.assertEqual(localize_auto_refresh(False, "zh-CN"), "自动刷新：关闭（60 秒）")
         self.assertEqual(localize_auto_refresh(True, "en"), "Auto Refresh: On (60s)")
+
+    def test_cumulative_title_is_localized_in_chinese(self):
+        self.assertEqual(translate("thread_cumulative_usage_title", "zh-CN"), "会话累计 Usage（当前指令不可用）")
+
+    def test_cumulative_title_is_localized_in_english(self):
+        self.assertEqual(translate("thread_cumulative_usage_title", "en"), "Session Cumulative Usage (Instruction Unavailable)")
+
+    def test_instruction_title_remains_unchanged(self):
+        self.assertEqual(translate("latest_usage", "zh-CN"), "当前 / 最近指令 Usage")
+
+    def test_cumulative_title_key_exists_in_both_languages(self):
+        self.assertIn("thread_cumulative_usage_title", TRANSLATIONS["zh-CN"])
+        self.assertIn("thread_cumulative_usage_title", TRANSLATIONS["en"])
 
     def test_user_facing_source_labels_hide_engineering_terms(self):
         self.assertEqual(localize_presenter_label("Data Sync", "zh-CN"), "数据同步")

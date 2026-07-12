@@ -73,6 +73,7 @@ class DashboardPresentation:
     telemetry_current_total: str
     telemetry_cache_hit: str
     telemetry_session_total: str
+    usage_scope: str = "unavailable"
 
 
 def present_dashboard(
@@ -89,17 +90,21 @@ def present_dashboard(
     instruction = instruction_usage(snapshot)
     status = display_session_status(snapshot.selected_session, instruction)
     data_status, tone = _data_status(status)
-    latest = _latest_metrics(instruction, status)
-    current, cache = _telemetry_current(instruction)
     cumulative = (
         snapshot.selected_session.thread_cumulative_usage
         if snapshot.selected_session else snapshot.rollout.thread_cumulative_usage
     )
+    latest = _latest_metrics(instruction, status, cumulative)
+    current, cache = _telemetry_current(instruction)
     session_total = f"{cumulative.total_tokens:,}" if cumulative else "—"
+    usage_scope = "instruction" if instruction is not None and instruction.usage is not None else (
+        "thread_cumulative" if cumulative is not None else "unavailable"
+    )
+    model_calls = "—" if instruction is None or (instruction.usage is None and instruction.model_calls == 0) else str(instruction.model_calls)
     sources = (
         SourceDisplay("Data Source", "Local Codex", UiTone.FRESH if snapshot.selected_session else UiTone.UNKNOWN),
         SourceDisplay("Current Task", status, tone),
-        SourceDisplay("Model Calls", str(instruction.model_calls) if instruction else "—", tone),
+        SourceDisplay("Model Calls", model_calls, tone),
         SourceDisplay("Task Elapsed", _duration(instruction.duration_ms, instruction.in_progress) if instruction else "—", tone),
         SourceDisplay("Data Sync", snapshot.state_reconciliation, _reconciliation_tone(snapshot.state_reconciliation)),
     )
@@ -108,7 +113,7 @@ def present_dashboard(
         data_status, tone, _status_message(status), latest, sources,
         _format_time(snapshot.selected_session.observed_at if snapshot.selected_session else snapshot.rollout.observed_at),
         _format_time(snapshot.sessions_result.refreshed_at if snapshot.sessions_result.sessions else snapshot.rollout.refreshed_at),
-        format_auto_refresh(auto_refresh_enabled), recent, current, cache, session_total,
+        format_auto_refresh(auto_refresh_enabled), recent, current, cache, session_total, usage_scope,
     )
 
 
@@ -150,15 +155,20 @@ def _recent_row(session) -> RecentSessionRow:
     )
 
 
-def _latest_metrics(instruction, status: str) -> tuple[MetricDisplay, ...]:
-    if instruction is None or instruction.usage is None:
+def _latest_metrics(instruction, status: str, cumulative=None) -> tuple[MetricDisplay, ...]:
+    usage = instruction.usage if instruction is not None else None
+    cumulative_fallback = usage is None and cumulative is not None
+    if usage is None and not cumulative_fallback:
         return tuple(MetricDisplay(label, "—", "Unavailable", UiTone.UNKNOWN) for label in ("Input", "Output", "Total", "Cached", "Reasoning", "Cache Hit"))
-    usage = instruction.usage
+    usage = cumulative if cumulative_fallback else usage
+    assert usage is not None
     hit = "—" if usage.input_tokens == 0 else f"{usage.cached_input_tokens / usage.input_tokens * 100:.1f}%"
     tone = (
-        UiTone.ESTIMATE if status == "completed_partial" or instruction.unreconciled_events
+        UiTone.ESTIMATE if status == "completed_partial" or (instruction is not None and instruction.unreconciled_events)
         else (UiTone.STALE if status == "incomplete" else UiTone.FRESH)
     )
+    if cumulative_fallback:
+        tone = UiTone.STALE
     values = (usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.cached_input_tokens, usage.reasoning_output_tokens)
     details = (
         "All model-call input context for this instruction",
@@ -167,8 +177,11 @@ def _latest_metrics(instruction, status: str) -> tuple[MetricDisplay, ...]:
         "Cached subset of this instruction Input",
         "Reasoning subset of this instruction Output",
     )
+    if cumulative_fallback:
+        details = ("Thread cumulative usage; latest instruction unavailable",) * 5
     metrics = [MetricDisplay(label, f"{value:,}", detail, tone) for label, value, detail in zip(("Input", "Output", "Total", "Cached", "Reasoning"), values, details)]
-    metrics.append(MetricDisplay("Cache Hit", hit, "Derived from Input; not an official rate", tone if hit != "—" else UiTone.UNKNOWN))
+    cache_detail = "Thread cumulative usage; latest instruction unavailable" if cumulative_fallback else "Derived from Input; not an official rate"
+    metrics.append(MetricDisplay("Cache Hit", hit, cache_detail, tone if hit != "—" else UiTone.UNKNOWN))
     return tuple(metrics)
 
 

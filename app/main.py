@@ -211,7 +211,7 @@ class Dashboard:
         self.range_menu.set(translate(f"last_{self.lookback_days}_days", language))
         self.last_event_title.configure(text=translate("last_event", language))
         self.last_refresh_title.configure(text=translate("last_refresh", language))
-        self.latest_title.configure(text=translate("latest_usage", language))
+        self.latest_title.configure(text=self._usage_scope_title(self.presentation, language))
         self.sources_title.configure(text=translate("session_sources", language))
         self.recent_title.configure(text=translate("recent_sessions", language))
         self.recent_note.configure(text=self._recent_sessions_note())
@@ -296,6 +296,7 @@ class Dashboard:
         self.status_message_var.set(localize_presenter_text(presentation.status_message, self.language))
         self.last_event_var.set(presentation.last_event)
         self.last_refresh_var.set(presentation.last_refresh)
+        self.latest_title.configure(text=self._usage_scope_title(presentation, self.language))
         self.recent_note.configure(text=self._recent_sessions_note())
         for widget, metric in zip(self.metric_widgets, presentation.latest_usage):
             widget["label_var"].set(localize_presenter_label(metric.label, self.language))
@@ -369,6 +370,12 @@ class Dashboard:
     def _recent_sessions_note(self) -> str:
         truncated = bool(self.snapshot and self.snapshot.sessions_result.candidate_truncated)
         return translate("recent_sessions_note_truncated" if truncated else "recent_sessions_note", self.language)
+
+    @staticmethod
+    def _usage_scope_title(presentation: DashboardPresentation | None, language: str) -> str:
+        scope = presentation.usage_scope if presentation is not None else "instruction"
+        key = "thread_cumulative_usage_title" if scope == "thread_cumulative" else "latest_usage"
+        return translate(key, language)
 
 
 def build_dashboard() -> ctk.CTk:
