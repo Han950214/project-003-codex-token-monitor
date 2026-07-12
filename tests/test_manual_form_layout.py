@@ -22,9 +22,9 @@ class ManualRunRemovalTests(unittest.TestCase):
     def test_programmatic_session_highlight_does_not_pin_or_refresh(self):
         source = inspect.getsource(main.Dashboard._select_recent_row)
         self.assertIn("self.sessions_tree.focus() != thread_id", source)
-        self.assertIn("self.root.after_idle(self._refresh_selected_task)", source)
+        self.assertIn("select_cached_thread", source)
+        self.assertIn("refresh_quota=False", source)
         self.assertNotIn("selection_set", inspect.getsource(main.Dashboard._render_sessions_inner))
-        self.assertIn("render_session_rows=False", inspect.getsource(main.Dashboard._refresh_selected_task))
 
     def test_only_unavailable_rows_are_excluded_from_task_selector(self):
         source = inspect.getsource(main.Dashboard._render_sessions_inner)

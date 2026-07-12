@@ -56,6 +56,7 @@ class DashboardViewModel:
         *,
         rollout_sessions_loader: Callable[[], RolloutSessionsResult] | None = None,
         state_batch_loader: Callable[[tuple[str, ...]], dict[str, CodexThreadMetadata]] = load_thread_metadata,
+        title_batch_loader: Callable[[], dict[str, str]] | None = None,
         rollout_reader: CodexRolloutReader | None = None,
         **legacy: object,
     ) -> None:
@@ -71,15 +72,32 @@ class DashboardViewModel:
             (lambda ids: _legacy_metadata(ids, legacy_state))
             if callable(legacy_state) else state_batch_loader
         )
+        self.title_batch_loader = title_batch_loader or (lambda: {})
         self.selection_mode = "auto"
         self.selected_thread_id: str | None = None
         self._known_paths: dict[str, Path] = {}
         self._known_sessions: dict[str, CodexSessionUsage] = {}
+        self._title_cache: dict[str, str] = {}
+        self._last_snapshot: DashboardSnapshot | None = None
         self.lookback_days = 7
 
-    def set_auto_follow(self) -> None:
+    def set_auto_follow(self) -> DashboardSnapshot | None:
         self.selection_mode = "auto"
         self.selected_thread_id = None
+        if self._last_snapshot and self._last_snapshot.recent_sessions:
+            return self._cached_snapshot(self._last_snapshot.recent_sessions[0], "auto")
+        return None
+
+    def select_cached_thread(self, thread_id: str) -> DashboardSnapshot | None:
+        """Select from the last full refresh without storage or server reads."""
+        if self._last_snapshot is None:
+            return None
+        selected = next((item for item in self._last_snapshot.recent_sessions if item.thread_id == thread_id), None)
+        if selected is None or selected.status == "unavailable":
+            return None
+        self.selection_mode = "pinned"
+        self.selected_thread_id = thread_id
+        return self._cached_snapshot(selected, "pinned")
 
     def pin_thread(self, thread_id: str) -> bool:
         if not thread_id:
@@ -120,11 +138,12 @@ class DashboardViewModel:
             + ([selected.thread_id] if selected is not None else [])
         ))
         metadata = self.state_batch_loader(tuple(thread_ids)) if thread_ids else {}
-        recent = [self._apply_title(session, metadata.get(session.thread_id)) for session in recent]
+        self._title_cache = self.title_batch_loader()
+        recent = [self._apply_title(session) for session in recent]
         if selected is not None:
             selected = next(
                 (item for item in recent if item.thread_id == selected.thread_id),
-                self._apply_title(selected, metadata.get(selected.thread_id)),
+                self._apply_title(selected),
             )
             self._known_sessions[selected.thread_id] = selected
 
@@ -141,12 +160,14 @@ class DashboardViewModel:
             selected.observed_at if selected else None,
             result.refreshed_at,
         )
-        return DashboardSnapshot(
+        snapshot = DashboardSnapshot(
             (), summary, rollout, state_total, reconciliation == "reconciled",
             reconciliation, None, result, tuple(recent), selected, metadata,
             self.selection_mode, selected.thread_id if selected else self.selected_thread_id,
             self.lookback_days,
         )
+        self._last_snapshot = snapshot
+        return snapshot
 
     def refresh_thread(self, thread_id: str | None) -> MiniThreadSnapshot:
         """Refresh one already-known Thread without changing Dashboard selection."""
@@ -156,12 +177,13 @@ class DashboardViewModel:
         if session is None:
             return MiniThreadSnapshot("", None, "unavailable", None)
         session = _effective_session_status(session, datetime.now(session.observed_at.tzinfo))
-        metadata = self.state_batch_loader((thread_id,)).get(thread_id)
-        session = self._apply_title(session, metadata)
+        self.state_batch_loader((thread_id,))
+        session = self._apply_title(session)
         self._known_sessions[thread_id] = session
         usage = session.thread_cumulative_usage
-        total = usage.total_tokens if usage is not None and session.status != "unavailable" else None
-        return MiniThreadSnapshot(session.display_title, total, session.status, session.observed_at)
+        status = display_session_status(session, session.instruction)
+        total = usage.total_tokens if usage is not None and status != "unavailable" else None
+        return MiniThreadSnapshot(session.display_title, total, status, session.observed_at)
 
     def _select(self, sessions: list[CodexSessionUsage]) -> CodexSessionUsage | None:
         if self.selection_mode == "auto":
@@ -178,14 +200,31 @@ class DashboardViewModel:
         known = self._known_sessions.get(thread_id)
         return replace(known, instruction=None, thread_cumulative_usage=None, status="unavailable") if known else None
 
-    @staticmethod
-    def _apply_title(
-        session: CodexSessionUsage, metadata: CodexThreadMetadata | None
-    ) -> CodexSessionUsage:
-        if metadata is not None and metadata.title:
-            return replace(session, display_title=_bounded_display_title(metadata.title), title_source="threads.title")
+    def _apply_title(self, session: CodexSessionUsage) -> CodexSessionUsage:
+        title = self._title_cache.get(session.thread_id)
+        if title:
+            return replace(session, display_title=_bounded_display_title(title), title_source="codex_app_server.thread_display_title")
         fallback = f"Codex Session · {session.observed_at.astimezone().strftime('%m-%d %H:%M')}"
         return replace(session, display_title=fallback, title_source="safe timestamp fallback")
+
+    def _cached_snapshot(self, selected: CodexSessionUsage, mode: str) -> DashboardSnapshot:
+        previous = self._last_snapshot
+        assert previous is not None
+        state_item = previous.state_metadata.get(selected.thread_id)
+        reconciliation = _state_reconciliation(selected, state_item)
+        rollout = RolloutUsageResult(
+            selected.rollout_filename, selected.thread_id, selected.instruction,
+            selected.status != "unavailable", selected.thread_cumulative_usage,
+            selected.observed_at, previous.rollout.refreshed_at,
+        )
+        snapshot = replace(
+            previous, rollout=rollout, state_total=_as_total(state_item),
+            state_reconciled=reconciliation == "reconciled",
+            state_reconciliation=reconciliation, selected_session=selected,
+            selection_mode=mode, selected_thread_id=selected.thread_id,
+        )
+        self._last_snapshot = snapshot
+        return snapshot
 
 
 def instruction_usage(snapshot: DashboardSnapshot) -> InstructionUsage | None:

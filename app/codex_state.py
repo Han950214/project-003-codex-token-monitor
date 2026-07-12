@@ -13,8 +13,6 @@ from typing import Sequence
 DEFAULT_CODEX_STATE_PATH = Path.home() / ".codex" / "state_5.sqlite"
 CODEX_STATE_PATH_ENV = "CODEX_STATE_DB"
 SAFE_BASE_COLUMNS = ("id", "created_at", "updated_at", "model", "model_provider", "tokens_used")
-SAFE_TITLE_COLUMN = "title"
-MAX_TITLE_CHARS = 72
 
 
 @dataclass(frozen=True)
@@ -25,7 +23,6 @@ class CodexThreadMetadata:
     model: str | None
     model_provider: str | None
     total_tokens: int | None
-    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,16 +48,15 @@ def load_thread_metadata(
     database = path or configured_state_path()
     if not identifiers or not database.is_file():
         return {}
-    rows, has_title = _fetch_threads(database, identifiers)
+    rows = _fetch_threads(database, identifiers)
     result: dict[str, CodexThreadMetadata] = {}
     for row in rows:
         total = _optional_int(row[5])
         if total is not None and total < 0:
             total = None
-        title = _bounded_title(row[6], row[7]) if has_title else None
         item = CodexThreadMetadata(
             str(row[0]), _optional_int(row[1]), _optional_int(row[2]),
-            _optional_text(row[3]), _optional_text(row[4]), total, title,
+            _optional_text(row[3]), _optional_text(row[4]), total,
         )
         result[item.thread_id] = item
     return result
@@ -95,7 +91,7 @@ def load_thread_total(thread_id: str, path: Path | None = None) -> CodexThreadTo
 
 def _fetch_threads(
     database: Path, thread_ids: tuple[str, ...]
-) -> tuple[list[tuple[object, ...]], bool]:
+) -> list[tuple[object, ...]]:
     uri = database.resolve().as_uri() + "?mode=ro"
     placeholders = ",".join("?" for _ in thread_ids)
     try:
@@ -103,20 +99,15 @@ def _fetch_threads(
             connection.execute("PRAGMA query_only=ON")
             schema = {str(row[1]) for row in connection.execute("PRAGMA table_info(threads)")}
             if not set(SAFE_BASE_COLUMNS).issubset(schema):
-                return [], False
-            has_title = SAFE_TITLE_COLUMN in schema
+                return []
             columns = ", ".join(SAFE_BASE_COLUMNS)
-            if has_title:
-                # Never transfer a full long title into Python. Some Codex
-                # title rows can contain tens of thousands of characters.
-                columns += f", substr({SAFE_TITLE_COLUMN}, 1, {MAX_TITLE_CHARS}), length({SAFE_TITLE_COLUMN})"
             rows = connection.execute(
                 f"SELECT {columns} FROM threads WHERE id IN ({placeholders})",
                 thread_ids,
             ).fetchall()
-            return rows, has_title
+            return rows
     except (OSError, sqlite3.Error):
-        return [], False
+        return []
 
 
 def _total_from_row(row: tuple[object, ...] | None) -> CodexThreadTotal | None:
@@ -140,14 +131,3 @@ def _optional_int(value: object) -> int | None:
 
 def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
-
-
-def _bounded_title(value: object, length_value: object) -> str | None:
-    title = _optional_text(value)
-    if title is None:
-        return None
-    title = " ".join(title.split())
-    length = _optional_int(length_value) or len(title)
-    if length > MAX_TITLE_CHARS:
-        return title[: MAX_TITLE_CHARS - 1].rstrip() + "…"
-    return title

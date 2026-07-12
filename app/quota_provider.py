@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -40,7 +41,7 @@ class CodexAppServerQuotaProvider:
         self.executable = Path(executable) if executable else find_codex_executable()
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self._process: subprocess.Popen[str] | None = None
-        self._messages: queue.Queue[dict[str, object]] = queue.Queue()
+        self._messages: queue.Queue[tuple[int, str]] = queue.Queue()
         self._request_id = 0
         self._last_success: CodexQuotaSnapshot | None = None
         self._lock = threading.Lock()
@@ -71,12 +72,35 @@ class CodexAppServerQuotaProvider:
         with self._lock:
             self._stop()
 
+    def refresh_thread_titles(self) -> dict[str, str]:
+        """Return one safe, structured title batch over the shared connection."""
+        with self._lock:
+            try:
+                self._ensure_started()
+                result = self._request(
+                    "thread/list",
+                    {"limit": 500, "archived": False, "sortKey": "updated_at",
+                     "sortDirection": "desc", "sourceKinds": [
+                         "cli", "vscode", "exec", "appServer", "subAgent",
+                         "subAgentReview", "subAgentCompact", "subAgentThreadSpawn",
+                         "subAgentOther", "unknown",
+                     ], "useStateDbOnly": False},
+                    parser=_parse_thread_titles_response,
+                )
+                return result if isinstance(result, dict) else {}
+            except Exception:
+                self._stop()
+                return {}
+
     def _ensure_started(self) -> None:
         if self._process is not None and self._process.poll() is None:
             return
         if self.executable is None or not self.executable.is_file():
             raise FileNotFoundError("codex_cli_missing")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        child_env = os.environ.copy()
+        child_env.pop("CODEX_THREAD_ID", None)
+        child_env.setdefault("CODEX_HOME", str(Path.home() / ".codex"))
         self._process = subprocess.Popen(
             [str(self.executable), "app-server", "--stdio"],
             stdin=subprocess.PIPE,
@@ -86,6 +110,7 @@ class CodexAppServerQuotaProvider:
             encoding="utf-8",
             bufsize=1,
             creationflags=creationflags,
+            env=child_env,
         )
         self._messages = queue.Queue()
         threading.Thread(target=self._read_messages, daemon=True).start()
@@ -97,7 +122,7 @@ class CodexAppServerQuotaProvider:
                     "title": "Codex Token Monitor",
                     "version": "0.1.0",
                 },
-                "capabilities": None,
+                "capabilities": {"experimentalApi": True},
             },
         )
         if not isinstance(response, Mapping):
@@ -109,14 +134,11 @@ class CodexAppServerQuotaProvider:
         if process is None or process.stdout is None:
             return
         for line in process.stdout:
-            try:
-                message = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(message, dict):
-                self._messages.put(message)
+            match = re.search(r'"id"\s*:\s*(\d+)', line)
+            if match:
+                self._messages.put((int(match.group(1)), line))
 
-    def _request(self, method: str, params: object) -> object:
+    def _request(self, method: str, params: object, *, parser=json.loads) -> object:
         self._request_id += 1
         request_id = self._request_id
         self._write({"id": request_id, "method": method, "params": params})
@@ -124,13 +146,16 @@ class CodexAppServerQuotaProvider:
         while time.monotonic() < deadline:
             remaining = max(0.01, deadline - time.monotonic())
             try:
-                message = self._messages.get(timeout=min(0.25, remaining))
+                message_id, raw = self._messages.get(timeout=min(0.25, remaining))
             except queue.Empty:
                 if self._process is None or self._process.poll() is not None:
                     raise RuntimeError("app_server_stopped")
                 continue
-            if message.get("id") != request_id:
+            if message_id != request_id:
                 continue
+            message = parser(raw)
+            if not isinstance(message, Mapping):
+                raise RuntimeError("app_server_response_error")
             if "error" in message:
                 raise RuntimeError("app_server_response_error")
             return message.get("result")
@@ -275,3 +300,138 @@ def _safe_error_code(error: Exception) -> str:
         "app_server_unavailable",
     }
     return message if message in allowed else "quota_refresh_failed"
+
+
+class _JsonCursor:
+    """Small selective JSON reader; skipped values are never decoded."""
+
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+        self.pos = 0
+
+    def ws(self) -> None:
+        while self.pos < len(self.raw) and self.raw[self.pos].isspace():
+            self.pos += 1
+
+    def string(self, decode: bool = True) -> str:
+        self.ws()
+        start = self.pos
+        if self.raw[self.pos] != '"':
+            raise ValueError("json_string_expected")
+        self.pos += 1
+        escaped = False
+        while self.pos < len(self.raw):
+            char = self.raw[self.pos]
+            self.pos += 1
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                token = self.raw[start:self.pos]
+                return json.loads(token) if decode else ""
+        raise ValueError("json_string_unterminated")
+
+    def skip(self) -> None:
+        self.ws()
+        char = self.raw[self.pos]
+        if char == '"':
+            self.string(False)
+            return
+        if char in "[{":
+            stack = ["]" if char == "[" else "}"]
+            self.pos += 1
+            in_string = escaped = False
+            while self.pos < len(self.raw) and stack:
+                char = self.raw[self.pos]
+                self.pos += 1
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                elif char == '"':
+                    in_string = True
+                elif char == "{":
+                    stack.append("}")
+                elif char == "[":
+                    stack.append("]")
+                elif char == stack[-1]:
+                    stack.pop()
+            return
+        while self.pos < len(self.raw) and self.raw[self.pos] not in ",}]":
+            self.pos += 1
+
+    def expect(self, char: str) -> None:
+        self.ws()
+        if self.pos >= len(self.raw) or self.raw[self.pos] != char:
+            raise ValueError("json_shape_invalid")
+        self.pos += 1
+
+
+def _parse_thread_titles_response(raw: str) -> dict[str, object]:
+    cursor = _JsonCursor(raw)
+    titles: dict[str, str] = {}
+
+    def thread() -> None:
+        cursor.expect("{")
+        thread_id = name = None
+        while True:
+            cursor.ws()
+            if cursor.raw[cursor.pos] == "}":
+                cursor.pos += 1
+                break
+            key = cursor.string()
+            cursor.expect(":")
+            if key in {"id", "name"} and cursor.raw[cursor.pos:].lstrip().startswith('"'):
+                cursor.ws()
+                value = cursor.string()
+                if key == "id": thread_id = value
+                else: name = value
+            else:
+                cursor.skip()
+            cursor.ws()
+            if cursor.raw[cursor.pos] == ",": cursor.pos += 1
+        safe = _safe_thread_title(name)
+        if thread_id and safe:
+            titles[thread_id] = safe
+
+    def data_array() -> None:
+        cursor.expect("[")
+        while True:
+            cursor.ws()
+            if cursor.raw[cursor.pos] == "]": cursor.pos += 1; return
+            thread()
+            cursor.ws()
+            if cursor.raw[cursor.pos] == ",": cursor.pos += 1
+
+    def object_with(target: str, handler) -> None:
+        cursor.expect("{")
+        while True:
+            cursor.ws()
+            if cursor.raw[cursor.pos] == "}": cursor.pos += 1; return
+            key = cursor.string(); cursor.expect(":")
+            handler() if key == target else cursor.skip()
+            cursor.ws()
+            if cursor.raw[cursor.pos] == ",": cursor.pos += 1
+
+    object_with("result", lambda: object_with("data", data_array))
+    return {"result": titles}
+
+
+def _safe_thread_title(value: object, limit: int = 72) -> str | None:
+    if not isinstance(value, str):
+        return None
+    title = " ".join(value.split())
+    lowered = title.lower()
+    rejected = (
+        not title or lowered.startswith("/goal") or
+        "referenced pasted text files" in lowered or
+        lowered.startswith("the following is the codex agent history") or
+        "c:\\users\\" in lowered or "file:" in lowered
+    )
+    if rejected:
+        return None
+    return title if len(title) <= limit else title[: limit - 1].rstrip() + "…"

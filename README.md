@@ -2,7 +2,7 @@
 
 Codex Token Monitor Skill is an independent local-first project for estimating and visualizing token usage in Codex Desktop workflows. It is designed as a GitHub-agent-skill-style toolkit with a Windows desktop floating window / Dashboard as the first user-facing surface.
 
-Current boundary: the Dashboard discovers multiple recent Codex Threads from Rollout JSONL, keeps their token data separate, auto-follows the latest activity, and can pin one Thread for monitoring. `state_5.sqlite` is queried once per refresh for a parameterized batch of safe metadata; `threads.title` is the dedicated title source, with a timestamp fallback when unavailable. No preview or message body is read.
+Current boundary: the Dashboard discovers multiple recent Codex Threads from Rollout JSONL, keeps their token data separate, auto-follows the latest activity, and can pin one Thread for monitoring. `state_5.sqlite` is queried once per full refresh for safe metadata, while user-facing titles come from one structured Codex `app-server` `thread/list` batch. Body-like names are rejected and fall back to a timestamp; no preview or message body is decoded.
 
 关键边界：本项目当前独立开发，不修改 AOS 主仓库，不接入云端，不读取真实凭据，不做真实扣费。当前 Dashboard 从 Rollout JSONL 读取安全的数字元数据，展示当前或最近的单指令聚合；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。State Thread Total 仅在同一 Thread 的累计数值完全一致时标记为已对账。
 
@@ -69,11 +69,11 @@ Phase 2.8-A 在主 Dashboard 最小化时隐藏主窗口，并显示一个置顶
 
 ## Current Status
 
-Phase 2.8-A 保留 Phase 2.7-B 的多 Thread 分离、500 条近期候选、已知路径回读和 Rollout 进程内缓存规则。默认选择仍可自动跟随最近活动；主窗口最小化时会把当时实际选中的 Thread 解析为固定选择，迷你组件期间其他 Thread 更新不会触发跳转。近期列表默认 7 天，可切换 30 或 90 天。
+Phase 2.8-A-S 保留多 Thread 分离、500 条近期候选、已知路径回读和 Rollout 进程内缓存规则。近期列表每页 10 条，可在内存中翻页；点击近期行或下拉任务时直接切换完整刷新留下的快照，不重新读取 Rollout、SQLite、标题或额度。默认选择仍可自动跟随最近活动；主窗口最小化时会把当时实际选中的 Thread 解析为固定选择。近期范围默认 7 天，可切换 30 或 90 天。
 
 The current Dashboard no longer loads or writes the legacy manual Runs JSON and no longer shows manual Run input, saved-Run, or report-export controls. `AgentRun`, `app/storage.py`, `app/reporting.py`, existing Runs JSON, historical reports, and their compatibility tests remain preserved.
 
-Thread titles use only a bounded prefix of the dedicated `threads.title` field; the full long value is never transferred into Python or the UI. If it is unavailable, the UI uses `Codex 会话 · MM-DD HH:mm` / `Codex Session · MM-DD HH:mm`; it never uses preview, prompts, responses, messages, tool output, or reasoning content to generate a title. See [Rollout instruction usage](docs/rollout-instruction-usage.md).
+Thread titles use the installed Codex `app-server` structured `Thread.name` field. One full refresh makes one `thread/list` batch request over the same persistent app-server connection used by quota reads; the selective parser decodes only `id` and `name`, never `preview`, turns or message content. Prompt-like/path-like names are rejected. Missing or rejected names use `Codex 会话 · MM-DD HH:mm` / `Codex Session · MM-DD HH:mm`. See [Rollout instruction usage](docs/rollout-instruction-usage.md).
 
 ### Historical Phase 2.4 logs adapter notes
 

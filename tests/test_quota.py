@@ -9,6 +9,7 @@ from app.quota import CodexQuotaSnapshot, QuotaKind, QuotaWindow
 from app.quota_provider import (
     CodexAppServerQuotaProvider,
     SOURCE_LABEL,
+    _parse_thread_titles_response,
     snapshot_from_app_server,
 )
 
@@ -177,6 +178,12 @@ class QuotaProviderTests(unittest.TestCase):
         source = inspect.getsource(CodexAppServerQuotaProvider)
         self.assertNotIn("print(", source)
         self.assertNotIn("auth.json", source)
+
+    def test_thread_title_parser_accepts_sidebar_name_and_rejects_body_like_name(self):
+        raw = '{"id":7,"result":{"data":[{"id":"a","name":"审核 Codex 限额数据源","preview":"SECRET"},{"id":"b","name":"/goal Referenced pasted text files: C:\\\\Users\\\\x","preview":"SECRET"}]}}'
+        result = _parse_thread_titles_response(raw)["result"]
+        self.assertEqual(result, {"a": "审核 Codex 限额数据源"})
+        self.assertNotIn("SECRET", repr(result))
 
 
 if __name__ == "__main__":

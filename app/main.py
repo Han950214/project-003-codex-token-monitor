@@ -43,11 +43,20 @@ SESSION_COLUMN_KEYS = (
 )
 
 
+def pagination_bounds(item_count: int, current_page: int, page_size: int = 10) -> tuple[int, int, int, int]:
+    page_count = max(1, (max(0, item_count) + page_size - 1) // page_size)
+    page = min(max(1, current_page), page_count)
+    start = (page - 1) * page_size
+    return page, page_count, start, min(start + page_size, max(0, item_count))
+
+
 class Dashboard:
     def __init__(self, root: ctk.CTk, quota_provider: QuotaProvider | None = None) -> None:
         self.root = root
         configure_view(root)
-        self.view_model = DashboardViewModel()
+        self.quota_provider = quota_provider or CodexAppServerQuotaProvider()
+        title_loader = getattr(self.quota_provider, "refresh_thread_titles", lambda: {})
+        self.view_model = DashboardViewModel(title_batch_loader=title_loader)
         self.language_controller = LanguageController(self._apply_language, UI_SETTINGS_PATH)
         self.language = self.language_controller.language
         self.snapshot = None
@@ -57,13 +66,14 @@ class Dashboard:
         self.selectable_thread_ids: set[str] = set()
         self._rendering_sessions = False
         self._selection_refresh_pending = False
+        self.current_page = 1
+        self.page_size = 10
         self._widget_mode = False
         self._taskbar_mode = False
         self._taskbar_iconify_scheduled = False
         self._widget_thread_id: str | None = None
         self._last_dashboard_geometry = "1180x760"
         self._mini_thread_snapshot = MiniThreadSnapshot("", None, "no_selection", None)
-        self.quota_provider = quota_provider or CodexAppServerQuotaProvider()
         self.quota_snapshot = CodexQuotaSnapshot.unavailable()
 
         self.auto_refresh_var = tk.BooleanVar(value=False)
@@ -217,6 +227,15 @@ class Dashboard:
         self.sessions_tree.configure(yscrollcommand=scrollbar.set)
         self.sessions_tree.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns", padx=(SPACE_1, 0))
+        pager = ctk.CTkFrame(panel, fg_color="transparent")
+        pager.grid(row=3, column=0, sticky="ew", padx=SPACE_3, pady=(0, SPACE_2))
+        pager.grid_columnconfigure(1, weight=1)
+        self.previous_page_button = ctk.CTkButton(pager, text="", width=72, command=self._previous_page)
+        self.previous_page_button.grid(row=0, column=0)
+        self.page_status_var = tk.StringVar(value="")
+        ctk.CTkLabel(pager, textvariable=self.page_status_var, text_color=COLORS.secondary_text).grid(row=0, column=1)
+        self.next_page_button = ctk.CTkButton(pager, text="", width=72, command=self._next_page)
+        self.next_page_button.grid(row=0, column=2)
 
     def _change_language(self, selected: str) -> None:
         self.language_controller.set_language(language_from_label(selected))
@@ -240,6 +259,8 @@ class Dashboard:
         self.sources_title.configure(text=translate("session_sources", language))
         self.recent_title.configure(text=translate("recent_sessions", language))
         self.recent_note.configure(text=self._recent_sessions_note())
+        self.previous_page_button.configure(text=translate("previous_page", language))
+        self.next_page_button.configure(text=translate("next_page", language))
         for column, key in zip(SESSION_COLUMNS, SESSION_COLUMN_KEYS):
             self.sessions_tree.heading(column, text=translate(key, language))
         for widget in self.metric_widgets:
@@ -257,18 +278,20 @@ class Dashboard:
 
     def _select_task(self, label: str) -> None:
         if label == translate("auto_follow", self.language):
-            self.view_model.set_auto_follow()
+            snapshot = self.view_model.set_auto_follow()
         else:
             thread_id = self.label_to_thread.get(label)
-            if thread_id:
-                self.view_model.pin_thread(thread_id)
-        self.refresh()
+            snapshot = self.view_model.select_cached_thread(thread_id) if thread_id else None
+        if snapshot is None:
+            self.refresh(refresh_quota=False)
+        else:
+            self._apply_cached_snapshot(snapshot)
 
     def _change_time_range(self, label: str) -> None:
         labels = {translate(f"last_{days}_days", self.language): days for days in (7, 30, 90)}
         days = labels.get(label)
         if days is not None and self.view_model.set_lookback_days(days):
-            self.refresh()
+            self.refresh(refresh_quota=False)
 
     def _select_recent_row(self, _event: object) -> None:
         if self._rendering_sessions:
@@ -284,10 +307,11 @@ class Dashboard:
                 return
             if self.view_model.selection_mode == "pinned" and self.view_model.selected_thread_id == thread_id:
                 return
-            self.view_model.pin_thread(thread_id)
-            if not self._selection_refresh_pending:
-                self._selection_refresh_pending = True
-                self.root.after_idle(self._refresh_selected_task)
+            snapshot = self.view_model.select_cached_thread(thread_id)
+            if snapshot is None:
+                self.refresh(show_refreshing=False, refresh_quota=False)
+            else:
+                self._apply_cached_snapshot(snapshot)
 
     def _refresh_selected_task(self) -> None:
         self._selection_refresh_pending = False
@@ -314,7 +338,7 @@ class Dashboard:
         self.root.destroy()
 
     def request_exit(self) -> None:
-        remembered = load_exit_action_for_today(UI_SETTINGS_PATH)
+        remembered = None if self.mini_widget.visible else load_exit_action_for_today(UI_SETTINGS_PATH)
         if remembered is not None:
             self._apply_exit_choice(remembered)
             return
@@ -331,12 +355,13 @@ class Dashboard:
         elif action == "minimize":
             self._minimize_to_taskbar()
 
-    def refresh(self, show_refreshing: bool = True, render_session_rows: bool = True) -> None:
+    def refresh(self, show_refreshing: bool = True, render_session_rows: bool = True, refresh_quota: bool = True) -> None:
         if self._widget_mode:
             if show_refreshing:
                 self.mini_widget.set_refreshing()
                 self.root.update_idletasks()
-            self.quota_snapshot = self.quota_provider.refresh()
+            if refresh_quota:
+                self.quota_snapshot = self.quota_provider.refresh()
             self._mini_thread_snapshot = self.view_model.refresh_thread(self._widget_thread_id)
             self.mini_widget.update(
                 self.quota_snapshot,
@@ -348,10 +373,18 @@ class Dashboard:
             self._apply_presentation(present_dashboard(self.snapshot, bool(self.auto_refresh_var.get()), True, self.presentation))
             self.root.update_idletasks()
         self.snapshot = self.view_model.refresh()
+        if self.snapshot.selection_mode == "auto":
+            self.current_page = 1
         self.lookback_days = self.snapshot.lookback_days
         self.presentation = present_dashboard(self.snapshot, bool(self.auto_refresh_var.get()))
         self._apply_presentation(self.presentation, render_session_rows=render_session_rows)
-        self.quota_snapshot = self.quota_provider.refresh()
+        if refresh_quota:
+            self.quota_snapshot = self.quota_provider.refresh()
+
+    def _apply_cached_snapshot(self, snapshot) -> None:
+        self.snapshot = snapshot
+        self.presentation = present_dashboard(snapshot, bool(self.auto_refresh_var.get()))
+        self._apply_presentation(self.presentation)
 
     def _on_root_configure(self, event: object) -> None:
         if getattr(event, "widget", None) is self.root and not self._widget_mode:
@@ -409,7 +442,6 @@ class Dashboard:
             self._mini_thread_snapshot,
             self.language,
         )
-        self.root.after(50, self.manual_refresh)
 
     def restore_dashboard(self) -> None:
         if not self._widget_mode:
@@ -476,18 +508,20 @@ class Dashboard:
             self._rendering_sessions = False
 
     def _render_sessions_inner(self, presentation: DashboardPresentation, render_session_rows: bool = True) -> None:
-        labels = disambiguated_session_labels(presentation.recent_sessions, self.language)
+        all_rows = presentation.recent_sessions
+        self.current_page, page_count, start, end = pagination_bounds(len(all_rows), self.current_page, self.page_size)
+        page_rows = all_rows[start:end]
+        labels = disambiguated_session_labels(all_rows, self.language)
         self.selectable_thread_ids = {
             row.thread_id for row in presentation.recent_sessions
             if row.status != "unavailable"
         }
-        self.label_to_thread = {
-            label: thread_id for thread_id, label in labels.items()
-            if thread_id in self.selectable_thread_ids
-        }
-        auto_label = translate("auto_follow", self.language)
-        values = [auto_label, *(labels[thread_id] for thread_id in labels if thread_id in self.selectable_thread_ids)]
+        page_ids = {row.thread_id for row in page_rows}
         selected_id = self.snapshot.selected_thread_id if self.snapshot else None
+        menu_ids = page_ids | ({selected_id} if selected_id else set())
+        self.label_to_thread = {labels[thread_id]: thread_id for thread_id in labels if thread_id in self.selectable_thread_ids and thread_id in menu_ids}
+        auto_label = translate("auto_follow", self.language)
+        values = [auto_label, *(labels[thread_id] for thread_id in labels if thread_id in self.selectable_thread_ids and thread_id in menu_ids)]
         if selected_id and selected_id not in labels and self.snapshot.selected_session:
             session = self.snapshot.selected_session
             if session.title_source == "safe timestamp fallback":
@@ -504,10 +538,25 @@ class Dashboard:
             return
         for item in self.sessions_tree.get_children():
             self.sessions_tree.delete(item)
-        for row in presentation.recent_sessions:
+        for row in page_rows:
             status = localize_presenter_text(row.status, self.language)
             activity = row.last_activity.astimezone().strftime("%m-%d %H:%M:%S") if row.last_activity else "—"
             self.sessions_tree.insert("", "end", iid=row.thread_id, values=(labels[row.thread_id], status, activity, row.thread_total, row.cache_hit))
+        self.page_status_var.set(translate("page_status", self.language, current=self.current_page, total=page_count, count=len(all_rows)))
+        self.previous_page_button.configure(state="normal" if self.current_page > 1 else "disabled")
+        self.next_page_button.configure(state="normal" if self.current_page < page_count else "disabled")
+
+    def _previous_page(self) -> None:
+        if self.presentation is not None and self.current_page > 1:
+            self.current_page -= 1
+            self._render_sessions(self.presentation)
+
+    def _next_page(self) -> None:
+        if self.presentation is not None:
+            _, count, _, _ = pagination_bounds(len(self.presentation.recent_sessions), self.current_page, self.page_size)
+            if self.current_page < count:
+                self.current_page += 1
+                self._render_sessions(self.presentation)
 
     def _localized_duration(self, value: str) -> str:
         if value in {"—", "Calculating"}:

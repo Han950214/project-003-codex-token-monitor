@@ -37,12 +37,25 @@ class MultiSessionDashboardTests(unittest.TestCase):
         self.assertEqual(snapshot.selected_thread_id, "a")
 
     def test_batch_state_loader_is_called_once_and_aligned_to_selected_thread(self):
-        state = Mock(return_value={"a": CodexThreadMetadata("a", 1, 2, "gpt", "openai", 100, "Alpha"), "b": CodexThreadMetadata("b", 1, 2, "gpt", "openai", 999, "Beta")})
-        vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((session("a", 1), session("b", 0, total=90)), "a", 0, NOW), state_batch_loader=state)
+        state = Mock(return_value={"a": CodexThreadMetadata("a", 1, 2, "gpt", "openai", 100), "b": CodexThreadMetadata("b", 1, 2, "gpt", "openai", 999)})
+        vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((session("a", 1), session("b", 0, total=90)), "a", 0, NOW), state_batch_loader=state, title_batch_loader=lambda: {"a": "Alpha", "b": "Beta"})
         snapshot = vm.refresh()
         state.assert_called_once_with(("a", "b"))
         self.assertEqual(snapshot.selected_session.display_title, "Alpha")
         self.assertEqual(snapshot.state_reconciliation, "reconciled")
+
+    def test_cached_selection_performs_no_loader_calls(self):
+        rollout = Mock(return_value=RolloutSessionsResult((session("a", 1), session("b", 0)), "a", 0, NOW))
+        state = Mock(return_value={})
+        titles = Mock(return_value={"a": "Alpha", "b": "Beta"})
+        vm = DashboardViewModel(rollout_sessions_loader=rollout, state_batch_loader=state, title_batch_loader=titles)
+        vm.refresh()
+        for _ in range(10):
+            self.assertEqual(vm.select_cached_thread("b").selected_thread_id, "b")
+            self.assertEqual(vm.select_cached_thread("a").selected_thread_id, "a")
+        self.assertEqual(rollout.call_count, 1)
+        self.assertEqual(state.call_count, 1)
+        self.assertEqual(titles.call_count, 1)
 
     def test_missing_title_uses_safe_timestamp_fallback(self):
         vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((session("a", 1),), "a", 0, NOW), state_batch_loader=lambda _ids: {"a": CodexThreadMetadata("a", 1, 2, "gpt", "openai", 100)})
@@ -137,9 +150,8 @@ class MultiSessionDashboardTests(unittest.TestCase):
             reader.read_session.return_value = updated
             vm = DashboardViewModel(
                 rollout_sessions_loader=lambda: RolloutSessionsResult((initial,), "a", 0, NOW),
-                state_batch_loader=lambda _ids: {
-                    "a": CodexThreadMetadata("a", 1, 2, "gpt", "openai", 150, "Pinned")
-                },
+                state_batch_loader=lambda _ids: {"a": CodexThreadMetadata("a", 1, 2, "gpt", "openai", 150)},
+                title_batch_loader=lambda: {"a": "Pinned"},
                 rollout_reader=reader,
             )
             vm.refresh()
