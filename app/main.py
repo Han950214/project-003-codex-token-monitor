@@ -73,7 +73,7 @@ class Dashboard:
         self._taskbar_iconify_scheduled = False
         self._widget_thread_id: str | None = None
         self._last_dashboard_geometry = "1180x760"
-        self._mini_thread_snapshot = MiniThreadSnapshot("", None, "no_selection", None)
+        self._mini_thread_snapshot = MiniThreadSnapshot("", None, None, "no_selection", None)
         self.quota_snapshot = CodexQuotaSnapshot.unavailable()
 
         self.auto_refresh_var = tk.BooleanVar(value=False)
@@ -95,6 +95,7 @@ class Dashboard:
         self.mini_widget = DesktopMiniWidget(
             root,
             on_restore=self.restore_dashboard,
+            on_minimize=self._minimize_to_taskbar,
             on_exit=self.request_exit,
             on_refresh=self.manual_refresh,
             settings_path=UI_SETTINGS_PATH,

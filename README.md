@@ -63,7 +63,7 @@ dist\CodexTokenMonitor\CodexTokenMonitor.exe
 
 Phase 2.8-A 在主 Dashboard 最小化时隐藏主窗口，并显示一个置顶的桌面迷你组件；也可点击主界面的“显示迷你组件”按钮主动切换。组件默认位于主窗口所在显示器工作区右上角，以数据可读的半透明状态展示，鼠标悬停时恢复完整背景；支持拖动、手动刷新和恢复主界面。点击主窗口关闭或组件退出时会询问“最小化到任务栏 / 退出程序”，默认最小化到任务栏，并可勾选“今天不再提示”。恢复主界面只切换窗口，不重新查询数据，并保留最小化前固定的 Thread、时间范围、语言和自动刷新状态。
 
-迷你组件显示 Codex 5 小时与每周窗口的已使用百分比、剩余百分比、重置时间，以及最小化前选中 Thread 的累计 Tokens。额度通过本机已安装 Codex 的官方 `app-server` 结构化只读方法 `account/rateLimits/read` 获取；本项目不读取或保存 Cookie、Token、Authorization、Session Secret，也不读取 prompt、response、preview、message、tool output 或 reasoning 正文。未知值显示 `—`，刷新失败时保留上一份值并明确标记为陈旧，不伪造数据。
+迷你组件显示 Codex 5 小时与每周窗口的已使用百分比、剩余百分比、重置时间，以及最小化前选中 Thread 的“本次指令 Total”和“当前会话累计 Total”。两项数值范围独立，不互相回填；指令数据未知时显示 `—`。组件标题栏提供恢复、直接最小化和退出：直接最小化会隐藏主界面与组件并保留任务栏图标，不弹退出询问；点击任务栏图标恢复主 Dashboard，不触发数据查询。额度通过本机已安装 Codex 的官方 `app-server` 结构化只读方法 `account/rateLimits/read` 获取；本项目不读取或保存 Cookie、Token、Authorization、Session Secret，也不读取 prompt、response、preview、message、tool output 或 reasoning 正文。未知值显示 `—`，刷新失败时保留上一份值并明确标记为陈旧，不伪造数据。
 
 当前仍不包含系统托盘、开机启动、自动更新、额度预测、账户切换或云端同步。详见 [桌面迷你组件](docs/desktop-mini-widget.md)。
 

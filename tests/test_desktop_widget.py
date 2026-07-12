@@ -10,10 +10,14 @@ from app.desktop_widget import (
     DesktopMiniWidget,
     ExitChoiceDialog,
     HOVER_ALPHA,
+    WIDGET_HEIGHT,
+    WIDGET_MARGIN,
+    WIDGET_WIDTH,
     WorkArea,
     clamp_position,
     format_percent,
     format_reset_time,
+    format_token_total,
     top_right_position,
 )
 from app.i18n import TRANSLATIONS
@@ -29,6 +33,12 @@ from app.ui_settings import (
 
 
 class DesktopWidgetFormattingTests(unittest.TestCase):
+    def test_token_totals_use_exact_grouped_numbers_or_dash(self):
+        self.assertEqual(format_token_total(5_092_543), "5,092,543")
+        self.assertEqual(format_token_total(25_434_615), "25,434,615")
+        self.assertEqual(format_token_total(108_872_954), "108,872,954")
+        self.assertEqual(format_token_total(None), "—")
+
     def test_integer_and_single_decimal_percent_format(self):
         self.assertEqual(format_percent(48), "48%")
         self.assertEqual(format_percent(48.46), "48.5%")
@@ -58,18 +68,18 @@ class DesktopWidgetFormattingTests(unittest.TestCase):
 
 class DesktopWidgetPositionTests(unittest.TestCase):
     def test_top_right_uses_sixteen_pixel_margin(self):
-        self.assertEqual(top_right_position(WorkArea(0, 0, 1920, 1040), 380, 430), (1524, 16))
+        self.assertEqual(top_right_position(WorkArea(0, 0, 1920, 1040), WIDGET_WIDTH, WIDGET_HEIGHT, WIDGET_MARGIN), (1564, 16))
 
     def test_top_right_respects_offset_monitor_work_area(self):
-        self.assertEqual(top_right_position(WorkArea(-1280, 0, 0, 984), 380, 430), (-396, 16))
+        self.assertEqual(top_right_position(WorkArea(-1280, 0, 0, 984), WIDGET_WIDTH, WIDGET_HEIGHT, WIDGET_MARGIN), (-356, 16))
 
     def test_position_is_clamped_inside_visible_work_area(self):
         area = WorkArea(0, 0, 1920, 1040)
-        self.assertEqual(clamp_position((-500, 3000), area, 380, 430), (0, 610))
+        self.assertEqual(clamp_position((-500, 3000), area, WIDGET_WIDTH, WIDGET_HEIGHT), (0, 540))
 
     def test_oversized_widget_falls_back_to_work_area_origin(self):
         area = WorkArea(100, 50, 300, 250)
-        self.assertEqual(clamp_position((900, 900), area, 380, 430), (100, 50))
+        self.assertEqual(clamp_position((900, 900), area, WIDGET_WIDTH, WIDGET_HEIGHT), (100, 50))
 
 
 class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
@@ -143,6 +153,15 @@ class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
         self.assertIn('action == "exit"', decision)
         self.assertIn('self._minimize_to_taskbar()', decision)
 
+    def test_widget_minimize_has_a_direct_taskbar_callback(self):
+        widget_source = inspect.getsource(DesktopMiniWidget.__init__)
+        self.assertIn("on_minimize", widget_source)
+        build_source = inspect.getsource(DesktopMiniWidget._build)
+        self.assertIn("command=self.on_minimize", build_source)
+        self.assertNotIn("command=self.on_exit, width=64", build_source)
+        dashboard_source = inspect.getsource(Dashboard.__init__)
+        self.assertIn("on_minimize=self._minimize_to_taskbar", dashboard_source)
+
     def test_taskbar_minimize_hides_widget_and_suppresses_widget_intercept(self):
         minimize = inspect.getsource(Dashboard._minimize_to_taskbar)
         self.assertIn("self.mini_widget.hide()", minimize)
@@ -178,6 +197,17 @@ class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
         source = inspect.getsource(DesktopMiniWidget.update)
         self.assertNotIn("thread_id", source)
         self.assertNotIn("rollout", source)
+
+    def test_widget_has_two_side_by_side_token_indicators(self):
+        source = inspect.getsource(DesktopMiniWidget._build_thread_card)
+        self.assertIn("instruction_total_var", source)
+        self.assertIn("session_total_var", source)
+        self.assertIn("column=1, rowspan=2", source)
+
+    def test_widget_keeps_token_card_title_to_two_lines_and_fixed_size(self):
+        source = inspect.getsource(DesktopMiniWidget._build_thread_card)
+        self.assertIn("height=36", source)
+        self.assertEqual((WIDGET_WIDTH, WIDGET_HEIGHT), (340, 500))
 
 
 if __name__ == "__main__":

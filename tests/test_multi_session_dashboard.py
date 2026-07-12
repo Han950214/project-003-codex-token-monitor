@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
@@ -13,9 +14,12 @@ from app.ui_presenter import disambiguated_session_labels, present_dashboard
 NOW = datetime(2026, 7, 12, 1, 0, tzinfo=timezone.utc)
 
 
-def session(thread_id, minute, title="Codex Session", status="exact", total=100, cached=20, input_tokens=80, path=None):
-    usage = TokenUsage(input_tokens, cached, total - input_tokens, 0, total)
-    instruction = InstructionUsage(f"turn-{thread_id}", status, usage, 1, 65000, 0, 0, 0, status == "exact", status == "in_progress")
+def session(thread_id, minute, title="Codex Session", status="exact", total=100, cached=20, input_tokens=80, path=None, instruction_total=None, cumulative_total=None):
+    instruction_total = total if instruction_total is None else instruction_total
+    cumulative_total = total if cumulative_total is None else cumulative_total
+    instruction_usage = TokenUsage(input_tokens, cached, instruction_total - input_tokens, 0, instruction_total)
+    usage = TokenUsage(input_tokens, cached, cumulative_total - input_tokens, 0, cumulative_total)
+    instruction = InstructionUsage(f"turn-{thread_id}", status, instruction_usage, 1, 65000, 0, 0, 0, status == "exact", status == "in_progress")
     observed = NOW + timedelta(minutes=minute)
     return CodexSessionUsage(thread_id, title, "safe timestamp fallback", f"rollout-{thread_id}.jsonl", instruction, usage, observed, NOW, status, path)
 
@@ -163,12 +167,12 @@ class MultiSessionDashboardTests(unittest.TestCase):
         vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((active,), active.thread_id, 1, NOW), state_batch_loader=lambda _ids: {})
         self.assertEqual(vm.refresh().selected_session.status, "in_progress")
 
-    def test_mini_thread_refresh_uses_known_path_and_updates_total(self):
+    def test_mini_thread_refresh_uses_known_path_and_keeps_token_scopes_distinct(self):
         with tempfile.TemporaryDirectory() as directory:
             known_path = Path(directory) / "known.jsonl"
             known_path.write_text("", encoding="utf-8")
             initial = session("a", 1, total=100, path=known_path)
-            updated = session("a", 2, total=150, path=known_path)
+            updated = session("a", 2, path=known_path, instruction_total=75, cumulative_total=150)
             reader = Mock()
             reader.read_session.return_value = updated
             vm = DashboardViewModel(
@@ -179,7 +183,8 @@ class MultiSessionDashboardTests(unittest.TestCase):
             )
             vm.refresh()
             mini = vm.refresh_thread("a")
-        self.assertEqual(mini.total_tokens, 150)
+        self.assertEqual(mini.instruction_total_tokens, 75)
+        self.assertEqual(mini.session_total_tokens, 150)
         self.assertEqual(mini.title, "Pinned")
         reader.read_session.assert_called_once_with(known_path)
 
@@ -202,7 +207,52 @@ class MultiSessionDashboardTests(unittest.TestCase):
         )
         mini = vm.refresh_thread(None)
         self.assertEqual(mini.status, "no_selection")
-        self.assertIsNone(mini.total_tokens)
+        self.assertIsNone(mini.instruction_total_tokens)
+        self.assertIsNone(mini.session_total_tokens)
+
+    def test_mini_thread_keeps_cumulative_total_when_instruction_usage_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            known_path = Path(directory) / "known.jsonl"
+            known_path.write_text("", encoding="utf-8")
+            item = session("a", 1, path=known_path, instruction_total=70, cumulative_total=150)
+            item = replace(item, instruction=replace(item.instruction, usage=None))
+            reader = Mock()
+            reader.read_session.return_value = item
+            vm = DashboardViewModel(
+                rollout_sessions_loader=lambda: RolloutSessionsResult((item,), "a", 0, NOW),
+                state_batch_loader=lambda _ids: {}, rollout_reader=reader,
+            )
+            vm.refresh()
+            mini = vm.refresh_thread("a")
+        self.assertIsNone(mini.instruction_total_tokens)
+        self.assertEqual(mini.session_total_tokens, 150)
+
+    def test_mini_thread_incomplete_keeps_verified_token_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            known_path = Path(directory) / "known.jsonl"
+            known_path.write_text("", encoding="utf-8")
+            item = session("a", 1, status="incomplete", path=known_path, instruction_total=70, cumulative_total=150)
+            reader = Mock()
+            reader.read_session.return_value = item
+            vm = DashboardViewModel(
+                rollout_sessions_loader=lambda: RolloutSessionsResult((item,), "a", 0, NOW),
+                state_batch_loader=lambda _ids: {}, rollout_reader=reader,
+            )
+            vm.refresh()
+            mini = vm.refresh_thread("a")
+        self.assertEqual(mini.status, "completed_partial")
+        self.assertEqual(mini.instruction_total_tokens, 70)
+        self.assertEqual(mini.session_total_tokens, 150)
+
+    def test_mini_thread_unavailable_keeps_both_totals_unknown(self):
+        vm = DashboardViewModel(
+            rollout_sessions_loader=lambda: RolloutSessionsResult((), None, 0, NOW),
+            state_batch_loader=lambda _ids: {},
+        )
+        mini = vm.refresh_thread("missing")
+        self.assertEqual(mini.status, "unavailable")
+        self.assertIsNone(mini.instruction_total_tokens)
+        self.assertIsNone(mini.session_total_tokens)
 
 
 if __name__ == "__main__":

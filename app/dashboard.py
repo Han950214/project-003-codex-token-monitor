@@ -43,7 +43,8 @@ class DashboardSnapshot:
 @dataclass(frozen=True)
 class MiniThreadSnapshot:
     title: str
-    total_tokens: int | None
+    instruction_total_tokens: int | None
+    session_total_tokens: int | None
     status: str
     observed_at: datetime | None
 
@@ -179,18 +180,22 @@ class DashboardViewModel:
     def refresh_thread(self, thread_id: str | None) -> MiniThreadSnapshot:
         """Refresh one already-known Thread without changing Dashboard selection."""
         if not thread_id:
-            return MiniThreadSnapshot("", None, "no_selection", None)
+            return MiniThreadSnapshot("", None, None, "no_selection", None)
         session = self._load_known_pinned(thread_id)
         if session is None:
-            return MiniThreadSnapshot("", None, "unavailable", None)
+            return MiniThreadSnapshot("", None, None, "unavailable", None)
         session = _effective_session_status(session, datetime.now(session.observed_at.tzinfo))
         self.state_batch_loader((thread_id,))
         session = self._apply_title(session)
         self._known_sessions[thread_id] = session
-        usage = session.thread_cumulative_usage
         status = display_session_status(session, session.instruction)
-        total = usage.total_tokens if usage is not None and status != "unavailable" else None
-        return MiniThreadSnapshot(session.display_title, total, status, session.observed_at)
+        if status == "unavailable":
+            return MiniThreadSnapshot(session.display_title, None, None, status, session.observed_at)
+        instruction = session.instruction
+        instruction_total = instruction.usage.total_tokens if instruction is not None and instruction.usage is not None else None
+        cumulative = session.thread_cumulative_usage
+        session_total = cumulative.total_tokens if cumulative is not None else None
+        return MiniThreadSnapshot(session.display_title, instruction_total, session_total, status, session.observed_at)
 
     def _select(self, sessions: list[CodexSessionUsage]) -> CodexSessionUsage | None:
         if self.selection_mode == "auto":

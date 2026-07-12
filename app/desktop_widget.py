@@ -111,12 +111,14 @@ class DesktopMiniWidget:
         root: ctk.CTk,
         *,
         on_restore: Callable[[], None],
+        on_minimize: Callable[[], None],
         on_exit: Callable[[], None],
         on_refresh: Callable[[], None],
         settings_path: Path,
     ) -> None:
         self.root = root
         self.on_restore = on_restore
+        self.on_minimize = on_minimize
         self.on_exit = on_exit
         self.on_refresh = on_refresh
         self.settings_path = settings_path
@@ -139,7 +141,8 @@ class DesktopMiniWidget:
         self.remaining_vars = [tk.StringVar(master=self.window, value="—") for _ in range(2)]
         self.reset_vars = [tk.StringVar(master=self.window, value="—") for _ in range(2)]
         self.quota_title_vars = [tk.StringVar(master=self.window, value="") for _ in range(2)]
-        self.thread_total_var = tk.StringVar(master=self.window, value="—")
+        self.instruction_total_var = tk.StringVar(master=self.window, value="—")
+        self.session_total_var = tk.StringVar(master=self.window, value="—")
         self.thread_title_var = tk.StringVar(master=self.window, value="")
         self.thread_status_var = tk.StringVar(master=self.window, value="")
         self.last_updated_var = tk.StringVar(master=self.window, value="—")
@@ -157,10 +160,12 @@ class DesktopMiniWidget:
         icon.grid(row=0, column=0, padx=(SPACE_4, SPACE_2), pady=SPACE_3)
         self.title_label = ctk.CTkLabel(title_bar, text="Codex Token Monitor", font=(FONT_FAMILY, 13, "bold"), text_color=COLORS.primary_text, anchor="w")
         self.title_label.grid(row=0, column=1, sticky="ew", pady=SPACE_3)
-        self.restore_button = ctk.CTkButton(title_bar, text="", command=self.on_restore, width=64, height=30, corner_radius=CONTROL_RADIUS, fg_color=COLORS.accent, hover_color=COLORS.accent_hover)
+        self.restore_button = ctk.CTkButton(title_bar, text="", command=self.on_restore, width=58, height=30, corner_radius=CONTROL_RADIUS, fg_color=COLORS.accent, hover_color=COLORS.accent_hover)
         self.restore_button.grid(row=0, column=2, padx=SPACE_1, pady=SPACE_3)
+        self.minimize_button = ctk.CTkButton(title_bar, text="", command=self.on_minimize, width=64, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
+        self.minimize_button.grid(row=0, column=3, padx=SPACE_1, pady=SPACE_3)
         self.exit_button = ctk.CTkButton(title_bar, text="×", command=self.on_exit, width=44, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.error_soft)
-        self.exit_button.grid(row=0, column=3, padx=(SPACE_1, SPACE_3), pady=SPACE_3)
+        self.exit_button.grid(row=0, column=4, padx=(SPACE_1, SPACE_3), pady=SPACE_3)
         for widget in (title_bar, icon, self.title_label):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag)
@@ -202,11 +207,18 @@ class DesktopMiniWidget:
         card = ctk.CTkFrame(parent, fg_color=COLORS.surface, corner_radius=CARD_RADIUS, border_width=1, border_color=COLORS.border)
         card.grid(row=row, column=0, sticky="ew")
         card.grid_columnconfigure(0, weight=1)
+        card.grid_columnconfigure(2, weight=1)
         self.thread_heading = ctk.CTkLabel(card, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
-        self.thread_heading.grid(row=0, column=0, sticky="ew", padx=SPACE_3, pady=(SPACE_2, 0))
-        ctk.CTkLabel(card, textvariable=self.thread_total_var, font=(FONT_FAMILY, 20, "bold"), text_color=COLORS.purple, anchor="w").grid(row=1, column=0, sticky="ew", padx=SPACE_3)
-        ctk.CTkLabel(card, textvariable=self.thread_title_var, font=FONT_BODY, text_color=COLORS.primary_text, anchor="w", justify="left", wraplength=290, height=36).grid(row=2, column=0, sticky="ew", padx=SPACE_3)
-        ctk.CTkLabel(card, textvariable=self.thread_status_var, font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w").grid(row=3, column=0, sticky="ew", padx=SPACE_3, pady=(0, SPACE_2))
+        self.thread_heading.grid(row=0, column=0, columnspan=3, sticky="ew", padx=SPACE_3, pady=(SPACE_2, 0))
+        self.instruction_label = ctk.CTkLabel(card, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
+        self.instruction_label.grid(row=1, column=0, sticky="ew", padx=(SPACE_3, SPACE_1))
+        self.session_label = ctk.CTkLabel(card, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
+        self.session_label.grid(row=1, column=2, sticky="ew", padx=(SPACE_2, SPACE_3))
+        ctk.CTkFrame(card, width=1, fg_color=COLORS.border, corner_radius=0).grid(row=1, column=1, rowspan=2, sticky="ns", pady=(SPACE_1, SPACE_1))
+        ctk.CTkLabel(card, textvariable=self.instruction_total_var, font=(FONT_FAMILY, 17, "bold"), text_color=COLORS.purple, anchor="w").grid(row=2, column=0, sticky="ew", padx=(SPACE_3, SPACE_1))
+        ctk.CTkLabel(card, textvariable=self.session_total_var, font=(FONT_FAMILY, 17, "bold"), text_color=COLORS.purple, anchor="w").grid(row=2, column=2, sticky="ew", padx=(SPACE_2, SPACE_3))
+        ctk.CTkLabel(card, textvariable=self.thread_title_var, font=FONT_BODY, text_color=COLORS.primary_text, anchor="w", justify="left", wraplength=290, height=36).grid(row=3, column=0, columnspan=3, sticky="ew", padx=SPACE_3)
+        ctk.CTkLabel(card, textvariable=self.thread_status_var, font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w").grid(row=4, column=0, columnspan=3, sticky="ew", padx=SPACE_3, pady=(0, SPACE_2))
 
     def show(
         self,
@@ -287,20 +299,25 @@ class DesktopMiniWidget:
         language: str,
     ) -> None:
         self.language = language
-        self.restore_button.configure(text=translate("restore_dashboard", language))
+        self.restore_button.configure(text=translate("restore_widget", language))
+        self.minimize_button.configure(text=translate("minimize_widget", language))
         self.exit_button.configure(text=translate("exit_application_short", language))
         self.quota_title_vars[0].set(translate("five_hour_limit", language))
         self.quota_title_vars[1].set(translate("weekly_limit", language))
-        self.thread_heading.configure(text=translate("selected_thread_tokens", language))
+        self.thread_heading.configure(text=translate("token_usage", language))
+        self.instruction_label.configure(text=translate("instruction_total", language))
+        self.session_label.configure(text=translate("session_total_short", language))
         for index, window in enumerate((quota.five_hour, quota.weekly)):
             self._update_window(index, window)
         if thread.status == "no_selection":
             self.thread_title_var.set(translate("no_selected_thread", language))
-            self.thread_total_var.set("—")
+            self.instruction_total_var.set("—")
+            self.session_total_var.set("—")
             self.thread_status_var.set(translate("quota_unavailable", language))
         else:
             self.thread_title_var.set(_bounded_title(thread.title) or translate("no_selected_thread", language))
-            self.thread_total_var.set(f"{thread.total_tokens:,}" if thread.total_tokens is not None else "—")
+            self.instruction_total_var.set(format_token_total(thread.instruction_total_tokens))
+            self.session_total_var.set(format_token_total(thread.session_total_tokens))
             self.thread_status_var.set(localize_presenter_text(thread.status, language))
         local_time = quota.refreshed_at.astimezone().strftime("%H:%M:%S")
         self.last_updated_var.set(f"{translate('last_updated', language)}：{local_time}" if language == "zh-CN" else f"{translate('last_updated', language)}: {local_time}")
@@ -357,6 +374,10 @@ def format_percent(value: float | None) -> str:
         return "—"
     value = min(100.0, max(0.0, float(value)))
     return f"{int(value)}%" if value.is_integer() else f"{value:.1f}%"
+
+
+def format_token_total(value: int | None) -> str:
+    return f"{value:,}" if value is not None else "—"
 
 
 def format_reset_time(

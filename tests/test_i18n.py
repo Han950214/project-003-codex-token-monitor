@@ -28,6 +28,11 @@ class I18nTests(unittest.TestCase):
             "recent_sessions_note": ("显示最近检测到的 Codex 会话，最多检查 500 条近期记录。", "Showing recently detected Codex sessions; up to 500 recent records are checked."),
             "recent_sessions_note_truncated": ("记录较多，本次仅检查最近 500 条；可缩小时间范围以提高速度。", "Many records were found. Only the latest 500 were checked; choose a shorter time range for faster loading."),
             "thread_cumulative_usage_title": ("会话累计 Usage（当前指令不可用）", "Session Cumulative Usage (Instruction Unavailable)"),
+            "token_usage": ("Token 使用", "Token Usage"),
+            "instruction_total": ("本次指令", "Instruction Total"),
+            "session_total_short": ("当前会话", "Session Total"),
+            "minimize_widget": ("最小化", "Minimize"),
+            "restore_widget": ("恢复", "Restore"),
         }
         for key, (zh, en) in expected.items():
             self.assertEqual(translate(key, "zh-CN"), zh)
