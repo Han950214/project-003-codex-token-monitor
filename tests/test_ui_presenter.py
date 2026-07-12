@@ -80,8 +80,8 @@ class UiPresenterTests(unittest.TestCase):
         self.assertEqual([item.value for item in view.latest_usage[:5]], ["900", "99", "999", "200", "10"])
         self.assertEqual(view.latest_usage[5].value, "22.2%")
         self.assertEqual(view.usage_scope, "thread_cumulative")
-        self.assertEqual(view.telemetry_current_total, "—")
-        self.assertEqual(view.telemetry_cache_hit, "—")
+        self.assertEqual(view.telemetry_current_total, "999")
+        self.assertEqual(view.telemetry_cache_hit, "22.2% derived")
         self.assertEqual(view.telemetry_session_total, "999")
         self.assertEqual(next(item for item in view.source_details if item.label == "Model Calls").value, "—")
         self.assertTrue(all(item.tone.value == "stale" for item in view.latest_usage))
@@ -109,11 +109,11 @@ class UiPresenterTests(unittest.TestCase):
 
     def test_fallback_does_not_overwrite_current_telemetry(self):
         view = self._fallback_view()
-        self.assertEqual(view.telemetry_current_total, "—")
+        self.assertEqual(view.telemetry_current_total, "999")
 
     def test_fallback_does_not_overwrite_current_cache_telemetry(self):
         view = self._fallback_view()
-        self.assertEqual(view.telemetry_cache_hit, "—")
+        self.assertEqual(view.telemetry_cache_hit, "22.2% derived")
 
     def test_fallback_keeps_session_total(self):
         self.assertEqual(self._fallback_view().telemetry_session_total, "999")

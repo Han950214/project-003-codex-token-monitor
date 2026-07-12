@@ -95,7 +95,7 @@ def present_dashboard(
         if snapshot.selected_session else snapshot.rollout.thread_cumulative_usage
     )
     latest = _latest_metrics(instruction, status, cumulative)
-    current, cache = _telemetry_current(instruction)
+    current, cache = _telemetry_current(instruction, cumulative)
     session_total = f"{cumulative.total_tokens:,}" if cumulative else "—"
     usage_scope = "instruction" if instruction is not None and instruction.usage is not None else (
         "thread_cumulative" if cumulative is not None else "unavailable"
@@ -185,10 +185,12 @@ def _latest_metrics(instruction, status: str, cumulative=None) -> tuple[MetricDi
     return tuple(metrics)
 
 
-def _telemetry_current(instruction) -> tuple[str, str]:
-    if instruction is None or instruction.usage is None:
+def _telemetry_current(instruction, cumulative=None) -> tuple[str, str]:
+    usage = instruction.usage if instruction is not None else None
+    if usage is None:
+        usage = cumulative
+    if usage is None:
         return "—", "—"
-    usage = instruction.usage
     hit = "—" if usage.input_tokens == 0 else f"{usage.cached_input_tokens / usage.input_tokens * 100:.1f}% derived"
     return f"{usage.total_tokens:,}", hit
 
