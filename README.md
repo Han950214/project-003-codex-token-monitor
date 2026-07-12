@@ -2,7 +2,7 @@
 
 Codex Token Monitor Skill is an independent local-first project for estimating and visualizing token usage in Codex Desktop workflows. It is designed as a GitHub-agent-skill-style toolkit with a Windows desktop floating window / Dashboard as the first user-facing surface.
 
-Current boundary: the Dashboard discovers multiple recent Codex Threads from Rollout JSONL, keeps their token data separate, auto-follows the latest activity, and can pin one Thread for monitoring. `state_5.sqlite` is queried once per full refresh for safe metadata, while user-facing titles come from one structured Codex `app-server` `thread/list` batch. Body-like names are rejected and fall back to a timestamp; no preview or message body is decoded.
+Current boundary: the Dashboard discovers multiple recent Codex Threads from Rollout JSONL, keeps their token data separate, auto-follows the latest activity, and can pin one Thread for monitoring. `state_5.sqlite` is queried once per full refresh for safe metadata, while user-facing titles come from one structured Codex `app-server` `thread/list` batch. The UI trusts the official `Thread.name` without inferring content from its wording; no preview or message body is decoded.
 
 关键边界：本项目当前独立开发，不修改 AOS 主仓库，不接入云端，不读取真实凭据，不做真实扣费。当前 Dashboard 从 Rollout JSONL 读取安全的数字元数据，展示当前或最近的单指令聚合；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。State Thread Total 仅在同一 Thread 的累计数值完全一致时标记为已对账。
 
@@ -73,7 +73,7 @@ Phase 2.8-A-S 保留多 Thread 分离、500 条近期候选、已知路径回读
 
 The current Dashboard no longer loads or writes the legacy manual Runs JSON and no longer shows manual Run input, saved-Run, or report-export controls. `AgentRun`, `app/storage.py`, `app/reporting.py`, existing Runs JSON, historical reports, and their compatibility tests remain preserved.
 
-Thread titles use the installed Codex `app-server` structured `Thread.name` field. One full refresh makes one `thread/list` batch request over the same persistent app-server connection used by quota reads; the selective parser decodes only `id` and `name`, never `preview`, turns or message content. Prompt-like/path-like names are rejected. Missing or rejected names use `Codex 会话 · MM-DD HH:mm` / `Codex Session · MM-DD HH:mm`. See [Rollout instruction usage](docs/rollout-instruction-usage.md).
+Thread titles use the installed Codex `app-server` structured `Thread.name` field. One full refresh makes one `thread/list` batch request over the same persistent app-server connection used by quota reads; the selective parser decodes only `id` and `name`, never `preview`, turns or message content. The UI never guesses whether a name looks like a prompt or path; only missing, invalid, empty, unparsable, or absent names use `Codex 会话 · MM-DD HH:mm` / `Codex Session · MM-DD HH:mm`. Long names are safely truncated only at the display boundary. See [Rollout instruction usage](docs/rollout-instruction-usage.md).
 
 ### Historical Phase 2.4 logs adapter notes
 

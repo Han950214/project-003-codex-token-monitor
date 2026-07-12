@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,7 +73,7 @@ class CodexAppServerQuotaProvider:
         with self._lock:
             self._stop()
 
-    def refresh_thread_titles(self) -> dict[str, str]:
+    def refresh_thread_titles(self) -> dict[str, str] | None:
         """Return one safe, structured title batch over the shared connection."""
         with self._lock:
             try:
@@ -87,10 +88,10 @@ class CodexAppServerQuotaProvider:
                      ], "useStateDbOnly": False},
                     parser=_parse_thread_titles_response,
                 )
-                return result if isinstance(result, dict) else {}
+                return result if isinstance(result, dict) else None
             except Exception:
                 self._stop()
-                return {}
+                return None
 
     def _ensure_started(self) -> None:
         if self._process is not None and self._process.poll() is None:
@@ -421,17 +422,11 @@ def _parse_thread_titles_response(raw: str) -> dict[str, object]:
     return {"result": titles}
 
 
-def _safe_thread_title(value: object, limit: int = 72) -> str | None:
+def _safe_thread_title(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    title = " ".join(value.split())
-    lowered = title.lower()
-    rejected = (
-        not title or lowered.startswith("/goal") or
-        "referenced pasted text files" in lowered or
-        lowered.startswith("the following is the codex agent history") or
-        "c:\\users\\" in lowered or "file:" in lowered
-    )
-    if rejected:
-        return None
-    return title if len(title) <= limit else title[: limit - 1].rstrip() + "…"
+    # Thread.name is the official user-facing field. Remove only invisible
+    # control/format characters; never infer body content from its wording.
+    title = "".join(char for char in value if not unicodedata.category(char).startswith("C"))
+    title = " ".join(title.split())
+    return title or None

@@ -179,10 +179,37 @@ class QuotaProviderTests(unittest.TestCase):
         self.assertNotIn("print(", source)
         self.assertNotIn("auth.json", source)
 
-    def test_thread_title_parser_accepts_sidebar_name_and_rejects_body_like_name(self):
-        raw = '{"id":7,"result":{"data":[{"id":"a","name":"审核 Codex 限额数据源","preview":"SECRET"},{"id":"b","name":"/goal Referenced pasted text files: C:\\\\Users\\\\x","preview":"SECRET"}]}}'
+    def test_thread_title_parser_preserves_official_names_and_skips_preview(self):
+        raw = (
+            '{"id":7,"result":{"data":['
+            '{"id":"a","name":"\\u5ba1\\u6838 Codex \\u9650\\u989d\\u6570\\u636e\\u6e90","preview":"SECRET"},'
+            '{"id":"b","name":"/goal Referenced pasted text files: C:\\\\Users\\\\x","preview":"SECRET"},'
+            '{"id":"c","name":"The following is the Codex agent history...","preview":"SECRET"},'
+            '{"id":"d","name":"file: official thread name","preview":"SECRET"}'
+            ']}}'
+        )
         result = _parse_thread_titles_response(raw)["result"]
-        self.assertEqual(result, {"a": "审核 Codex 限额数据源"})
+        self.assertEqual(result["a"], "审核 Codex 限额数据源")
+        self.assertEqual(result["b"], "/goal Referenced pasted text files: C:\\Users\\x")
+        self.assertEqual(result["c"], "The following is the Codex agent history...")
+        self.assertEqual(result["d"], "file: official thread name")
+        self.assertNotIn("SECRET", repr(result))
+
+    def test_thread_title_parser_normalizes_without_truncating_and_handles_empty_values(self):
+        long_name = "A" * 90
+        raw = (
+            '{"id":7,"result":{"data":['
+            '{"id":"long","name":"' + long_name + '","preview":"SECRET"},'
+            '{"id":"empty","name":"   \\t  ","preview":"SECRET"},'
+            '{"id":"null","name":null,"preview":"SECRET"},'
+            '{"id":"control","name":"A\\u0000 B","preview":"SECRET"}'
+            ']}}'
+        )
+        result = _parse_thread_titles_response(raw)["result"]
+        self.assertEqual(result["long"], long_name)
+        self.assertNotIn("empty", result)
+        self.assertNotIn("null", result)
+        self.assertEqual(result["control"], "A B")
         self.assertNotIn("SECRET", repr(result))
 
 

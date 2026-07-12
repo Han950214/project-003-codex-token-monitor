@@ -56,7 +56,7 @@ class DashboardViewModel:
         *,
         rollout_sessions_loader: Callable[[], RolloutSessionsResult] | None = None,
         state_batch_loader: Callable[[tuple[str, ...]], dict[str, CodexThreadMetadata]] = load_thread_metadata,
-        title_batch_loader: Callable[[], dict[str, str]] | None = None,
+        title_batch_loader: Callable[[], dict[str, str] | None] | None = None,
         rollout_reader: CodexRolloutReader | None = None,
         **legacy: object,
     ) -> None:
@@ -138,7 +138,14 @@ class DashboardViewModel:
             + ([selected.thread_id] if selected is not None else [])
         ))
         metadata = self.state_batch_loader(tuple(thread_ids)) if thread_ids else {}
-        self._title_cache = self.title_batch_loader()
+        try:
+            titles = self.title_batch_loader()
+        except Exception:
+            titles = None
+        # A failed title batch must not erase titles already verified for a
+        # Thread. A successful empty batch is still authoritative and clears it.
+        if isinstance(titles, dict):
+            self._title_cache = titles
         recent = [self._apply_title(session) for session in recent]
         if selected is not None:
             selected = next(

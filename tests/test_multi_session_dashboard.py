@@ -63,6 +63,29 @@ class MultiSessionDashboardTests(unittest.TestCase):
         self.assertEqual(selected.title_source, "safe timestamp fallback")
         self.assertTrue(selected.display_title.startswith("Codex Session ·"))
 
+    def test_long_official_name_is_truncated_only_for_display(self):
+        name = "A" * 90
+        vm = DashboardViewModel(
+            rollout_sessions_loader=lambda: RolloutSessionsResult((session("a", 1),), "a", 0, NOW),
+            state_batch_loader=lambda _ids: {},
+            title_batch_loader=lambda: {"a": name},
+        )
+        selected = vm.refresh().selected_session
+        self.assertEqual(selected.display_title, "A" * 71 + "…")
+        self.assertEqual(vm._title_cache["a"], name)
+
+    def test_cached_title_survives_transient_title_batch_failure(self):
+        title_loader = Mock(side_effect=[{"a": "Official Name"}, RuntimeError("temporary")])
+        vm = DashboardViewModel(
+            rollout_sessions_loader=lambda: RolloutSessionsResult((session("a", 1),), "a", 0, NOW),
+            state_batch_loader=lambda _ids: {},
+            title_batch_loader=title_loader,
+        )
+        self.assertEqual(vm.refresh().selected_session.display_title, "Official Name")
+        refreshed = vm.refresh()
+        self.assertEqual(refreshed.selected_session.display_title, "Official Name")
+        self.assertEqual(vm.refresh_thread("a").title, "Official Name")
+
     def test_same_titles_are_disambiguated_without_thread_ids(self):
         rows = present_dashboard(DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((session("thread-secret-a", 1, "Same"), session("thread-secret-b", 1, "Same")), "thread-secret-a", 0, NOW), state_batch_loader=lambda _ids: {}).refresh(), False).recent_sessions
         labels = disambiguated_session_labels(rows, "en")
