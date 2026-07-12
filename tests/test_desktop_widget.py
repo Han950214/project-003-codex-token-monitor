@@ -203,6 +203,7 @@ class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
         self.assertIn("instruction_total_var", source)
         self.assertIn("session_total_var", source)
         self.assertIn("column=1, rowspan=2", source)
+        self.assertIn("height=52", source)
 
     def test_widget_keeps_token_card_title_to_two_lines_and_fixed_size(self):
         source = inspect.getsource(DesktopMiniWidget._build_thread_card)

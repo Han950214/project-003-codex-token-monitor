@@ -214,7 +214,7 @@ class DesktopMiniWidget:
         self.instruction_label.grid(row=1, column=0, sticky="ew", padx=(SPACE_3, SPACE_1))
         self.session_label = ctk.CTkLabel(card, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
         self.session_label.grid(row=1, column=2, sticky="ew", padx=(SPACE_2, SPACE_3))
-        ctk.CTkFrame(card, width=1, fg_color=COLORS.border, corner_radius=0).grid(row=1, column=1, rowspan=2, sticky="ns", pady=(SPACE_1, SPACE_1))
+        ctk.CTkFrame(card, width=1, height=52, fg_color=COLORS.border, corner_radius=0).grid(row=1, column=1, rowspan=2, sticky="ns", pady=(SPACE_1, SPACE_1))
         ctk.CTkLabel(card, textvariable=self.instruction_total_var, font=(FONT_FAMILY, 17, "bold"), text_color=COLORS.purple, anchor="w").grid(row=2, column=0, sticky="ew", padx=(SPACE_3, SPACE_1))
         ctk.CTkLabel(card, textvariable=self.session_total_var, font=(FONT_FAMILY, 17, "bold"), text_color=COLORS.purple, anchor="w").grid(row=2, column=2, sticky="ew", padx=(SPACE_2, SPACE_3))
         ctk.CTkLabel(card, textvariable=self.thread_title_var, font=FONT_BODY, text_color=COLORS.primary_text, anchor="w", justify="left", wraplength=290, height=36).grid(row=3, column=0, columnspan=3, sticky="ew", padx=SPACE_3)
