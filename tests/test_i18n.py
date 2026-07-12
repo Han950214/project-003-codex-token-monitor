@@ -7,7 +7,6 @@ from app.i18n import (
     localize_presenter_label,
     localize_status,
     translate,
-    translate,
 )
 from app.ui_presenter import DataStatus
 
