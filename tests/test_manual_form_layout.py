@@ -1,22 +1,38 @@
+import inspect
 import unittest
 
-from app.main import MANUAL_FORM_FIELDS, manual_form_position
+import app.main as main
 
 
-class ManualFormLayoutTests(unittest.TestCase):
-    def test_eight_fields_use_two_groups_per_row(self):
-        self.assertEqual(
-            [manual_form_position(index) for index in range(len(MANUAL_FORM_FIELDS))],
-            [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1)],
-        )
+class ManualRunRemovalTests(unittest.TestCase):
+    def test_manual_form_contract_is_not_exposed(self):
+        self.assertFalse(hasattr(main, "MANUAL_FORM_FIELDS"))
+        self.assertFalse(hasattr(main, "manual_form_position"))
 
-    def test_grid_positions_are_unique(self):
-        positions = {manual_form_position(index) for index in range(len(MANUAL_FORM_FIELDS))}
-        self.assertEqual(len(positions), len(MANUAL_FORM_FIELDS))
+    def test_dashboard_source_does_not_build_manual_run_ui(self):
+        source = inspect.getsource(main.Dashboard)
+        self.assertNotIn("_build_manual_input_page", source)
+        self.assertNotIn("save_run", source)
 
-    def test_invalid_field_position_is_rejected(self):
-        with self.assertRaises(IndexError):
-            manual_form_position(len(MANUAL_FORM_FIELDS))
+    def test_dashboard_source_does_not_export_legacy_report(self):
+        source = inspect.getsource(main)
+        self.assertNotIn("from app.reporting import", source)
+        self.assertNotIn("from app.storage import", source)
+
+    def test_programmatic_session_highlight_does_not_pin_or_refresh(self):
+        source = inspect.getsource(main.Dashboard._select_recent_row)
+        self.assertIn("self.sessions_tree.focus() != thread_id", source)
+        self.assertIn("self.root.after_idle(self._refresh_selected_task)", source)
+        self.assertNotIn("selection_set", inspect.getsource(main.Dashboard._render_sessions_inner))
+        self.assertIn("render_session_rows=False", inspect.getsource(main.Dashboard._refresh_selected_task))
+
+    def test_incomplete_rows_are_not_exposed_in_task_selector(self):
+        source = inspect.getsource(main.Dashboard._render_sessions_inner)
+        self.assertIn('row.status not in {"incomplete", "unavailable"}', source)
+
+    def test_time_range_selector_offers_seven_thirty_and_ninety_days(self):
+        source = inspect.getsource(main.Dashboard._apply_language)
+        self.assertIn('"last_7_days", "last_30_days", "last_90_days"', source)
 
 
 if __name__ == "__main__":

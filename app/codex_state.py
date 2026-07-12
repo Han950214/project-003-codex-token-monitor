@@ -1,4 +1,4 @@
-"""Read-only access to safe total-token metadata in Codex state SQLite."""
+"""Read-only access to privacy-safe Codex thread metadata."""
 
 from __future__ import annotations
 
@@ -7,10 +7,25 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 
 DEFAULT_CODEX_STATE_PATH = Path.home() / ".codex" / "state_5.sqlite"
 CODEX_STATE_PATH_ENV = "CODEX_STATE_DB"
+SAFE_BASE_COLUMNS = ("id", "created_at", "updated_at", "model", "model_provider", "tokens_used")
+SAFE_TITLE_COLUMN = "title"
+MAX_TITLE_CHARS = 72
+
+
+@dataclass(frozen=True)
+class CodexThreadMetadata:
+    thread_id: str
+    created_at: int | None
+    updated_at: int | None
+    model: str | None
+    model_provider: str | None
+    total_tokens: int | None
+    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -28,88 +43,92 @@ def configured_state_path() -> Path:
     return Path(configured).expanduser() if configured else DEFAULT_CODEX_STATE_PATH
 
 
+def load_thread_metadata(
+    thread_ids: Sequence[str], path: Path | None = None
+) -> dict[str, CodexThreadMetadata]:
+    """Load safe metadata for all requested identifiers in one parameterized SELECT."""
+    identifiers = tuple(dict.fromkeys(value for value in thread_ids if value))
+    database = path or configured_state_path()
+    if not identifiers or not database.is_file():
+        return {}
+    rows, has_title = _fetch_threads(database, identifiers)
+    result: dict[str, CodexThreadMetadata] = {}
+    for row in rows:
+        total = _optional_int(row[5])
+        if total is not None and total < 0:
+            total = None
+        title = _bounded_title(row[6], row[7]) if has_title else None
+        item = CodexThreadMetadata(
+            str(row[0]), _optional_int(row[1]), _optional_int(row[2]),
+            _optional_text(row[3]), _optional_text(row[4]), total, title,
+        )
+        result[item.thread_id] = item
+    return result
+
+
 def load_latest_thread_total(path: Path | None = None) -> CodexThreadTotal | None:
     database = path or configured_state_path()
     if not database.is_file():
         return None
-
-    row = _fetch_latest_thread(database)
-    if row is None:
-        return None
+    uri = database.resolve().as_uri() + "?mode=ro"
     try:
-        total_tokens = int(row[5])
-    except (TypeError, ValueError, OverflowError):
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            row = connection.execute(
+                "SELECT id, created_at, updated_at, model, model_provider, tokens_used "
+                "FROM threads WHERE tokens_used IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+            return _total_from_row(row)
+    except (OSError, sqlite3.Error):
         return None
-    if total_tokens < 0:
-        return None
-    return CodexThreadTotal(
-        thread_id=str(row[0]),
-        created_at=_optional_int(row[1]),
-        updated_at=_optional_int(row[2]),
-        model=None if row[3] is None else str(row[3]),
-        model_provider=None if row[4] is None else str(row[4]),
-        total_tokens=total_tokens,
-    )
 
 
 def load_thread_total(thread_id: str, path: Path | None = None) -> CodexThreadTotal | None:
-    """Load only the total for the rollout's exact thread identifier."""
-    database = path or configured_state_path()
-    if not thread_id or not database.is_file():
+    item = load_thread_metadata((thread_id,), path).get(thread_id)
+    if item is None or item.total_tokens is None:
         return None
-    row = _fetch_thread(database, thread_id)
+    return CodexThreadTotal(
+        item.thread_id, item.created_at, item.updated_at, item.model,
+        item.model_provider, item.total_tokens,
+    )
+
+
+def _fetch_threads(
+    database: Path, thread_ids: tuple[str, ...]
+) -> tuple[list[tuple[object, ...]], bool]:
+    uri = database.resolve().as_uri() + "?mode=ro"
+    placeholders = ",".join("?" for _ in thread_ids)
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            schema = {str(row[1]) for row in connection.execute("PRAGMA table_info(threads)")}
+            if not set(SAFE_BASE_COLUMNS).issubset(schema):
+                return [], False
+            has_title = SAFE_TITLE_COLUMN in schema
+            columns = ", ".join(SAFE_BASE_COLUMNS)
+            if has_title:
+                # Never transfer a full long title into Python. Some Codex
+                # title rows can contain tens of thousands of characters.
+                columns += f", substr({SAFE_TITLE_COLUMN}, 1, {MAX_TITLE_CHARS}), length({SAFE_TITLE_COLUMN})"
+            rows = connection.execute(
+                f"SELECT {columns} FROM threads WHERE id IN ({placeholders})",
+                thread_ids,
+            ).fetchall()
+            return rows, has_title
+    except (OSError, sqlite3.Error):
+        return [], False
+
+
+def _total_from_row(row: tuple[object, ...] | None) -> CodexThreadTotal | None:
     if row is None:
         return None
-    try:
-        total_tokens = int(row[5])
-    except (TypeError, ValueError, OverflowError):
+    total = _optional_int(row[5])
+    if total is None or total < 0:
         return None
-    if total_tokens < 0:
-        return None
-    return CodexThreadTotal(str(row[0]), _optional_int(row[1]), _optional_int(row[2]), None if row[3] is None else str(row[3]), None if row[4] is None else str(row[4]), total_tokens)
-
-
-def _fetch_latest_thread(database: Path) -> tuple[object, ...] | None:
-    uri = database.resolve().as_uri() + "?mode=ro"
-    for args, kwargs in [
-        ((uri,), {"uri": True}),
-        ((str(database),), {}),
-    ]:
-        try:
-            with closing(sqlite3.connect(*args, **kwargs)) as connection:
-                connection.execute("PRAGMA query_only=ON")
-                return connection.execute(
-                    """
-                    SELECT id, created_at, updated_at, model, model_provider, tokens_used
-                    FROM threads
-                    WHERE tokens_used IS NOT NULL
-                    ORDER BY updated_at DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-        except (OSError, sqlite3.Error):
-            continue
-    return None
-
-
-def _fetch_thread(database: Path, thread_id: str) -> tuple[object, ...] | None:
-    uri = database.resolve().as_uri() + "?mode=ro"
-    for args, kwargs in [((uri,), {"uri": True}), ((str(database),), {})]:
-        try:
-            with closing(sqlite3.connect(*args, **kwargs)) as connection:
-                connection.execute("PRAGMA query_only=ON")
-                return connection.execute(
-                    """
-                    SELECT id, created_at, updated_at, model, model_provider, tokens_used
-                    FROM threads
-                    WHERE id = ? AND tokens_used IS NOT NULL
-                    LIMIT 1
-                    """,
-                    (thread_id,),
-                ).fetchone()
-        except (OSError, sqlite3.Error):
-            continue
-    return None
+    return CodexThreadTotal(
+        str(row[0]), _optional_int(row[1]), _optional_int(row[2]),
+        _optional_text(row[3]), _optional_text(row[4]), total,
+    )
 
 
 def _optional_int(value: object) -> int | None:
@@ -117,3 +136,18 @@ def _optional_int(value: object) -> int | None:
         return None if value is None else int(value)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _optional_text(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _bounded_title(value: object, length_value: object) -> str | None:
+    title = _optional_text(value)
+    if title is None:
+        return None
+    title = " ".join(title.split())
+    length = _optional_int(length_value) or len(title)
+    if length > MAX_TITLE_CHARS:
+        return title[: MAX_TITLE_CHARS - 1].rstrip() + "…"
+    return title

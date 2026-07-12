@@ -33,7 +33,7 @@ class TelemetryBarTests(unittest.TestCase):
         self.assertEqual(values[1][1], "—")
         self.assertEqual(values[2][1], "—")
         self.assertEqual(values[3][1], "—")
-        self.assertEqual(values[4][1], "暂无数据")
+        self.assertEqual(values[4][1], "暂不可用")
         self.assertEqual(values[5][1], "关闭（60 秒）")
 
     def test_chinese_and_english_labels_preserve_six_field_order(self):

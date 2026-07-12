@@ -1,62 +1,228 @@
-"""Testable Rollout-to-Dashboard data refresh boundary."""
+"""Multi-session Rollout-to-Dashboard selection and reconciliation boundary."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from app.codex_rollout import CodexRolloutReader, InstructionUsage, RolloutUsageResult
-from app.codex_state import CodexThreadTotal, load_thread_total
-from app.metrics import PricingConfig, SessionSummary, summarize_runs
-from app.models import AgentRun
-from app.storage import LoadResult, load_runs
+from app.codex_rollout import (
+    CodexRolloutReader,
+    CodexSessionUsage,
+    InstructionUsage,
+    RolloutSessionsResult,
+    RolloutUsageResult,
+)
+from app.codex_state import CodexThreadMetadata, CodexThreadTotal, load_thread_metadata
+from app.metrics import PricingConfig, SessionSummary
+
+
+ACTIVE_EVENT_MAX_AGE = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
 class DashboardSnapshot:
-    runs: list[AgentRun]
+    # First seven fields preserve the Phase 2.7-A construction contract.
+    runs: object
     summary: SessionSummary
     rollout: RolloutUsageResult
     state_total: CodexThreadTotal | None
     state_reconciled: bool
     state_reconciliation: str = "unavailable"
     storage_error: str | None = None
+    sessions_result: RolloutSessionsResult = field(default_factory=lambda: RolloutSessionsResult((), None, 0))
+    recent_sessions: tuple[CodexSessionUsage, ...] = ()
+    selected_session: CodexSessionUsage | None = None
+    state_metadata: dict[str, CodexThreadMetadata] = field(default_factory=dict)
+    selection_mode: str = "auto"
+    selected_thread_id: str | None = None
+    lookback_days: int = 7
 
 
 class DashboardViewModel:
     def __init__(
         self,
-        pricing: PricingConfig,
-        runs_path: Path,
-        runs_loader: Callable[[Path], LoadResult] = load_runs,
-        rollout_loader: Callable[[], RolloutUsageResult] | None = None,
-        state_loader: Callable[[str], CodexThreadTotal | None] = load_thread_total,
+        pricing: PricingConfig | None = None,
+        runs_path: Path | None = None,
+        *,
+        rollout_sessions_loader: Callable[[], RolloutSessionsResult] | None = None,
+        state_batch_loader: Callable[[tuple[str, ...]], dict[str, CodexThreadMetadata]] = load_thread_metadata,
+        rollout_reader: CodexRolloutReader | None = None,
+        **legacy: object,
     ) -> None:
-        self.pricing = pricing
+        self.pricing = pricing or PricingConfig(0, 0, 0)
         self.runs_path = runs_path
-        self.runs_loader = runs_loader
-        self.rollout_reader = CodexRolloutReader() if rollout_loader is None else None
-        self.rollout_loader = rollout_loader or self.rollout_reader.refresh
-        self.state_loader = state_loader
+        self.rollout_reader = rollout_reader or CodexRolloutReader()
+        legacy_rollout = legacy.get("rollout_loader")
+        legacy_state = legacy.get("state_loader")
+        self.rollout_sessions_loader = rollout_sessions_loader or (
+            (lambda: _legacy_sessions(legacy_rollout())) if callable(legacy_rollout) else None
+        )
+        self.state_batch_loader = (
+            (lambda ids: _legacy_metadata(ids, legacy_state))
+            if callable(legacy_state) else state_batch_loader
+        )
+        self.selection_mode = "auto"
+        self.selected_thread_id: str | None = None
+        self._known_paths: dict[str, Path] = {}
+        self._known_sessions: dict[str, CodexSessionUsage] = {}
+        self.lookback_days = 7
 
-    def refresh(self, runs: list[AgentRun] | None = None) -> DashboardSnapshot:
-        load_result = self.runs_loader(self.runs_path) if runs is None else LoadResult(runs)
-        rollout = self.rollout_loader()
-        state_total = self.state_loader(rollout.thread_id) if rollout.thread_id else None
-        summary = summarize_runs(load_result.runs, self.pricing, state_total.total_tokens if state_total else None)
-        reconciliation = _state_reconciliation(rollout, state_total)
-        return DashboardSnapshot(load_result.runs, summary, rollout, state_total, reconciliation == "reconciled", reconciliation, load_result.error)
+    def set_auto_follow(self) -> None:
+        self.selection_mode = "auto"
+        self.selected_thread_id = None
+
+    def pin_thread(self, thread_id: str) -> bool:
+        if not thread_id:
+            return False
+        known = self._known_sessions.get(thread_id)
+        if known is not None and known.status in {"incomplete", "unavailable"}:
+            return False
+        self.selection_mode = "pinned"
+        self.selected_thread_id = thread_id
+        return True
+
+    def set_lookback_days(self, days: int) -> bool:
+        if days not in {7, 30, 90}:
+            return False
+        self.lookback_days = days
+        return True
+
+    def refresh(self, _runs: object = None) -> DashboardSnapshot:
+        result = (
+            self.rollout_sessions_loader()
+            if self.rollout_sessions_loader is not None
+            else self.rollout_reader.refresh_sessions(lookback_days=self.lookback_days)
+        )
+        recent = [_effective_session_status(session, result.refreshed_at) for session in result.sessions]
+        for session in recent:
+            self._known_sessions[session.thread_id] = session
+            if session.rollout_path is not None:
+                self._known_paths[session.thread_id] = session.rollout_path
+
+        selected = self._select(recent)
+        if self.selection_mode == "pinned" and self.selected_thread_id and selected is None:
+            selected = self._load_known_pinned(self.selected_thread_id)
+            if selected is not None:
+                selected = _effective_session_status(selected, result.refreshed_at)
+
+        thread_ids = list(dict.fromkeys(
+            [session.thread_id for session in recent]
+            + ([selected.thread_id] if selected is not None else [])
+        ))
+        metadata = self.state_batch_loader(tuple(thread_ids)) if thread_ids else {}
+        recent = [self._apply_title(session, metadata.get(session.thread_id)) for session in recent]
+        if selected is not None:
+            selected = next(
+                (item for item in recent if item.thread_id == selected.thread_id),
+                self._apply_title(selected, metadata.get(selected.thread_id)),
+            )
+            self._known_sessions[selected.thread_id] = selected
+
+        state_item = metadata.get(selected.thread_id) if selected else None
+        state_total = _as_total(state_item)
+        reconciliation = _state_reconciliation(selected, state_item)
+        summary = SessionSummary(0, 0, 0, 0, 0, 0, 0, 0, 0)
+        rollout = RolloutUsageResult(
+            selected.rollout_filename if selected else None,
+            selected.thread_id if selected else self.selected_thread_id,
+            selected.instruction if selected else None,
+            bool(selected and selected.status != "unavailable"),
+            selected.thread_cumulative_usage if selected else None,
+            selected.observed_at if selected else None,
+            result.refreshed_at,
+        )
+        return DashboardSnapshot(
+            (), summary, rollout, state_total, reconciliation == "reconciled",
+            reconciliation, None, result, tuple(recent), selected, metadata,
+            self.selection_mode, selected.thread_id if selected else self.selected_thread_id,
+            self.lookback_days,
+        )
+
+    def _select(self, sessions: list[CodexSessionUsage]) -> CodexSessionUsage | None:
+        if self.selection_mode == "auto":
+            return sessions[0] if sessions else None
+        return next((item for item in sessions if item.thread_id == self.selected_thread_id), None)
+
+    def _load_known_pinned(self, thread_id: str) -> CodexSessionUsage | None:
+        path = self._known_paths.get(thread_id)
+        if path is not None and path.is_file():
+            session = self.rollout_reader.read_session(path)
+            if session is not None and session.thread_id == thread_id:
+                self._known_sessions[thread_id] = session
+                return session
+        known = self._known_sessions.get(thread_id)
+        return replace(known, instruction=None, thread_cumulative_usage=None, status="unavailable") if known else None
+
+    @staticmethod
+    def _apply_title(
+        session: CodexSessionUsage, metadata: CodexThreadMetadata | None
+    ) -> CodexSessionUsage:
+        if metadata is not None and metadata.title:
+            return replace(session, display_title=_bounded_display_title(metadata.title), title_source="threads.title")
+        fallback = f"Codex Session · {session.observed_at.astimezone().strftime('%m-%d %H:%M')}"
+        return replace(session, display_title=fallback, title_source="safe timestamp fallback")
 
 
 def instruction_usage(snapshot: DashboardSnapshot) -> InstructionUsage | None:
-    instruction = snapshot.rollout.instruction
-    return instruction
+    return snapshot.selected_session.instruction if snapshot.selected_session else snapshot.rollout.instruction
 
 
-def _state_reconciliation(rollout: RolloutUsageResult, state_total: CodexThreadTotal | None) -> str:
-    if state_total is None or not rollout.thread_id or rollout.thread_cumulative_usage is None:
+def _legacy_sessions(rollout: RolloutUsageResult) -> RolloutSessionsResult:
+    if not rollout.available or not rollout.thread_id:
+        return RolloutSessionsResult((), None, 0, rollout.refreshed_at)
+    observed = rollout.observed_at or rollout.refreshed_at
+    status = rollout.instruction.status if rollout.instruction else "unavailable"
+    session = CodexSessionUsage(
+        rollout.thread_id, f"Codex Session · {observed.astimezone().strftime('%m-%d %H:%M')}",
+        "safe timestamp fallback", rollout.rollout_filename or "rollout.jsonl",
+        rollout.instruction, rollout.thread_cumulative_usage, observed,
+        rollout.refreshed_at, status,
+    )
+    return RolloutSessionsResult((session,), session.thread_id, int(status == "in_progress"), rollout.refreshed_at)
+
+
+def _legacy_metadata(ids: tuple[str, ...], loader: Callable[[str], CodexThreadTotal | None]) -> dict[str, CodexThreadMetadata]:
+    if not ids:
+        return {}
+    item = loader(ids[0])
+    if item is None:
+        return {}
+    return {item.thread_id: CodexThreadMetadata(item.thread_id, item.created_at, item.updated_at, item.model, item.model_provider, item.total_tokens)}
+
+
+def _as_total(item: CodexThreadMetadata | None) -> CodexThreadTotal | None:
+    if item is None or item.total_tokens is None:
+        return None
+    return CodexThreadTotal(
+        item.thread_id, item.created_at, item.updated_at, item.model,
+        item.model_provider, item.total_tokens,
+    )
+
+
+def _state_reconciliation(
+    session: CodexSessionUsage | None, state: CodexThreadMetadata | None
+) -> str:
+    if session is None or state is None or session.thread_cumulative_usage is None:
         return "unavailable"
-    if state_total.thread_id != rollout.thread_id:
+    if state.thread_id != session.thread_id or state.total_tokens is None:
         return "unavailable"
-    return "reconciled" if state_total.total_tokens == rollout.thread_cumulative_usage.total_tokens else "mismatch"
+    return "reconciled" if state.total_tokens == session.thread_cumulative_usage.total_tokens else "mismatch"
+
+
+def _bounded_display_title(value: str, limit: int = 72) -> str:
+    title = " ".join(value.split())
+    return title if len(title) <= limit else title[: limit - 1].rstrip() + "…"
+
+
+def _effective_session_status(
+    session: CodexSessionUsage, refreshed_at: datetime
+) -> CodexSessionUsage:
+    if session.status != "in_progress":
+        return session
+    if refreshed_at - session.observed_at <= ACTIVE_EVENT_MAX_AGE:
+        return session
+    # A stale unfinished Rollout proves only that its completion boundary is
+    # missing; it does not prove the Codex task is still running.
+    return replace(session, status="incomplete")

@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 
 CODEX_SESSIONS_DIR_ENV = "CODEX_SESSIONS_DIR"
 DEFAULT_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+_MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,28 @@ class RolloutUsageResult:
         return self.thread_id[-8:] if self.thread_id else None
 
 
+@dataclass(frozen=True)
+class CodexSessionUsage:
+    thread_id: str
+    display_title: str
+    title_source: str
+    rollout_filename: str
+    instruction: InstructionUsage | None
+    thread_cumulative_usage: TokenUsage | None
+    observed_at: datetime
+    refreshed_at: datetime
+    status: str
+    rollout_path: Path | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class RolloutSessionsResult:
+    sessions: tuple[CodexSessionUsage, ...]
+    latest_active_thread_id: str | None
+    running_thread_count: int
+    refreshed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 def configured_sessions_dir() -> Path:
     configured = os.environ.get(CODEX_SESSIONS_DIR_ENV)
     return Path(configured).expanduser() if configured else DEFAULT_SESSIONS_DIR
@@ -80,21 +103,77 @@ def configured_sessions_dir() -> Path:
 class CodexRolloutReader:
     """Reads event names and numeric metadata only; text fields are never retained."""
 
-    def __init__(self, candidate_limit: int = 30) -> None:
+    def __init__(self, candidate_limit: int = 500) -> None:
         self.candidate_limit = candidate_limit
 
     def refresh(self, sessions_dir: Path | None = None) -> RolloutUsageResult:
+        """Compatibility wrapper returning only the latest active session."""
+        result = self.refresh_sessions(sessions_dir, lookback_days=None)
+        if not result.sessions:
+            return RolloutUsageResult(None, None, None, False, refreshed_at=result.refreshed_at)
+        session = result.sessions[0]
+        return RolloutUsageResult(
+            session.rollout_filename, session.thread_id, session.instruction, True,
+            session.thread_cumulative_usage, session.observed_at, result.refreshed_at,
+        )
+
+    def refresh_sessions(
+        self,
+        sessions_dir: Path | None = None,
+        pinned_path: Path | None = None,
+        lookback_days: int | None = None,
+    ) -> RolloutSessionsResult:
         refreshed_at = datetime.now(timezone.utc)
         root = sessions_dir or configured_sessions_dir()
         if not root.is_dir():
-            return RolloutUsageResult(None, None, None, False, refreshed_at=refreshed_at)
-        candidates = sorted(root.rglob("rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[: self.candidate_limit]
+            return RolloutSessionsResult((), None, 0, refreshed_at)
+        candidate_paths = list(root.rglob("rollout-*.jsonl"))
+        if lookback_days is not None:
+            mtime_cutoff = (refreshed_at - timedelta(days=lookback_days + 1)).timestamp()
+            candidate_paths = [path for path in candidate_paths if _safe_mtime(path) >= mtime_cutoff]
+        candidates = sorted(candidate_paths, key=_safe_mtime, reverse=True)[: self.candidate_limit]
+        if pinned_path is not None and pinned_path.is_file() and pinned_path not in candidates:
+            candidates.append(pinned_path)
         parsed = [self._read(path, refreshed_at) for path in candidates]
-        valid = [item for item in parsed if item[1].available]
-        if not valid:
-            return RolloutUsageResult(None, None, None, False, refreshed_at=refreshed_at)
-        # Event time, rather than file name or mtime, chooses the active compatible rollout.
-        return max(valid, key=lambda item: item[0])[1]
+        newest_by_thread: dict[str, RolloutUsageResult] = {}
+        paths: dict[str, Path] = {}
+        for path, item in zip(candidates, parsed):
+            usage = item[1]
+            if not usage.available or not usage.thread_id or usage.observed_at is None:
+                continue
+            previous = newest_by_thread.get(usage.thread_id)
+            if previous is None or (previous.observed_at or _MIN_TIME) < usage.observed_at:
+                newest_by_thread[usage.thread_id] = usage
+                paths[usage.thread_id] = path
+        sessions = tuple(
+            self._as_session(item, paths[thread_id])
+            for thread_id, item in sorted(
+                newest_by_thread.items(),
+                key=lambda pair: pair[1].observed_at or _MIN_TIME,
+                reverse=True,
+            )
+            if lookback_days is None
+            or (item.observed_at is not None and item.observed_at >= refreshed_at - timedelta(days=lookback_days))
+        )
+        latest = sessions[0].thread_id if sessions else None
+        return RolloutSessionsResult(
+            sessions, latest, sum(item.status == "in_progress" for item in sessions), refreshed_at,
+        )
+
+    def read_session(self, path: Path) -> CodexSessionUsage | None:
+        refreshed_at = datetime.now(timezone.utc)
+        _, result = self._read(path, refreshed_at)
+        return self._as_session(result, path) if result.available and result.thread_id else None
+
+    @staticmethod
+    def _as_session(result: RolloutUsageResult, path: Path) -> CodexSessionUsage:
+        assert result.thread_id and result.instruction and result.thread_cumulative_usage and result.observed_at
+        fallback = f"Codex Session · {result.observed_at.astimezone().strftime('%m-%d %H:%M')}"
+        return CodexSessionUsage(
+            result.thread_id, fallback, "safe timestamp fallback", path.name,
+            result.instruction, result.thread_cumulative_usage, result.observed_at,
+            result.refreshed_at, result.instruction.status, path,
+        )
 
     def _read(self, path: Path, refreshed_at: datetime) -> tuple[datetime, RolloutUsageResult]:
         events: list[tuple[str, dict[str, Any], datetime | None]] = []
@@ -298,3 +377,10 @@ def _sum_usage(usages: Any) -> TokenUsage:
         for index, value in enumerate(usage.values()):
             values[index] += value
     return TokenUsage(*values)
+
+
+def _safe_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0

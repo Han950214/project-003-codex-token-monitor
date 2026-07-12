@@ -23,6 +23,8 @@ class I18nTests(unittest.TestCase):
             "manual_saved_runs": ("手动保存记录", "Manual Saved Runs"),
             "manual_run_input": ("手动 Run 输入", "Manual Run Input"),
             "export_report": ("导出报告", "Export Report"),
+            "time_range": ("时间范围", "Time Range"),
+            "last_7_days": ("最近 7 天", "Last 7 days"),
         }
         for key, (zh, en) in expected.items():
             self.assertEqual(translate(key, "zh-CN"), zh)
@@ -35,19 +37,18 @@ class I18nTests(unittest.TestCase):
         self.assertEqual(translate("missing_key", "en"), "missing_key")
 
     def test_data_status_internal_semantics_do_not_change(self):
-        self.assertEqual(DataStatus.FRESH_REAL.value, "Fresh · Real")
-        self.assertEqual(localize_status(DataStatus.FRESH_REAL, "zh-CN"), "实时 · 真实数据")
-        self.assertEqual(localize_status(DataStatus.FRESH_REAL, "en"), "Fresh · Real")
-        self.assertEqual(DataStatus.FRESH_REAL.value, "Fresh · Real")
+        self.assertEqual(DataStatus.COMPLETED.value, "Completed")
+        self.assertEqual(localize_status(DataStatus.COMPLETED, "zh-CN"), "已完成")
+        self.assertEqual(localize_status(DataStatus.RUNNING, "en"), "Running")
 
     def test_auto_refresh_localization_keeps_sixty_seconds(self):
         self.assertEqual(localize_auto_refresh(True, "zh-CN"), "自动刷新：开启（60 秒）")
         self.assertEqual(localize_auto_refresh(False, "zh-CN"), "自动刷新：关闭（60 秒）")
         self.assertEqual(localize_auto_refresh(True, "en"), "Auto Refresh: On (60s)")
 
-    def test_thread_total_reconciliation_label_is_explicit(self):
-        self.assertEqual(localize_presenter_label("Thread Total Reconciliation", "zh-CN"), "Thread 总计对账")
-        self.assertEqual(localize_presenter_label("Thread Total Reconciliation", "en"), "Thread Total Reconciliation")
+    def test_user_facing_source_labels_hide_engineering_terms(self):
+        self.assertEqual(localize_presenter_label("Data Sync", "zh-CN"), "数据同步")
+        self.assertEqual(localize_presenter_label("Current Task", "en"), "Current Task")
         self.assertEqual(localize_auto_refresh(False, "en"), "Auto Refresh: Off (60s)")
 
 

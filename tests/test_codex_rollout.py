@@ -2,13 +2,14 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from app.codex_rollout import CodexRolloutReader, TokenUsage, _event_time, configured_sessions_dir
 
 
-def event(kind, turn=None, last=None, total=None, timestamp=1, duration_ms=None):
+def event(kind, turn=None, last=None, total=None, timestamp=1, duration_ms=None, thread_id="thread-12345678"):
     payload = {"type": kind}
     if turn:
         payload["turn_id"] = turn
@@ -16,7 +17,7 @@ def event(kind, turn=None, last=None, total=None, timestamp=1, duration_ms=None)
         payload["duration_ms"] = duration_ms
     if last is not None:
         payload["info"] = {"last_token_usage": last, "total_token_usage": total}
-    return {"type": "event_msg", "payload": payload, "timestamp": timestamp, "thread_id": "thread-12345678"}
+    return {"type": "event_msg", "payload": payload, "timestamp": timestamp, "thread_id": thread_id}
 
 
 def usage(i, c, o, r):
@@ -134,6 +135,39 @@ class RolloutReaderTests(unittest.TestCase):
             result = CodexRolloutReader().refresh(Path(directory))
         self.assertTrue(result.instruction.in_progress)
         self.assertEqual(result.instruction.turn_id, "two")
+
+    def test_refresh_sessions_returns_threads_separately_by_event_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            older = [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0), timestamp=10, thread_id="thread-a"), event("task_started", "a", timestamp=11, thread_id="thread-a"), event("token_count", "a", usage(10, 2, 1, 0), usage(10, 2, 1, 0), timestamp=12, thread_id="thread-a")]
+            newer = [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0), timestamp=20, thread_id="thread-b"), event("task_started", "b", timestamp=21, thread_id="thread-b"), event("token_count", "b", usage(30, 15, 5, 1), usage(30, 15, 5, 1), timestamp=22, thread_id="thread-b")]
+            a = self.write(directory, older, "rollout-z.jsonl")
+            b = self.write(directory, newer, "rollout-a.jsonl")
+            os.utime(a, (100, 100)); os.utime(b, (50, 50))
+            result = CodexRolloutReader().refresh_sessions(Path(directory))
+        self.assertEqual([item.thread_id for item in result.sessions], ["thread-b", "thread-a"])
+        self.assertEqual([item.thread_cumulative_usage.total_tokens for item in result.sessions], [35, 11])
+        self.assertEqual(result.running_thread_count, 2)
+
+    def test_duplicate_thread_rollouts_keep_latest_without_summing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0), timestamp=1, thread_id="same"), event("task_started", "a", timestamp=2, thread_id="same"), event("token_count", "a", usage(10, 0, 1, 0), usage(10, 0, 1, 0), timestamp=3, thread_id="same")]
+            latest = [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0), timestamp=4, thread_id="same"), event("task_started", "b", timestamp=5, thread_id="same"), event("token_count", "b", usage(20, 5, 2, 0), usage(20, 5, 2, 0), timestamp=6, thread_id="same")]
+            self.write(directory, first, "rollout-999.jsonl")
+            self.write(directory, latest, "rollout-001.jsonl")
+            result = CodexRolloutReader().refresh_sessions(Path(directory))
+        self.assertEqual(len(result.sessions), 1)
+        self.assertEqual(result.sessions[0].instruction.turn_id, "b")
+        self.assertEqual(result.sessions[0].thread_cumulative_usage.total_tokens, 22)
+
+    def test_lookback_days_filters_by_valid_event_time(self):
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            for thread_id, when, name in (("recent", now - timedelta(days=2), "rollout-recent.jsonl"), ("old", now - timedelta(days=20), "rollout-old.jsonl")):
+                stamp = when.isoformat()
+                events = [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0), timestamp=stamp, thread_id=thread_id), event("task_started", thread_id, timestamp=stamp, thread_id=thread_id), event("token_count", thread_id, usage(3, 1, 1, 0), usage(3, 1, 1, 0), timestamp=stamp, thread_id=thread_id)]
+                self.write(directory, events, name)
+            result = CodexRolloutReader().refresh_sessions(Path(directory), lookback_days=7)
+        self.assertEqual([item.thread_id for item in result.sessions], ["recent"])
 
 
 if __name__ == "__main__":

@@ -2,11 +2,11 @@
 
 Codex Token Monitor Skill is an independent local-first project for estimating and visualizing token usage in Codex Desktop workflows. It is designed as a GitHub-agent-skill-style toolkit with a Windows desktop floating window / Dashboard as the first user-facing surface.
 
-Current boundary: the Dashboard reads privacy-safe numeric metadata from Rollout JSONL and displays a current or latest instruction aggregate. `logs_2.sqlite` is a legacy adapter, not the current usage source. State Thread Total is reconciled only when the same Thread's cumulative total matches exactly. Cache hit is derived from usage numbers, not an official rate; cost, budget, and context remain estimates.
+Current boundary: the Dashboard discovers multiple recent Codex Threads from Rollout JSONL, keeps their token data separate, auto-follows the latest activity, and can pin one Thread for monitoring. `state_5.sqlite` is queried once per refresh for a parameterized batch of safe metadata; `threads.title` is the dedicated title source, with a timestamp fallback when unavailable. No preview or message body is read.
 
 关键边界：本项目当前独立开发，不修改 AOS 主仓库，不接入云端，不读取真实凭据，不做真实扣费。当前 Dashboard 从 Rollout JSONL 读取安全的数字元数据，展示当前或最近的单指令聚合；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。State Thread Total 仅在同一 Thread 的累计数值完全一致时标记为已对账。
 
-## MVP
+## Historical MVP scope
 
 - Manually start/end a Codex task monitoring run.
 - Paste or record the current Codex prompt and output.
@@ -61,16 +61,18 @@ dist\CodexTokenMonitor\CodexTokenMonitor.exe
 
 ## Current Status
 
-Phase 2.7-A reads privacy-safe numeric metadata from the active Codex rollout and shows exact per-instruction usage only after cumulative-token reconciliation. State is marked reconciled only when its total exactly matches the selected Rollout Thread cumulative total. `logs_2.sqlite` is retained as a legacy adapter but is no longer the Dashboard current-usage source; see [Rollout instruction usage](docs/rollout-instruction-usage.md).
+Phase 2.7-B supports multiple recent Codex Threads without mixing their instruction or cumulative usage. The default selection auto-follows the latest valid event; selecting a task or a recent-session row pins its internal Thread ID for the current program run. The recent-session list defaults to the last 7 days and can switch to 30 or 90 days; it remains a bounded recent view, not a complete history index. An unfinished Rollout with no valid event for more than 10 minutes is shown as incomplete rather than still running. Incomplete or unavailable rows remain visible but cannot be newly pinned. Session Total comes from that Thread's latest valid cumulative usage, and session Cache Hit is derived from cumulative Cached/Input.
 
-Phase 2-MVP adds manual local run records, JSON persistence, session summaries, and Markdown report export. It saves prompt/output summaries and manual token counts only by default; do not store credentials or private prompt/output full text.
+The current Dashboard no longer loads or writes the legacy manual Runs JSON and no longer shows manual Run input, saved-Run, or report-export controls. `AgentRun`, `app/storage.py`, `app/reporting.py`, existing Runs JSON, historical reports, and their compatibility tests remain preserved.
+
+Thread titles use only a bounded prefix of the dedicated `threads.title` field; the full long value is never transferred into Python or the UI. If it is unavailable, the UI uses `Codex 会话 · MM-DD HH:mm` / `Codex Session · MM-DD HH:mm`; it never uses preview, prompts, responses, messages, tool output, or reasoning content to generate a title. See [Rollout instruction usage](docs/rollout-instruction-usage.md).
 
 ### Historical Phase 2.4 logs adapter notes
 
 Phase 2.4-B presented the latest `response.completed` values from `logs_2.sqlite`; this is historical behavior, not the current Dashboard usage source.
 
-Phase 2.4-C adds a stateful logs reader and optional low-frequency automatic refresh. The first read performs one initial lookup; later refreshes use the indexed `(ts, ts_nanos, id)` cursor and process at most 500 new rows per scan instead of revalidating the full log. Auto Refresh defaults to Off with a fixed 60-second interval, can be enabled or disabled in the Dashboard, and never saves a Run, exports a report, or writes to Codex SQLite. Recent Runs still comes only from explicit `Save Run / 保存` actions.
+Phase 2.4-C added a stateful logs reader and optional low-frequency automatic refresh. This is historical adapter behavior; the current Dashboard uses Rollout sessions and a fixed optional 60-second refresh.
 
 By default, usage, cost, cache, context, and budget values remain 本地估算 / local estimate. When available, the optional read-only `state_5.sqlite` adapter reads only safe fields and labels `threads.tokens_used` as `codex_state_sqlite / real total` for session total tokens only. The optional read-only `logs_2.sqlite` adapter uses SQLite JSON1 to extract only the latest `response.completed` numeric usage fields; Python receives no event body or body substring, and labels the values `codex_logs_sqlite / real usage`. It accepts only a complete JSON event with root `usage`, or the confirmed `SSE event: ` format with `response.usage`; both require a root `type` of `response.completed`, so keywords and fake usage objects inside content are ignored. Unavailable data uses `unknown`. Cache hit is derived from those numbers, not an official cache hit rate, and current/session cost remains an estimate, not billing. Set `CODEX_STATE_DB` and `CODEX_LOGS_DB` to configure database paths.
 
-The logs adapter reports `connected`, `database missing`, `open failed`, `no response.completed`, or `parse failed`. `Refresh / 刷新` manually rereads logs and state data and updates values, sources, status, and time without saving a Run or adding to Recent Runs. Cache hit remains derived rather than an official rate, and cost remains an estimate rather than billing. Historical session/thread aggregation, system tray support, startup integration, installers, and Codex Desktop embedding are not implemented. The repository remains independent until integration is explicitly planned.
+The legacy logs adapter reports `connected`, `database missing`, `open failed`, `no response.completed`, or `parse failed`, but is not on the current Dashboard usage path. System tray support, startup integration, installers, and Codex Desktop embedding are not implemented. The repository remains independent until integration is explicitly planned.

@@ -1,11 +1,12 @@
 import sqlite3
+import inspect
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from app.codex_state import load_latest_thread_total, load_thread_total
+from app.codex_state import _fetch_threads, load_latest_thread_total, load_thread_metadata, load_thread_total
 
 
 class CodexStateTests(unittest.TestCase):
@@ -119,6 +120,45 @@ class CodexStateTests(unittest.TestCase):
                 result = load_latest_thread_total(path)
         self.assertIsNotNone(result)
         self.assertNotIn(secret, repr(result))
+
+    def test_batch_loader_reads_dedicated_titles_for_requested_threads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.sqlite"
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("CREATE TABLE threads (id TEXT, created_at INTEGER, updated_at INTEGER, model TEXT, model_provider TEXT, tokens_used INTEGER, title TEXT, preview TEXT)")
+                connection.executemany("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [("a", 1, 2, "gpt", "openai", 10, "Alpha", "SECRET"), ("b", 2, 3, "gpt", "openai", 20, "Beta", "SECRET")])
+                connection.commit()
+            result = load_thread_metadata(("a", "b"), path)
+        self.assertEqual(result["a"].title, "Alpha")
+        self.assertEqual(result["b"].title, "Beta")
+        self.assertNotIn("SECRET", repr(result))
+
+    def test_batch_loader_missing_id_does_not_substitute_another_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._database(directory)
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)", ("other", 1, 2, "gpt", "openai", 10))
+                connection.commit()
+            result = load_thread_metadata(("wanted",), path)
+        self.assertEqual(result, {})
+
+    def test_long_dedicated_title_is_bounded_before_entering_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.sqlite"
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("CREATE TABLE threads (id TEXT, created_at INTEGER, updated_at INTEGER, model TEXT, model_provider TEXT, tokens_used INTEGER, title TEXT)")
+                connection.execute("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)", ("a", 1, 2, "gpt", "openai", 10, "A" * 1000 + "FULL_BODY_SECRET"))
+                connection.commit()
+            result = load_thread_metadata(("a",), path)
+        self.assertLessEqual(len(result["a"].title), 72)
+        self.assertTrue(result["a"].title.endswith("…"))
+        self.assertNotIn("FULL_BODY_SECRET", repr(result))
+
+    def test_batch_sql_never_selects_full_title_or_all_columns(self):
+        source = inspect.getsource(_fetch_threads)
+        self.assertIn("substr", source)
+        self.assertIn("length", source)
+        self.assertNotIn("SELECT *", source)
 
 
 if __name__ == "__main__":
