@@ -12,6 +12,7 @@ from app.paths import ui_settings_path
 
 
 DEFAULT_UI_SETTINGS_PATH = ui_settings_path()
+STARTUP_MODES = {"dashboard", "widget", "tray"}
 
 
 def _load_payload(path: Path) -> dict[str, object]:
@@ -47,6 +48,20 @@ def save_language(language: str, path: Path | None = None) -> bool:
     language = normalize_language(language)
     payload = _load_payload(path)
     payload["language"] = language
+    return _save_payload(payload, path)
+
+
+def load_startup_mode(path: Path | None = None) -> str:
+    value = _load_payload(path or ui_settings_path()).get("startup_mode")
+    return value if value in STARTUP_MODES else "dashboard"
+
+
+def save_startup_mode(mode: str, path: Path | None = None) -> bool:
+    if mode not in STARTUP_MODES:
+        mode = "dashboard"
+    path = path or ui_settings_path()
+    payload = _load_payload(path)
+    payload["startup_mode"] = mode
     return _save_payload(payload, path)
 
 

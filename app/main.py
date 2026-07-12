@@ -23,11 +23,14 @@ from app.i18n import (
 from app.paths import ui_settings_path
 from app.quota import CodexQuotaSnapshot
 from app.quota_provider import CodexAppServerQuotaProvider, QuotaProvider
+from app.single_instance import SingleInstanceGuard
+from app.startup_settings import StartupSettingsDialog
+from app.system_tray import SystemTrayController
 from app.telemetry_bar import TelemetryBar, build_telemetry_values
 from app.ui_presenter import (
     DashboardPresentation, disambiguated_session_labels, present_dashboard,
 )
-from app.ui_settings import LanguageController, load_exit_action_for_today
+from app.ui_settings import LanguageController, load_exit_action_for_today, load_startup_mode
 from app.ui_theme import (
     CARD_RADIUS, COLORS, CONTROL_RADIUS, FONT_BODY, FONT_FAMILY,
     FONT_SECTION, FONT_SMALL, FONT_TITLE, METRIC_ACCENTS, METRIC_ICONS,
@@ -70,6 +73,9 @@ class Dashboard:
         self.page_size = 10
         self._widget_mode = False
         self._taskbar_mode = False
+        self._tray_mode = False
+        self.window_mode = "dashboard"
+        self._closing = False
         self._taskbar_iconify_scheduled = False
         self._widget_thread_id: str | None = None
         self._last_dashboard_geometry = "1180x760"
@@ -96,17 +102,31 @@ class Dashboard:
             root,
             on_restore=self.restore_dashboard,
             on_minimize=self._minimize_to_taskbar,
+            on_hide_to_tray=self.hide_to_tray,
             on_exit=self.request_exit,
             on_refresh=self.manual_refresh,
             settings_path=UI_SETTINGS_PATH,
         )
         self.exit_dialog = ExitChoiceDialog(root, UI_SETTINGS_PATH)
+        self.settings_dialog = StartupSettingsDialog(root, UI_SETTINGS_PATH)
+        self.tray = SystemTrayController(
+            root,
+            on_restore_dashboard=self.restore_dashboard,
+            on_show_widget=self._enter_widget_mode,
+            on_hide_to_tray=self.hide_to_tray,
+            on_manual_refresh=self.manual_refresh,
+            on_toggle_auto_refresh=self._toggle_auto_refresh_from_tray,
+            on_settings=self.show_settings,
+            on_exit=self.close,
+        )
+        self.tray.start()
         root.protocol("WM_DELETE_WINDOW", self.request_exit)
         root.bind("<Unmap>", self._on_root_unmap, add="+")
         root.bind("<Map>", self._on_root_map, add="+")
         root.bind("<Configure>", self._on_root_configure, add="+")
         self._apply_language(self.language)
         self.refresh()
+        self._apply_startup_mode(load_startup_mode(UI_SETTINGS_PATH))
 
     def _build(self) -> None:
         self.root.grid_columnconfigure(0, weight=1)
@@ -148,9 +168,13 @@ class Dashboard:
         self.range_selector_label.grid(row=0, column=2, padx=(SPACE_3, SPACE_2))
         self.range_menu = ctk.CTkOptionMenu(selector, values=["—"], command=self._change_time_range, width=130, height=34, corner_radius=CONTROL_RADIUS, fg_color=COLORS.surface, button_color=COLORS.raised_surface, button_hover_color=COLORS.border, text_color=COLORS.primary_text, dropdown_fg_color=COLORS.surface, dropdown_text_color=COLORS.primary_text, dropdown_hover_color=COLORS.accent_soft)
         self.range_menu.grid(row=0, column=3, sticky="w")
+        self.tray_button = ctk.CTkButton(selector, text="", command=self.hide_to_tray, width=100, height=34, corner_radius=CONTROL_RADIUS, fg_color="transparent", border_width=1, border_color=COLORS.border, text_color=COLORS.primary_text, hover_color=COLORS.accent_soft)
+        self.tray_button.grid(row=0, column=4, padx=(SPACE_3, SPACE_2))
+        self.settings_button = ctk.CTkButton(selector, text="⚙", command=self.show_settings, width=36, height=34, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
+        self.settings_button.grid(row=0, column=5, padx=(0, SPACE_2))
         self.status_message_label = ctk.CTkLabel(selector, textvariable=self.status_message_var, font=FONT_BODY, text_color=COLORS.secondary_text, anchor="w")
-        self.status_message_label.grid(row=0, column=4, sticky="ew", padx=(SPACE_3, 0))
-        selector.grid_columnconfigure(4, weight=1)
+        self.status_message_label.grid(row=0, column=6, sticky="ew")
+        selector.grid_columnconfigure(6, weight=1)
 
         meta = ctk.CTkFrame(header, fg_color="transparent")
         meta.grid(row=2, column=0, columnspan=2, sticky="w", pady=(SPACE_1, 0))
@@ -247,6 +271,7 @@ class Dashboard:
             return
         self.refresh_button.configure(text=translate("manual_refresh", language))
         self.mini_widget_button.configure(text=translate("show_mini_widget", language))
+        self.tray_button.configure(text=translate("hide_to_tray", language))
         self.auto_switch.configure(text=localize_auto_refresh(bool(self.auto_refresh_var.get()), language, DEFAULT_AUTO_REFRESH_SECONDS))
         self.language_menu.set(LANGUAGE_LABELS[language])
         self.task_selector_label.configure(text=translate("monitored_task", language))
@@ -276,6 +301,8 @@ class Dashboard:
                 self._mini_thread_snapshot,
                 language,
             )
+        if hasattr(self, "tray"):
+            self.tray.update(language=language, auto_refresh_enabled=bool(self.auto_refresh_var.get()))
 
     def _select_task(self, label: str) -> None:
         if label == translate("auto_follow", self.language):
@@ -328,15 +355,31 @@ class Dashboard:
         if self.snapshot is not None:
             self.presentation = present_dashboard(self.snapshot, enabled)
             self._apply_presentation(self.presentation)
+        self.tray.update(language=self.language, auto_refresh_enabled=enabled)
+
+    def _toggle_auto_refresh_from_tray(self) -> None:
+        self.auto_refresh_var.set(not bool(self.auto_refresh_var.get()))
+        self._toggle_auto_refresh()
+
+    def show_settings(self) -> None:
+        self.settings_dialog.show(self.language)
 
     def _auto_refresh_error(self, _error: Exception) -> None:
         self.status_message_var.set(translate("auto_refresh_failed", self.language))
 
     def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         self.auto_refresh.close()
         self.quota_provider.close()
+        self.tray.stop()
+        self.settings_dialog.close()
         self.mini_widget.destroy()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     def request_exit(self) -> None:
         remembered = None if self.mini_widget.visible else load_exit_action_for_today(UI_SETTINGS_PATH)
@@ -400,6 +443,7 @@ class Dashboard:
             getattr(event, "widget", None) is not self.root
             or self._widget_mode
             or self._taskbar_mode
+            or self._tray_mode
         ):
             return
         try:
@@ -425,18 +469,23 @@ class Dashboard:
             restored = False
         if restored:
             self._taskbar_mode = False
+            self.window_mode = "dashboard"
 
     def _enter_widget_mode(self) -> None:
         if self._widget_mode:
+            self.mini_widget.window.lift()
             return
         selected = self.snapshot.selected_session if self.snapshot is not None else None
         thread_id = selected.thread_id if selected is not None else None
         if thread_id and self.snapshot is not None and self.snapshot.selection_mode == "auto":
             self.view_model.pin_thread(thread_id)
         self._widget_mode = True
+        self._taskbar_mode = False
+        self._tray_mode = False
+        self.window_mode = "widget"
         self._widget_thread_id = thread_id
         self.root.withdraw()
-        self._mini_thread_snapshot = self.view_model.refresh_thread(thread_id)
+        self._mini_thread_snapshot = self._cached_mini_snapshot(selected)
         self.mini_widget.show(
             thread_id,
             self.quota_snapshot,
@@ -445,10 +494,14 @@ class Dashboard:
         )
 
     def restore_dashboard(self) -> None:
-        if not self._widget_mode:
+        if self.window_mode == "dashboard":
+            self.root.lift()
             return
         self.mini_widget.hide()
         self._widget_mode = False
+        self._taskbar_mode = False
+        self._tray_mode = False
+        self.window_mode = "dashboard"
         self.root.deiconify()
         self.root.geometry(self._last_dashboard_geometry)
         self.root.lift()
@@ -457,6 +510,8 @@ class Dashboard:
         self.mini_widget.hide()
         self._widget_mode = False
         self._taskbar_mode = True
+        self._tray_mode = False
+        self.window_mode = "taskbar"
         try:
             if self.root.state() == "withdrawn" or not self.root.winfo_viewable():
                 self._taskbar_iconify_scheduled = True
@@ -473,6 +528,37 @@ class Dashboard:
             self.root.iconify()
         except tk.TclError:
             self._taskbar_mode = False
+
+    def hide_to_tray(self) -> None:
+        if not self.tray.started:
+            return
+        self.mini_widget.hide()
+        self._widget_mode = False
+        self._taskbar_mode = False
+        self._tray_mode = True
+        self.window_mode = "tray"
+        try:
+            self.root.withdraw()
+        except tk.TclError:
+            self._tray_mode = False
+
+    def _apply_startup_mode(self, mode: str) -> None:
+        if mode == "widget":
+            self._enter_widget_mode()
+        elif mode == "tray":
+            self.hide_to_tray()
+
+    @staticmethod
+    def _cached_mini_snapshot(selected) -> MiniThreadSnapshot:
+        if selected is None:
+            return MiniThreadSnapshot("", None, None, "no_selection", None)
+        instruction = selected.instruction
+        instruction_total = instruction.usage.total_tokens if instruction is not None and instruction.usage is not None else None
+        cumulative = selected.thread_cumulative_usage
+        session_total = cumulative.total_tokens if cumulative is not None else None
+        if selected.status == "unavailable":
+            instruction_total = session_total = None
+        return MiniThreadSnapshot(selected.display_title, instruction_total, session_total, selected.status, selected.observed_at)
 
     def _apply_presentation(self, presentation: DashboardPresentation, render_session_rows: bool = True) -> None:
         foreground, background = TONE_COLORS[presentation.status_tone.value]
@@ -609,7 +695,11 @@ def main() -> None:
     if args.smoke:
         smoke()
         return
-    build_dashboard().mainloop()
+    with SingleInstanceGuard() as instance:
+        if not instance.acquire():
+            _safe_print(translate("already_running"))
+            return
+        build_dashboard().mainloop()
 
 
 if __name__ == "__main__":

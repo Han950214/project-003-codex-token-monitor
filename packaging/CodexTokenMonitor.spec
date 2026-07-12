@@ -6,7 +6,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 repo_root = Path(SPECPATH).resolve().parent
 datas = collect_data_files("customtkinter")
 datas.append((str(repo_root / "resources" / "pricing-config.sample.json"), "resources"))
-hiddenimports = collect_submodules("customtkinter")
+datas.append((str(repo_root / "resources" / "tray-icon.xbm"), "resources"))
+hiddenimports = collect_submodules("customtkinter") + collect_submodules("pystray")
 
 a = Analysis(
     [str(repo_root / "app" / "main.py")],

@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from app.ui_settings import LanguageController, load_language, save_language
+from app.ui_settings import (
+    LanguageController, load_language, load_startup_mode, save_language,
+    save_startup_mode,
+)
+from app.startup_settings import StartupSettingsDialog
 from app.main import Dashboard
 
 
@@ -43,6 +47,31 @@ class UiSettingsTests(unittest.TestCase):
         source = inspect.getsource(Dashboard._change_language) + inspect.getsource(Dashboard._apply_language)
         self.assertNotIn("view_model", source)
         self.assertNotIn(".refresh(", source)
+
+    def test_startup_mode_defaults_and_invalid_values_fall_back_to_dashboard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ui-settings.json"
+            self.assertEqual(load_startup_mode(path), "dashboard")
+            path.write_text('{"startup_mode":"broken"}', encoding="utf-8")
+            self.assertEqual(load_startup_mode(path), "dashboard")
+
+    def test_all_startup_modes_round_trip_without_losing_language(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ui-settings.json"
+            save_language("en", path)
+            for mode in ("dashboard", "widget", "tray"):
+                self.assertTrue(save_startup_mode(mode, path))
+                self.assertEqual(load_startup_mode(path), mode)
+                self.assertEqual(load_language(path), "en")
+
+    def test_settings_dialog_uses_one_toplevel_and_no_root_or_mainloop(self):
+        source = inspect.getsource(StartupSettingsDialog)
+        self.assertEqual(source.count("ctk.CTkToplevel("), 1)
+        self.assertNotIn("ctk.CTk(", source)
+        self.assertNotIn("mainloop(", source)
+
+    def test_opening_settings_does_not_refresh_data(self):
+        self.assertNotIn("refresh", inspect.getsource(Dashboard.show_settings))
 
 
 if __name__ == "__main__":

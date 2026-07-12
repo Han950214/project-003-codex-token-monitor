@@ -112,6 +112,7 @@ class DesktopMiniWidget:
         *,
         on_restore: Callable[[], None],
         on_minimize: Callable[[], None],
+        on_hide_to_tray: Callable[[], None],
         on_exit: Callable[[], None],
         on_refresh: Callable[[], None],
         settings_path: Path,
@@ -119,6 +120,7 @@ class DesktopMiniWidget:
         self.root = root
         self.on_restore = on_restore
         self.on_minimize = on_minimize
+        self.on_hide_to_tray = on_hide_to_tray
         self.on_exit = on_exit
         self.on_refresh = on_refresh
         self.settings_path = settings_path
@@ -164,8 +166,10 @@ class DesktopMiniWidget:
         self.restore_button.grid(row=0, column=2, padx=SPACE_1, pady=SPACE_3)
         self.minimize_button = ctk.CTkButton(title_bar, text="", command=self.on_minimize, width=64, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
         self.minimize_button.grid(row=0, column=3, padx=SPACE_1, pady=SPACE_3)
+        self.tray_button = ctk.CTkButton(title_bar, text="◇", command=self.on_hide_to_tray, width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.accent, hover_color=COLORS.accent_soft)
+        self.tray_button.grid(row=0, column=4, padx=SPACE_1, pady=SPACE_3)
         self.exit_button = ctk.CTkButton(title_bar, text="×", command=self.on_exit, width=44, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.error_soft)
-        self.exit_button.grid(row=0, column=4, padx=(SPACE_1, SPACE_3), pady=SPACE_3)
+        self.exit_button.grid(row=0, column=5, padx=(SPACE_1, SPACE_3), pady=SPACE_3)
         for widget in (title_bar, icon, self.title_label):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag)
