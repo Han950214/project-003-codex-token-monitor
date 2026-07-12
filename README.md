@@ -59,9 +59,17 @@ dist\CodexTokenMonitor\CodexTokenMonitor.exe
 
 便携版目标电脑不需要安装 Python。用户数据默认保存在 `%LOCALAPPDATA%\CodexTokenMonitor`，删除便携版目录不会自动删除用户数据。本阶段只提供 one-folder 便携版，不是安装器；尚未实现代码签名、自动更新、开机启动和系统托盘。Windows 可能对未签名的新 exe 显示安全提示，详见 [Windows 便携版构建](docs/windows-portable-build.md)。
 
+## 桌面迷你组件与使用限额
+
+Phase 2.8-A 在主 Dashboard 最小化时隐藏主窗口，并显示一个置顶的桌面迷你组件；也可点击主界面的“显示迷你组件”按钮主动切换。组件默认位于主窗口所在显示器工作区右上角，以数据可读的半透明状态展示，鼠标悬停时恢复完整背景；支持拖动、手动刷新和恢复主界面。点击主窗口关闭或组件退出时会询问“最小化到任务栏 / 退出程序”，默认最小化到任务栏，并可勾选“今天不再提示”。恢复主界面只切换窗口，不重新查询数据，并保留最小化前固定的 Thread、时间范围、语言和自动刷新状态。
+
+迷你组件显示 Codex 5 小时与每周窗口的已使用百分比、剩余百分比、重置时间，以及最小化前选中 Thread 的累计 Tokens。额度通过本机已安装 Codex 的官方 `app-server` 结构化只读方法 `account/rateLimits/read` 获取；本项目不读取或保存 Cookie、Token、Authorization、Session Secret，也不读取 prompt、response、preview、message、tool output 或 reasoning 正文。未知值显示 `—`，刷新失败时保留上一份值并明确标记为陈旧，不伪造数据。
+
+当前仍不包含系统托盘、开机启动、自动更新、额度预测、账户切换或云端同步。详见 [桌面迷你组件](docs/desktop-mini-widget.md)。
+
 ## Current Status
 
-Phase 2.7-B supports multiple recent Codex Threads without mixing their instruction or cumulative usage. The default selection auto-follows the latest valid event; selecting a task or a recent-session row pins its internal Thread ID for the current program run. The recent-session list defaults to the last 7 days and can switch to 30 or 90 days; it remains a bounded recent view of at most 500 Rollout records, not a complete history index. Task completion and instruction-usage quality are separate: exact completed tasks show Completed, ended but non-exact tasks show Completed (Partial Data), and unfinished Rollouts with no valid event for more than 10 minutes show Incomplete rather than still running. Incomplete sessions remain selectable; only unavailable sessions cannot be newly pinned. A pinned task outside the 500 recent candidates is read by its known path, and unchanged Rollouts reuse process-memory parse results. Session Total comes from that Thread's latest valid cumulative usage, and session Cache Hit is derived from cumulative Cached/Input.
+Phase 2.8-A 保留 Phase 2.7-B 的多 Thread 分离、500 条近期候选、已知路径回读和 Rollout 进程内缓存规则。默认选择仍可自动跟随最近活动；主窗口最小化时会把当时实际选中的 Thread 解析为固定选择，迷你组件期间其他 Thread 更新不会触发跳转。近期列表默认 7 天，可切换 30 或 90 天。
 
 The current Dashboard no longer loads or writes the legacy manual Runs JSON and no longer shows manual Run input, saved-Run, or report-export controls. `AgentRun`, `app/storage.py`, `app/reporting.py`, existing Runs JSON, historical reports, and their compatibility tests remain preserved.
 

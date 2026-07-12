@@ -40,6 +40,14 @@ class DashboardSnapshot:
     lookback_days: int = 7
 
 
+@dataclass(frozen=True)
+class MiniThreadSnapshot:
+    title: str
+    total_tokens: int | None
+    status: str
+    observed_at: datetime | None
+
+
 class DashboardViewModel:
     def __init__(
         self,
@@ -139,6 +147,21 @@ class DashboardViewModel:
             self.selection_mode, selected.thread_id if selected else self.selected_thread_id,
             self.lookback_days,
         )
+
+    def refresh_thread(self, thread_id: str | None) -> MiniThreadSnapshot:
+        """Refresh one already-known Thread without changing Dashboard selection."""
+        if not thread_id:
+            return MiniThreadSnapshot("", None, "no_selection", None)
+        session = self._load_known_pinned(thread_id)
+        if session is None:
+            return MiniThreadSnapshot("", None, "unavailable", None)
+        session = _effective_session_status(session, datetime.now(session.observed_at.tzinfo))
+        metadata = self.state_batch_loader((thread_id,)).get(thread_id)
+        session = self._apply_title(session, metadata)
+        self._known_sessions[thread_id] = session
+        usage = session.thread_cumulative_usage
+        total = usage.total_tokens if usage is not None and session.status != "unavailable" else None
+        return MiniThreadSnapshot(session.display_title, total, session.status, session.observed_at)
 
     def _select(self, sessions: list[CodexSessionUsage]) -> CodexSessionUsage | None:
         if self.selection_mode == "auto":

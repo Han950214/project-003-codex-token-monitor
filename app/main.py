@@ -14,17 +14,20 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.auto_refresh import AutoRefreshController, DEFAULT_AUTO_REFRESH_SECONDS
-from app.dashboard import DashboardViewModel
+from app.dashboard import DashboardViewModel, MiniThreadSnapshot
+from app.desktop_widget import DesktopMiniWidget, ExitChoiceDialog
 from app.i18n import (
     LANGUAGE_LABELS, language_from_label, localize_auto_refresh,
     localize_presenter_label, localize_presenter_text, localize_status, translate,
 )
 from app.paths import ui_settings_path
+from app.quota import CodexQuotaSnapshot
+from app.quota_provider import CodexAppServerQuotaProvider, QuotaProvider
 from app.telemetry_bar import TelemetryBar, build_telemetry_values
 from app.ui_presenter import (
     DashboardPresentation, disambiguated_session_labels, present_dashboard,
 )
-from app.ui_settings import LanguageController
+from app.ui_settings import LanguageController, load_exit_action_for_today
 from app.ui_theme import (
     CARD_RADIUS, COLORS, CONTROL_RADIUS, FONT_BODY, FONT_FAMILY,
     FONT_SECTION, FONT_SMALL, FONT_TITLE, METRIC_ACCENTS, METRIC_ICONS,
@@ -41,7 +44,7 @@ SESSION_COLUMN_KEYS = (
 
 
 class Dashboard:
-    def __init__(self, root: ctk.CTk) -> None:
+    def __init__(self, root: ctk.CTk, quota_provider: QuotaProvider | None = None) -> None:
         self.root = root
         configure_view(root)
         self.view_model = DashboardViewModel()
@@ -54,6 +57,14 @@ class Dashboard:
         self.selectable_thread_ids: set[str] = set()
         self._rendering_sessions = False
         self._selection_refresh_pending = False
+        self._widget_mode = False
+        self._taskbar_mode = False
+        self._taskbar_iconify_scheduled = False
+        self._widget_thread_id: str | None = None
+        self._last_dashboard_geometry = "1180x760"
+        self._mini_thread_snapshot = MiniThreadSnapshot("", None, "no_selection", None)
+        self.quota_provider = quota_provider or CodexAppServerQuotaProvider()
+        self.quota_snapshot = CodexQuotaSnapshot.unavailable()
 
         self.auto_refresh_var = tk.BooleanVar(value=False)
         self.data_status_var = tk.StringVar(value="")
@@ -71,7 +82,18 @@ class Dashboard:
         self.auto_refresh = AutoRefreshController(
             root.after, root.after_cancel, self.refresh, on_error=self._auto_refresh_error,
         )
-        root.protocol("WM_DELETE_WINDOW", self.close)
+        self.mini_widget = DesktopMiniWidget(
+            root,
+            on_restore=self.restore_dashboard,
+            on_exit=self.request_exit,
+            on_refresh=self.manual_refresh,
+            settings_path=UI_SETTINGS_PATH,
+        )
+        self.exit_dialog = ExitChoiceDialog(root, UI_SETTINGS_PATH)
+        root.protocol("WM_DELETE_WINDOW", self.request_exit)
+        root.bind("<Unmap>", self._on_root_unmap, add="+")
+        root.bind("<Map>", self._on_root_map, add="+")
+        root.bind("<Configure>", self._on_root_configure, add="+")
         self._apply_language(self.language)
         self.refresh()
 
@@ -98,10 +120,12 @@ class Dashboard:
         actions.grid(row=0, column=1, sticky="e")
         self.refresh_button = ctk.CTkButton(actions, text="", command=self.manual_refresh, width=112, height=34, corner_radius=CONTROL_RADIUS, fg_color="transparent", border_width=1, border_color=COLORS.accent, text_color=COLORS.accent, hover_color=COLORS.accent_soft)
         self.refresh_button.grid(row=0, column=0, padx=(0, SPACE_2))
+        self.mini_widget_button = ctk.CTkButton(actions, text="", command=self._enter_widget_mode, width=112, height=34, corner_radius=CONTROL_RADIUS, fg_color=COLORS.accent, text_color="#FFFFFF", hover_color=COLORS.accent_hover)
+        self.mini_widget_button.grid(row=0, column=1, padx=(0, SPACE_2))
         self.auto_switch = ctk.CTkSwitch(actions, text="", variable=self.auto_refresh_var, command=self._toggle_auto_refresh, width=168, font=FONT_SMALL, progress_color=COLORS.real, button_color=COLORS.surface, button_hover_color=COLORS.raised_surface)
-        self.auto_switch.grid(row=0, column=1, padx=(0, SPACE_2))
+        self.auto_switch.grid(row=0, column=2, padx=(0, SPACE_2))
         self.language_menu = ctk.CTkOptionMenu(actions, values=list(LANGUAGE_LABELS.values()), command=self._change_language, width=112, height=34, corner_radius=CONTROL_RADIUS, fg_color=COLORS.surface, button_color=COLORS.raised_surface, button_hover_color=COLORS.border, text_color=COLORS.primary_text, dropdown_fg_color=COLORS.surface, dropdown_text_color=COLORS.primary_text, dropdown_hover_color=COLORS.accent_soft)
-        self.language_menu.grid(row=0, column=2)
+        self.language_menu.grid(row=0, column=3)
 
         selector = ctk.CTkFrame(header, fg_color="transparent")
         selector.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(SPACE_2, 0))
@@ -202,6 +226,7 @@ class Dashboard:
         if not hasattr(self, "refresh_button"):
             return
         self.refresh_button.configure(text=translate("manual_refresh", language))
+        self.mini_widget_button.configure(text=translate("show_mini_widget", language))
         self.auto_switch.configure(text=localize_auto_refresh(bool(self.auto_refresh_var.get()), language, DEFAULT_AUTO_REFRESH_SECONDS))
         self.language_menu.set(LANGUAGE_LABELS[language])
         self.task_selector_label.configure(text=translate("monitored_task", language))
@@ -223,6 +248,12 @@ class Dashboard:
             widget["label_var"].set(localize_presenter_label(semantic, language))
         if self.presentation is not None:
             self._apply_presentation(self.presentation)
+        if hasattr(self, "mini_widget") and self.mini_widget.visible:
+            self.mini_widget.update(
+                self.quota_snapshot,
+                self._mini_thread_snapshot,
+                language,
+            )
 
     def _select_task(self, label: str) -> None:
         if label == translate("auto_follow", self.language):
@@ -278,9 +309,41 @@ class Dashboard:
 
     def close(self) -> None:
         self.auto_refresh.close()
+        self.quota_provider.close()
+        self.mini_widget.destroy()
         self.root.destroy()
 
+    def request_exit(self) -> None:
+        remembered = load_exit_action_for_today(UI_SETTINGS_PATH)
+        if remembered is not None:
+            self._apply_exit_choice(remembered)
+            return
+        owner = self.mini_widget.window if self.mini_widget.visible else self.root
+        self.exit_dialog.show(
+            owner=owner,
+            language=self.language,
+            on_choice=self._apply_exit_choice,
+        )
+
+    def _apply_exit_choice(self, action: str) -> None:
+        if action == "exit":
+            self.close()
+        elif action == "minimize":
+            self._minimize_to_taskbar()
+
     def refresh(self, show_refreshing: bool = True, render_session_rows: bool = True) -> None:
+        if self._widget_mode:
+            if show_refreshing:
+                self.mini_widget.set_refreshing()
+                self.root.update_idletasks()
+            self.quota_snapshot = self.quota_provider.refresh()
+            self._mini_thread_snapshot = self.view_model.refresh_thread(self._widget_thread_id)
+            self.mini_widget.update(
+                self.quota_snapshot,
+                self._mini_thread_snapshot,
+                self.language,
+            )
+            return
         if show_refreshing and self.presentation is not None and self.snapshot is not None:
             self._apply_presentation(present_dashboard(self.snapshot, bool(self.auto_refresh_var.get()), True, self.presentation))
             self.root.update_idletasks()
@@ -288,6 +351,95 @@ class Dashboard:
         self.lookback_days = self.snapshot.lookback_days
         self.presentation = present_dashboard(self.snapshot, bool(self.auto_refresh_var.get()))
         self._apply_presentation(self.presentation, render_session_rows=render_session_rows)
+        self.quota_snapshot = self.quota_provider.refresh()
+
+    def _on_root_configure(self, event: object) -> None:
+        if getattr(event, "widget", None) is self.root and not self._widget_mode:
+            try:
+                if self.root.state() == "normal":
+                    self._last_dashboard_geometry = self.root.geometry()
+            except tk.TclError:
+                pass
+
+    def _on_root_unmap(self, event: object) -> None:
+        if (
+            getattr(event, "widget", None) is not self.root
+            or self._widget_mode
+            or self._taskbar_mode
+        ):
+            return
+        try:
+            minimized = self.root.state() == "iconic"
+        except tk.TclError:
+            minimized = False
+        if minimized:
+            self.root.after_idle(self._enter_widget_mode)
+
+    def _on_root_map(self, event: object) -> None:
+        if (
+            getattr(event, "widget", None) is not self.root
+            or not self._taskbar_mode
+            or self._taskbar_iconify_scheduled
+        ):
+            return
+        self.root.after_idle(self._finish_taskbar_restore)
+
+    def _finish_taskbar_restore(self) -> None:
+        try:
+            restored = self.root.state() == "normal"
+        except tk.TclError:
+            restored = False
+        if restored:
+            self._taskbar_mode = False
+
+    def _enter_widget_mode(self) -> None:
+        if self._widget_mode:
+            return
+        selected = self.snapshot.selected_session if self.snapshot is not None else None
+        thread_id = selected.thread_id if selected is not None else None
+        if thread_id and self.snapshot is not None and self.snapshot.selection_mode == "auto":
+            self.view_model.pin_thread(thread_id)
+        self._widget_mode = True
+        self._widget_thread_id = thread_id
+        self.root.withdraw()
+        self._mini_thread_snapshot = self.view_model.refresh_thread(thread_id)
+        self.mini_widget.show(
+            thread_id,
+            self.quota_snapshot,
+            self._mini_thread_snapshot,
+            self.language,
+        )
+        self.root.after(50, self.manual_refresh)
+
+    def restore_dashboard(self) -> None:
+        if not self._widget_mode:
+            return
+        self.mini_widget.hide()
+        self._widget_mode = False
+        self.root.deiconify()
+        self.root.geometry(self._last_dashboard_geometry)
+        self.root.lift()
+
+    def _minimize_to_taskbar(self) -> None:
+        self.mini_widget.hide()
+        self._widget_mode = False
+        self._taskbar_mode = True
+        try:
+            if self.root.state() == "withdrawn" or not self.root.winfo_viewable():
+                self._taskbar_iconify_scheduled = True
+                self.root.deiconify()
+                self.root.after_idle(self._complete_taskbar_minimize)
+            else:
+                self.root.iconify()
+        except tk.TclError:
+            self._taskbar_mode = False
+
+    def _complete_taskbar_minimize(self) -> None:
+        self._taskbar_iconify_scheduled = False
+        try:
+            self.root.iconify()
+        except tk.TclError:
+            self._taskbar_mode = False
 
     def _apply_presentation(self, presentation: DashboardPresentation, render_session_rows: bool = True) -> None:
         foreground, background = TONE_COLORS[presentation.status_tone.value]

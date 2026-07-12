@@ -127,6 +127,48 @@ class MultiSessionDashboardTests(unittest.TestCase):
         vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((active,), active.thread_id, 1, NOW), state_batch_loader=lambda _ids: {})
         self.assertEqual(vm.refresh().selected_session.status, "in_progress")
 
+    def test_mini_thread_refresh_uses_known_path_and_updates_total(self):
+        with tempfile.TemporaryDirectory() as directory:
+            known_path = Path(directory) / "known.jsonl"
+            known_path.write_text("", encoding="utf-8")
+            initial = session("a", 1, total=100, path=known_path)
+            updated = session("a", 2, total=150, path=known_path)
+            reader = Mock()
+            reader.read_session.return_value = updated
+            vm = DashboardViewModel(
+                rollout_sessions_loader=lambda: RolloutSessionsResult((initial,), "a", 0, NOW),
+                state_batch_loader=lambda _ids: {
+                    "a": CodexThreadMetadata("a", 1, 2, "gpt", "openai", 150, "Pinned")
+                },
+                rollout_reader=reader,
+            )
+            vm.refresh()
+            mini = vm.refresh_thread("a")
+        self.assertEqual(mini.total_tokens, 150)
+        self.assertEqual(mini.title, "Pinned")
+        reader.read_session.assert_called_once_with(known_path)
+
+    def test_mini_thread_refresh_does_not_change_dashboard_selection(self):
+        first = session("a", 1)
+        second = session("b", 0)
+        vm = DashboardViewModel(
+            rollout_sessions_loader=lambda: RolloutSessionsResult((first, second), "a", 0, NOW),
+            state_batch_loader=lambda _ids: {},
+        )
+        vm.refresh()
+        vm.pin_thread("a")
+        vm.refresh_thread("b")
+        self.assertEqual(vm.selected_thread_id, "a")
+
+    def test_mini_thread_without_selection_stays_empty(self):
+        vm = DashboardViewModel(
+            rollout_sessions_loader=lambda: RolloutSessionsResult((), None, 0, NOW),
+            state_batch_loader=lambda _ids: {},
+        )
+        mini = vm.refresh_thread(None)
+        self.assertEqual(mini.status, "no_selection")
+        self.assertIsNone(mini.total_tokens)
+
 
 if __name__ == "__main__":
     unittest.main()
