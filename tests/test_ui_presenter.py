@@ -1,7 +1,8 @@
 import unittest
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
-from app.codex_rollout import InstructionUsage, RolloutUsageResult, TokenUsage
+from app.codex_rollout import CodexSessionUsage, InstructionUsage, RolloutUsageResult, TokenUsage
 from app.codex_state import CodexThreadTotal
 from app.dashboard import DashboardSnapshot
 from app.metrics import PricingConfig, summarize_runs
@@ -40,7 +41,7 @@ class UiPresenterTests(unittest.TestCase):
     def test_unreconciled_in_progress_is_not_fresh_real(self):
         instruction = InstructionUsage("turn", "in_progress", TokenUsage(3, 1, 2, 1, 5), 1, None, 0, 0, 1, False, True)
         view = present_dashboard(snapshot(instruction), True)
-        self.assertEqual(view.data_status, DataStatus.RUNNING)
+        self.assertEqual(view.data_status, DataStatus.INCOMPLETE)
         self.assertNotEqual(view.data_status, DataStatus.COMPLETED)
 
     def test_event_and_refresh_times_are_separate(self):
@@ -52,13 +53,29 @@ class UiPresenterTests(unittest.TestCase):
         self.assertNotEqual(view.last_event, "—")
         self.assertNotEqual(view.last_refresh, "—")
 
-    def test_completed_incomplete_is_not_rollout_unavailable(self):
+    def test_completed_non_exact_is_completed_partial_with_verified_usage(self):
         instruction = InstructionUsage("turn", "incomplete", TokenUsage(3, 1, 2, 1, 5), 1, 1234, 0, 0, 1, False, False)
         view = present_dashboard(snapshot(instruction), False)
-        self.assertEqual(view.data_status, DataStatus.INCOMPLETE)
+        self.assertEqual(view.data_status, DataStatus.COMPLETED_PARTIAL)
+        self.assertEqual(view.status_tone.value, "estimate")
         self.assertNotIn("unavailable", view.status_message.lower())
         self.assertEqual(view.latest_usage[2].value, "5")
         self.assertEqual(next(item for item in view.source_details if item.label == "Task Elapsed").value, "1s")
+
+    def test_completed_partial_keeps_data_sync_independent(self):
+        instruction = InstructionUsage("turn", "incomplete", TokenUsage(3, 1, 2, 1, 5), 1, 12000, 0, 0, 1, False, False)
+        view = present_dashboard(snapshot(instruction, reconciliation="reconciled"), False)
+        self.assertEqual(view.data_status, DataStatus.COMPLETED_PARTIAL)
+        self.assertEqual(next(item for item in view.source_details if item.label == "Data Sync").value, "reconciled")
+
+    def test_stale_in_progress_and_unreconciled_in_progress_are_incomplete(self):
+        now = datetime(2026, 7, 12, 1, tzinfo=timezone.utc)
+        active = InstructionUsage("turn", "in_progress", TokenUsage(3, 1, 2, 1, 5), 1, None, 0, 0, 0, False, True)
+        stale_session = CodexSessionUsage("thread", "Session", "safe timestamp fallback", "rollout.jsonl", active, TokenUsage(9, 2, 1, 0, 10), now - timedelta(minutes=11), now, "incomplete")
+        stale_snapshot = replace(snapshot(active, observed=stale_session.observed_at, refreshed=now), selected_session=stale_session, recent_sessions=(stale_session,))
+        self.assertEqual(present_dashboard(stale_snapshot, False).data_status, DataStatus.INCOMPLETE)
+        bad = InstructionUsage("turn", "in_progress", TokenUsage(3, 1, 2, 1, 5), 1, None, 0, 0, 1, False, True)
+        self.assertEqual(present_dashboard(snapshot(bad), False).data_status, DataStatus.INCOMPLETE)
 
 
 if __name__ == "__main__":

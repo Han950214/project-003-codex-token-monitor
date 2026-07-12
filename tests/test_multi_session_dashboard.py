@@ -94,12 +94,18 @@ class MultiSessionDashboardTests(unittest.TestCase):
         self.assertEqual(snapshot.selected_thread_id, "a")
         self.assertNotEqual(snapshot.selected_session.status, "unavailable")
 
-    def test_incomplete_session_cannot_be_newly_pinned(self):
+    def test_incomplete_session_can_be_newly_pinned(self):
         item = session("incomplete", 1, status="incomplete")
         vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((item,), item.thread_id, 0, NOW), state_batch_loader=lambda _ids: {})
         vm.refresh()
+        self.assertTrue(vm.pin_thread(item.thread_id))
+        self.assertEqual(vm.selection_mode, "pinned")
+
+    def test_unavailable_session_cannot_be_newly_pinned(self):
+        item = session("unavailable", 1, status="unavailable")
+        vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((item,), item.thread_id, 0, NOW), state_batch_loader=lambda _ids: {})
+        vm.refresh()
         self.assertFalse(vm.pin_thread(item.thread_id))
-        self.assertEqual(vm.selection_mode, "auto")
 
     def test_time_range_defaults_to_seven_days_and_accepts_larger_ranges(self):
         vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((), None, 0, NOW), state_batch_loader=lambda _ids: {})
@@ -114,7 +120,7 @@ class MultiSessionDashboardTests(unittest.TestCase):
         vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((stale,), stale.thread_id, 1, NOW), state_batch_loader=lambda _ids: {})
         snapshot = vm.refresh()
         self.assertEqual(snapshot.selected_session.status, "incomplete")
-        self.assertFalse(vm.pin_thread(stale.thread_id))
+        self.assertTrue(vm.pin_thread(stale.thread_id))
 
     def test_recent_unfinished_session_remains_running(self):
         active = session("active", -5, status="in_progress")

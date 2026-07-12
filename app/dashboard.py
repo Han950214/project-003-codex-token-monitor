@@ -77,7 +77,7 @@ class DashboardViewModel:
         if not thread_id:
             return False
         known = self._known_sessions.get(thread_id)
-        if known is not None and known.status in {"incomplete", "unavailable"}:
+        if known is not None and known.status == "unavailable":
             return False
         self.selection_mode = "pinned"
         self.selected_thread_id = thread_id
@@ -167,6 +167,20 @@ class DashboardViewModel:
 
 def instruction_usage(snapshot: DashboardSnapshot) -> InstructionUsage | None:
     return snapshot.selected_session.instruction if snapshot.selected_session else snapshot.rollout.instruction
+
+
+def display_session_status(
+    session: CodexSessionUsage | None, instruction: InstructionUsage | None
+) -> str:
+    """Derive user-facing task state without changing Rollout aggregation semantics."""
+    if instruction is None:
+        return "unavailable"
+    effective_session_status = session.status if session is not None else instruction.status
+    if instruction.in_progress:
+        if effective_session_status == "in_progress" and instruction.unreconciled_events == 0:
+            return "in_progress"
+        return "incomplete"
+    return "exact" if instruction.exact else "completed_partial"
 
 
 def _legacy_sessions(rollout: RolloutUsageResult) -> RolloutSessionsResult:

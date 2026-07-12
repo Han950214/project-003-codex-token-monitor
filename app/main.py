@@ -326,7 +326,7 @@ class Dashboard:
         labels = disambiguated_session_labels(presentation.recent_sessions, self.language)
         self.selectable_thread_ids = {
             row.thread_id for row in presentation.recent_sessions
-            if row.status not in {"incomplete", "unavailable"}
+            if row.status != "unavailable"
         }
         self.label_to_thread = {
             label: thread_id for thread_id, label in labels.items()

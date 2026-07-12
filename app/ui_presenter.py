@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from app.dashboard import DashboardSnapshot, instruction_usage
+from app.dashboard import DashboardSnapshot, display_session_status, instruction_usage
 
 
 class UiTone(str, Enum):
@@ -20,6 +20,7 @@ class UiTone(str, Enum):
 class DataStatus(str, Enum):
     RUNNING = "Running"
     COMPLETED = "Completed"
+    COMPLETED_PARTIAL = "Completed (Partial Data)"
     INCOMPLETE = "Incomplete"
     UNAVAILABLE = "Unavailable"
     REFRESHING = "Refreshing"
@@ -86,12 +87,9 @@ def present_dashboard(
             status_message="Refreshing", auto_refresh=format_auto_refresh(auto_refresh_enabled),
         )
     instruction = instruction_usage(snapshot)
-    status = (
-        snapshot.selected_session.status if snapshot.selected_session
-        else (instruction.status if instruction else "unavailable")
-    )
+    status = display_session_status(snapshot.selected_session, instruction)
     data_status, tone = _data_status(status)
-    latest = _latest_metrics(instruction)
+    latest = _latest_metrics(instruction, status)
     current, cache = _telemetry_current(instruction)
     cumulative = (
         snapshot.selected_session.thread_cumulative_usage
@@ -107,7 +105,7 @@ def present_dashboard(
     )
     recent = tuple(_recent_row(item) for item in snapshot.recent_sessions)
     return DashboardPresentation(
-        data_status, tone, status, latest, sources,
+        data_status, tone, _status_message(status), latest, sources,
         _format_time(snapshot.selected_session.observed_at if snapshot.selected_session else snapshot.rollout.observed_at),
         _format_time(snapshot.sessions_result.refreshed_at if snapshot.sessions_result.sessions else snapshot.rollout.refreshed_at),
         format_auto_refresh(auto_refresh_enabled), recent, current, cache, session_total,
@@ -146,17 +144,21 @@ def _recent_row(session) -> RecentSessionRow:
     if cumulative is not None and cumulative.input_tokens:
         hit = f"{cumulative.cached_input_tokens / cumulative.input_tokens * 100:.1f}%"
     return RecentSessionRow(
-        session.thread_id, session.display_title, session.title_source, session.status,
+        session.thread_id, session.display_title, session.title_source,
+        display_session_status(session, session.instruction),
         session.observed_at, f"{cumulative.total_tokens:,}" if cumulative else "—", hit,
     )
 
 
-def _latest_metrics(instruction) -> tuple[MetricDisplay, ...]:
+def _latest_metrics(instruction, status: str) -> tuple[MetricDisplay, ...]:
     if instruction is None or instruction.usage is None:
         return tuple(MetricDisplay(label, "—", "Unavailable", UiTone.UNKNOWN) for label in ("Input", "Output", "Total", "Cached", "Reasoning", "Cache Hit"))
     usage = instruction.usage
     hit = "—" if usage.input_tokens == 0 else f"{usage.cached_input_tokens / usage.input_tokens * 100:.1f}%"
-    tone = UiTone.ESTIMATE if instruction.unreconciled_events else UiTone.FRESH
+    tone = (
+        UiTone.ESTIMATE if status == "completed_partial" or instruction.unreconciled_events
+        else (UiTone.STALE if status == "incomplete" else UiTone.FRESH)
+    )
     values = (usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.cached_input_tokens, usage.reasoning_output_tokens)
     details = (
         "All model-call input context for this instruction",
@@ -183,9 +185,19 @@ def _data_status(status: str) -> tuple[DataStatus, UiTone]:
         return DataStatus.RUNNING, UiTone.FRESH
     if status == "exact":
         return DataStatus.COMPLETED, UiTone.FRESH
+    if status == "completed_partial":
+        return DataStatus.COMPLETED_PARTIAL, UiTone.ESTIMATE
     if status == "incomplete":
-        return DataStatus.INCOMPLETE, UiTone.ERROR
+        return DataStatus.INCOMPLETE, UiTone.STALE
     return DataStatus.UNAVAILABLE, UiTone.UNKNOWN
+
+
+def _status_message(status: str) -> str:
+    if status == "completed_partial":
+        return "The task ended, but some instruction tokens could not be reconciled exactly. Verified data is shown."
+    if status == "incomplete":
+        return "The completion boundary or usage reconciliation is incomplete. Available data is shown."
+    return status
 
 
 def _duration(value: int | None, in_progress: bool = False) -> str:

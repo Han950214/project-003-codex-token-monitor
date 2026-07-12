@@ -26,9 +26,9 @@ class ManualRunRemovalTests(unittest.TestCase):
         self.assertNotIn("selection_set", inspect.getsource(main.Dashboard._render_sessions_inner))
         self.assertIn("render_session_rows=False", inspect.getsource(main.Dashboard._refresh_selected_task))
 
-    def test_incomplete_rows_are_not_exposed_in_task_selector(self):
+    def test_only_unavailable_rows_are_excluded_from_task_selector(self):
         source = inspect.getsource(main.Dashboard._render_sessions_inner)
-        self.assertIn('row.status not in {"incomplete", "unavailable"}', source)
+        self.assertIn('row.status != "unavailable"', source)
 
     def test_time_range_selector_offers_seven_thirty_and_ninety_days(self):
         source = inspect.getsource(main.Dashboard._apply_language)

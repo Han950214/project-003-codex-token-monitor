@@ -42,6 +42,8 @@ class I18nTests(unittest.TestCase):
         self.assertEqual(DataStatus.COMPLETED.value, "Completed")
         self.assertEqual(localize_status(DataStatus.COMPLETED, "zh-CN"), "已完成")
         self.assertEqual(localize_status(DataStatus.RUNNING, "en"), "Running")
+        self.assertEqual(localize_status(DataStatus.COMPLETED_PARTIAL, "zh-CN"), "已完成（部分数据）")
+        self.assertEqual(localize_status(DataStatus.COMPLETED_PARTIAL, "en"), "Completed (Partial Data)")
 
     def test_auto_refresh_localization_keeps_sixty_seconds(self):
         self.assertEqual(localize_auto_refresh(True, "zh-CN"), "自动刷新：开启（60 秒）")
