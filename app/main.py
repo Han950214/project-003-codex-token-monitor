@@ -14,7 +14,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.auto_refresh import AutoRefreshController, DEFAULT_AUTO_REFRESH_SECONDS
-from app.dashboard import DashboardViewModel, MiniThreadSnapshot
+from app.dashboard import DashboardViewModel, MiniThreadSnapshot, display_session_status
 from app.desktop_widget import DesktopMiniWidget, ExitChoiceDialog
 from app.i18n import (
     LANGUAGE_LABELS, language_from_label, localize_auto_refresh,
@@ -553,12 +553,13 @@ class Dashboard:
         if selected is None:
             return MiniThreadSnapshot("", None, None, "no_selection", None)
         instruction = selected.instruction
+        status = display_session_status(selected, instruction)
         instruction_total = instruction.usage.total_tokens if instruction is not None and instruction.usage is not None else None
         cumulative = selected.thread_cumulative_usage
         session_total = cumulative.total_tokens if cumulative is not None else None
-        if selected.status == "unavailable":
+        if status == "unavailable":
             instruction_total = session_total = None
-        return MiniThreadSnapshot(selected.display_title, instruction_total, session_total, selected.status, selected.observed_at)
+        return MiniThreadSnapshot(selected.display_title, instruction_total, session_total, status, selected.observed_at)
 
     def _apply_presentation(self, presentation: DashboardPresentation, render_session_rows: bool = True) -> None:
         foreground, background = TONE_COLORS[presentation.status_tone.value]

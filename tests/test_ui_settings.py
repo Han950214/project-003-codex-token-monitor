@@ -70,6 +70,12 @@ class UiSettingsTests(unittest.TestCase):
         self.assertNotIn("ctk.CTk(", source)
         self.assertNotIn("mainloop(", source)
 
+    def test_settings_dialog_does_not_transient_to_a_hidden_root(self):
+        source = inspect.getsource(StartupSettingsDialog.show)
+        self.assertIn("if self.root.winfo_viewable()", source)
+        self.assertIn("window.transient(self.root)", source)
+        self.assertIn("window.after(20, present)", source)
+
     def test_opening_settings_does_not_refresh_data(self):
         self.assertNotIn("refresh", inspect.getsource(Dashboard.show_settings))
 

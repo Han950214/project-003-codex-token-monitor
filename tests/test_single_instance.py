@@ -1,7 +1,10 @@
 import inspect
 import unittest
+from ctypes import wintypes
+from unittest.mock import patch
 
 from app.main import main
+import app.single_instance as single_instance
 from app.single_instance import ERROR_ALREADY_EXISTS, MUTEX_NAME, SingleInstanceGuard
 
 
@@ -20,6 +23,22 @@ class FakeKernel32:
 
     def CloseHandle(self, handle):
         self.closed.append(handle)
+
+
+class FakeFunction:
+    def __init__(self, result=None):
+        self.result = result
+        self.calls = []
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        return self.result
+
+
+class NativeKernel32:
+    def __init__(self, handle=41):
+        self.CreateMutexW = FakeFunction(handle)
+        self.CloseHandle = FakeFunction(True)
 
 
 class SingleInstanceTests(unittest.TestCase):
@@ -45,6 +64,37 @@ class SingleInstanceTests(unittest.TestCase):
         guard.acquire()
         guard.release()
         guard.release()
+        self.assertEqual(kernel.closed, [41])
+
+    def test_large_handle_is_preserved_when_released(self):
+        large_handle = 0x123456789ABCDEF
+        kernel = FakeKernel32(handle=large_handle)
+        guard = SingleInstanceGuard(kernel)
+        self.assertTrue(guard.acquire())
+        guard.release()
+        self.assertEqual(kernel.closed, [large_handle])
+
+    def test_production_loader_declares_win64_signatures(self):
+        kernel = NativeKernel32()
+        with patch.object(single_instance.sys, "platform", "win32"), patch.object(single_instance.ctypes, "WinDLL", return_value=kernel) as loader:
+            self.assertIs(single_instance._load_kernel32(), kernel)
+        loader.assert_called_once_with("kernel32", use_last_error=True)
+        self.assertEqual(kernel.CreateMutexW.argtypes, (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR))
+        self.assertIs(kernel.CreateMutexW.restype, wintypes.HANDLE)
+        self.assertEqual(kernel.CloseHandle.argtypes, (wintypes.HANDLE,))
+        self.assertIs(kernel.CloseHandle.restype, wintypes.BOOL)
+
+    def test_native_path_uses_ctypes_last_error_without_fake_method(self):
+        kernel = NativeKernel32()
+        with patch.object(single_instance, "_load_kernel32", return_value=kernel), patch.object(single_instance.ctypes, "get_last_error", return_value=ERROR_ALREADY_EXISTS):
+            guard = SingleInstanceGuard()
+            self.assertFalse(guard.acquire())
+        self.assertEqual(kernel.CloseHandle.calls, [(41,)])
+
+    def test_fake_path_keeps_fake_get_last_error(self):
+        kernel = FakeKernel32(ERROR_ALREADY_EXISTS)
+        with patch.object(single_instance.ctypes, "get_last_error", side_effect=AssertionError("native path only")):
+            self.assertFalse(SingleInstanceGuard(kernel).acquire())
         self.assertEqual(kernel.closed, [41])
 
     def test_second_instance_check_precedes_window_creation(self):

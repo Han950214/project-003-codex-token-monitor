@@ -249,6 +249,8 @@ def display_session_status(
     """Derive user-facing task state without changing Rollout aggregation semantics."""
     if instruction is None:
         return "unavailable"
+    if session is not None and session.status == "unavailable":
+        return "unavailable"
     effective_session_status = session.status if session is not None else instruction.status
     if instruction.in_progress:
         if effective_session_status == "in_progress" and instruction.unreconciled_events == 0:

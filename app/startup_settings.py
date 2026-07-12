@@ -41,7 +41,8 @@ class StartupSettingsDialog:
         window.title(translate("startup_settings", language))
         window.geometry("430x310")
         window.resizable(False, False)
-        window.transient(self.root)
+        if self.root.winfo_viewable():
+            window.transient(self.root)
         window.protocol("WM_DELETE_WINDOW", self.close)
         window.grid_columnconfigure(0, weight=1)
 
@@ -65,8 +66,15 @@ class StartupSettingsDialog:
         self.mode_menu.set(selected)
         self.mode_menu.grid(row=4, column=0, sticky="w", padx=24)
         ctk.CTkButton(window, text=translate("save_settings", language), command=self.save, width=130).grid(row=5, column=0, sticky="e", padx=24, pady=24)
-        window.grab_set()
-        window.focus_force()
+        def present() -> None:
+            if self.window is not window or not window.winfo_exists():
+                return
+            window.deiconify()
+            window.lift()
+            window.grab_set()
+            window.focus_force()
+
+        window.after(20, present)
 
     def save(self) -> None:
         mode = self.mode_labels.get(self.mode_menu.get(), "dashboard")

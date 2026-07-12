@@ -2,8 +2,10 @@ import inspect
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
+from app.codex_rollout import CodexSessionUsage, InstructionUsage, TokenUsage
 from app.main import Dashboard
 from app.system_tray import SystemTrayController, TrayState, load_tray_icon
 
@@ -151,6 +153,51 @@ class SystemTrayTests(unittest.TestCase):
         source = inspect.getsource(Dashboard.close)
         for expected in ("auto_refresh.close()", "quota_provider.close()", "tray.stop()", "mini_widget.destroy()", "root.destroy()"):
             self.assertIn(expected, source)
+
+    @staticmethod
+    def _session(instruction, *, status="completed", cumulative_total=900):
+        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+        cumulative = TokenUsage(400, 80, 400, 20, cumulative_total)
+        return CodexSessionUsage(
+            "thread", "Cached session", "official", "rollout.jsonl", instruction,
+            cumulative, now, now, status,
+        )
+
+    @staticmethod
+    def _instruction(*, exact=False, in_progress=False, unreconciled=0, total=120):
+        return InstructionUsage(
+            "turn", "exact" if exact else "incomplete", TokenUsage(50, 10, 50, 10, total),
+            1, 1000, 0, 0, unreconciled, exact, in_progress,
+        )
+
+    def test_cached_mini_snapshot_uses_shared_status_boundary(self):
+        source = inspect.getsource(Dashboard._cached_mini_snapshot)
+        self.assertIn("display_session_status(selected, instruction)", source)
+        self.assertNotIn("refresh_thread", source)
+        self.assertNotIn("view_model", source)
+        self.assertNotIn("quota_provider", source)
+
+    def test_cached_mini_snapshot_preserves_exact_totals(self):
+        result = Dashboard._cached_mini_snapshot(self._session(self._instruction(exact=True)))
+        self.assertEqual((result.status, result.instruction_total_tokens, result.session_total_tokens), ("exact", 120, 900))
+
+    def test_cached_mini_snapshot_preserves_completed_partial_totals(self):
+        result = Dashboard._cached_mini_snapshot(self._session(self._instruction()))
+        self.assertEqual((result.status, result.instruction_total_tokens, result.session_total_tokens), ("completed_partial", 120, 900))
+
+    def test_cached_mini_snapshot_preserves_incomplete_totals(self):
+        instruction = self._instruction(in_progress=True, unreconciled=1)
+        result = Dashboard._cached_mini_snapshot(self._session(instruction, status="in_progress"))
+        self.assertEqual((result.status, result.instruction_total_tokens, result.session_total_tokens), ("incomplete", 120, 900))
+
+    def test_cached_mini_snapshot_preserves_reconciled_in_progress_totals(self):
+        instruction = self._instruction(in_progress=True)
+        result = Dashboard._cached_mini_snapshot(self._session(instruction, status="in_progress"))
+        self.assertEqual((result.status, result.instruction_total_tokens, result.session_total_tokens), ("in_progress", 120, 900))
+
+    def test_cached_mini_snapshot_unavailable_has_no_totals(self):
+        result = Dashboard._cached_mini_snapshot(self._session(self._instruction(exact=True), status="unavailable"))
+        self.assertEqual((result.status, result.instruction_total_tokens, result.session_total_tokens), ("unavailable", None, None))
 
 
 if __name__ == "__main__":
