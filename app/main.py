@@ -214,7 +214,7 @@ class Dashboard:
         self.latest_title.configure(text=translate("latest_usage", language))
         self.sources_title.configure(text=translate("session_sources", language))
         self.recent_title.configure(text=translate("recent_sessions", language))
-        self.recent_note.configure(text=translate("recent_sessions_note", language))
+        self.recent_note.configure(text=self._recent_sessions_note())
         for column, key in zip(SESSION_COLUMNS, SESSION_COLUMN_KEYS):
             self.sessions_tree.heading(column, text=translate(key, language))
         for widget in self.metric_widgets:
@@ -296,6 +296,7 @@ class Dashboard:
         self.status_message_var.set(localize_presenter_text(presentation.status_message, self.language))
         self.last_event_var.set(presentation.last_event)
         self.last_refresh_var.set(presentation.last_refresh)
+        self.recent_note.configure(text=self._recent_sessions_note())
         for widget, metric in zip(self.metric_widgets, presentation.latest_usage):
             widget["label_var"].set(localize_presenter_label(metric.label, self.language))
             widget["value_var"].set(metric.value)
@@ -364,6 +365,10 @@ class Dashboard:
             minutes, seconds = value.replace("s", "").split("m ")
             return f"{minutes}分{seconds}秒"
         return value.replace("s", "秒")
+
+    def _recent_sessions_note(self) -> str:
+        truncated = bool(self.snapshot and self.snapshot.sessions_result.candidate_truncated)
+        return translate("recent_sessions_note_truncated" if truncated else "recent_sessions_note", self.language)
 
 
 def build_dashboard() -> ctk.CTk:

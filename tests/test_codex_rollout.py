@@ -169,6 +169,102 @@ class RolloutReaderTests(unittest.TestCase):
             result = CodexRolloutReader().refresh_sessions(Path(directory), lookback_days=7)
         self.assertEqual([item.thread_id for item in result.sessions], ["recent"])
 
+    def test_unchanged_files_are_reused_without_reading_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write(directory, [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)), event("task_started", "t"), event("token_count", "t", usage(3, 1, 1, 0), usage(3, 1, 1, 0))])
+            reader = CodexRolloutReader()
+            with patch.object(reader, "_read", wraps=reader._read) as read:
+                first = reader.refresh_sessions(Path(directory))
+                second = reader.refresh_sessions(Path(directory))
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(first.files_parsed, 1)
+        self.assertEqual(second.files_parsed, 0)
+        self.assertEqual(second.files_reused_from_cache, 1)
+        self.assertEqual(first.sessions[0].observed_at, second.sessions[0].observed_at)
+        self.assertEqual(second.sessions[0].refreshed_at, second.refreshed_at)
+
+    def test_size_or_mtime_change_reparses_cached_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write(directory, [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)), event("task_started", "t"), event("token_count", "t", usage(3, 1, 1, 0), usage(3, 1, 1, 0))])
+            reader = CodexRolloutReader()
+            reader.refresh_sessions(Path(directory))
+            path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            changed_size = reader.refresh_sessions(Path(directory))
+            stat = path.stat()
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+            changed_mtime = reader.refresh_sessions(Path(directory))
+        self.assertEqual(changed_size.files_parsed, 1)
+        self.assertEqual(changed_mtime.files_parsed, 1)
+
+    def test_new_and_deleted_files_update_process_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = self.write(directory, [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)), event("task_started", "a"), event("token_count", "a", usage(3, 1, 1, 0), usage(3, 1, 1, 0))], "rollout-first.jsonl")
+            reader = CodexRolloutReader()
+            reader.refresh_sessions(Path(directory))
+            self.write(directory, [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)), event("task_started", "b"), event("token_count", "b", usage(4, 1, 1, 0), usage(4, 1, 1, 0))], "rollout-second.jsonl")
+            added = reader.refresh_sessions(Path(directory))
+            first.unlink()
+            removed = reader.refresh_sessions(Path(directory))
+        self.assertEqual(added.files_parsed, 1)
+        self.assertEqual(added.files_reused_from_cache, 1)
+        self.assertEqual(removed.files_reused_from_cache, 1)
+        self.assertEqual(len(reader._parse_cache), 1)
+
+    def test_expanding_time_range_reuses_prior_safe_results(self):
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            reader = CodexRolloutReader()
+            for days, name in ((2, "recent"), (20, "month"), (60, "quarter")):
+                when = now - timedelta(days=days)
+                path = self.write(directory, [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0), timestamp=when.isoformat(), thread_id=name), event("task_started", name, timestamp=when.isoformat(), thread_id=name), event("token_count", name, usage(3, 1, 1, 0), usage(3, 1, 1, 0), timestamp=when.isoformat(), thread_id=name)], f"rollout-{name}.jsonl")
+                os.utime(path, (when.timestamp(), when.timestamp()))
+            seven = reader.refresh_sessions(Path(directory), lookback_days=7)
+            thirty = reader.refresh_sessions(Path(directory), lookback_days=30)
+            ninety = reader.refresh_sessions(Path(directory), lookback_days=90)
+        self.assertEqual(seven.files_parsed, 1)
+        self.assertEqual(thirty.files_reused_from_cache, 1)
+        self.assertEqual(ninety.files_reused_from_cache, 2)
+
+    def test_pinned_path_uses_the_same_cache_and_reparses_when_changed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write(directory, [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)), event("task_started", "t"), event("token_count", "t", usage(3, 1, 1, 0), usage(3, 1, 1, 0))])
+            reader = CodexRolloutReader()
+            reader.refresh_sessions(Path(directory))
+            cached = reader.read_session(path)
+            path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            reparsed = reader.read_session(path)
+        self.assertIsNotNone(cached)
+        self.assertIsNotNone(reparsed)
+        self.assertEqual(len(reader._parse_cache), 1)
+
+    def test_cache_contains_only_safe_parse_dtos_and_signatures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write(directory, [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)), event("task_started", "t"), event("token_count", "t", usage(3, 1, 1, 0), usage(3, 1, 1, 0))])
+            reader = CodexRolloutReader()
+            reader.refresh_sessions(Path(directory))
+        entry = next(iter(reader._parse_cache.values()))
+        self.assertIsInstance(entry.file_signature, tuple)
+        self.assertFalse(hasattr(entry, "raw_json"))
+        self.assertFalse(hasattr(entry, "payload"))
+        self.assertFalse(hasattr(entry, "preview"))
+
+    def test_candidate_limit_and_pinned_extra_are_reported_safely(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pinned = None
+            for index in range(501):
+                name = f"rollout-{index:03}.jsonl"
+                path = self.write(directory, [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0), thread_id=f"thread-{index}"), event("task_started", "t", thread_id=f"thread-{index}"), event("token_count", "t", usage(1, 0, 1, 0), usage(1, 0, 1, 0), thread_id=f"thread-{index}")], name)
+                os.utime(path, (index + 1, index + 1))
+                if index == 0:
+                    pinned = path
+            result = CodexRolloutReader().refresh_sessions(Path(directory), pinned_path=pinned)
+        self.assertEqual(result.candidate_limit, 500)
+        self.assertEqual(result.candidates_found, 501)
+        self.assertEqual(result.candidates_loaded, 500)
+        self.assertTrue(result.candidate_truncated)
+        self.assertEqual(result.files_parsed, 501)
+        self.assertEqual(len(result.sessions), 501)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 
@@ -93,6 +94,22 @@ class RolloutSessionsResult:
     latest_active_thread_id: str | None
     running_thread_count: int
     refreshed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    candidate_limit: int = 500
+    candidates_found: int = 0
+    candidates_loaded: int = 0
+    candidate_truncated: bool = False
+    files_parsed: int = 0
+    files_reused_from_cache: int = 0
+    refresh_elapsed_ms: int = 0
+
+
+@dataclass(frozen=True)
+class _CachedRollout:
+    """Process-local safe parse result; no raw JSON or text payload is retained."""
+
+    observed_at: datetime
+    file_signature: tuple[int, int]
+    result: RolloutUsageResult
 
 
 def configured_sessions_dir() -> Path:
@@ -105,6 +122,7 @@ class CodexRolloutReader:
 
     def __init__(self, candidate_limit: int = 500) -> None:
         self.candidate_limit = candidate_limit
+        self._parse_cache: dict[tuple[str, int, int], _CachedRollout] = {}
 
     def refresh(self, sessions_dir: Path | None = None) -> RolloutUsageResult:
         """Compatibility wrapper returning only the latest active session."""
@@ -123,18 +141,27 @@ class CodexRolloutReader:
         pinned_path: Path | None = None,
         lookback_days: int | None = None,
     ) -> RolloutSessionsResult:
+        started = perf_counter()
         refreshed_at = datetime.now(timezone.utc)
         root = sessions_dir or configured_sessions_dir()
         if not root.is_dir():
-            return RolloutSessionsResult((), None, 0, refreshed_at)
+            return RolloutSessionsResult((), None, 0, refreshed_at, self.candidate_limit)
         candidate_paths = list(root.rglob("rollout-*.jsonl"))
+        self._remove_deleted_cache_entries()
         if lookback_days is not None:
             mtime_cutoff = (refreshed_at - timedelta(days=lookback_days + 1)).timestamp()
             candidate_paths = [path for path in candidate_paths if _safe_mtime(path) >= mtime_cutoff]
+        candidates_found = len(candidate_paths)
         candidates = sorted(candidate_paths, key=_safe_mtime, reverse=True)[: self.candidate_limit]
-        if pinned_path is not None and pinned_path.is_file() and pinned_path not in candidates:
+        if pinned_path is not None and pinned_path.is_file() and not any(_same_path(pinned_path, path) for path in candidates):
             candidates.append(pinned_path)
-        parsed = [self._read(path, refreshed_at) for path in candidates]
+        parsed: list[tuple[datetime, RolloutUsageResult]] = []
+        files_parsed = files_reused = 0
+        for path in candidates:
+            item, reused = self._read_cached(path, refreshed_at)
+            parsed.append(item)
+            files_reused += int(reused)
+            files_parsed += int(not reused)
         newest_by_thread: dict[str, RolloutUsageResult] = {}
         paths: dict[str, Path] = {}
         for path, item in zip(candidates, parsed):
@@ -158,12 +185,35 @@ class CodexRolloutReader:
         latest = sessions[0].thread_id if sessions else None
         return RolloutSessionsResult(
             sessions, latest, sum(item.status == "in_progress" for item in sessions), refreshed_at,
+            self.candidate_limit, candidates_found, min(candidates_found, self.candidate_limit),
+            candidates_found > self.candidate_limit, files_parsed, files_reused,
+            round((perf_counter() - started) * 1000),
         )
 
     def read_session(self, path: Path) -> CodexSessionUsage | None:
         refreshed_at = datetime.now(timezone.utc)
-        _, result = self._read(path, refreshed_at)
+        _, result = self._read_cached(path, refreshed_at)[0]
         return self._as_session(result, path) if result.available and result.thread_id else None
+
+    def _read_cached(self, path: Path, refreshed_at: datetime) -> tuple[tuple[datetime, RolloutUsageResult], bool]:
+        key = _cache_key(path)
+        if key is not None:
+            cached = self._parse_cache.get(key)
+            if cached is not None:
+                return (cached.observed_at, replace(cached.result, refreshed_at=refreshed_at)), True
+        item = self._read(path, refreshed_at)
+        if key is not None:
+            normalized_path = key[0]
+            for stale_key in tuple(self._parse_cache):
+                if stale_key[0] == normalized_path and stale_key != key:
+                    del self._parse_cache[stale_key]
+            self._parse_cache[key] = _CachedRollout(item[0], key[1:], replace(item[1], refreshed_at=_MIN_TIME))
+        return item, False
+
+    def _remove_deleted_cache_entries(self) -> None:
+        for key in tuple(self._parse_cache):
+            if not Path(key[0]).is_file():
+                del self._parse_cache[key]
 
     @staticmethod
     def _as_session(result: RolloutUsageResult, path: Path) -> CodexSessionUsage:
@@ -384,3 +434,18 @@ def _safe_mtime(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return 0.0
+
+
+def _cache_key(path: Path) -> tuple[str, int, int] | None:
+    try:
+        stat = path.stat()
+        return (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left == right

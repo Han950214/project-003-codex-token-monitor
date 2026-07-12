@@ -25,6 +25,8 @@ class I18nTests(unittest.TestCase):
             "export_report": ("导出报告", "Export Report"),
             "time_range": ("时间范围", "Time Range"),
             "last_7_days": ("最近 7 天", "Last 7 days"),
+            "recent_sessions_note": ("显示最近检测到的 Codex 会话，最多检查 500 条近期记录。", "Showing recently detected Codex sessions; up to 500 recent records are checked."),
+            "recent_sessions_note_truncated": ("记录较多，本次仅检查最近 500 条；可缩小时间范围以提高速度。", "Many records were found. Only the latest 500 were checked; choose a shorter time range for faster loading."),
         }
         for key, (zh, en) in expected.items():
             self.assertEqual(translate(key, "zh-CN"), zh)
