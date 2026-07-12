@@ -9,8 +9,9 @@ from app.single_instance import ERROR_ALREADY_EXISTS, MUTEX_NAME, SingleInstance
 
 
 class FakeKernel32:
-    def __init__(self, error=0, handle=41):
+    def __init__(self, error=0, handle=41, close_result=True, close_error=None):
         self.error, self.handle = error, handle
+        self.close_result, self.close_error = close_result, close_error
         self.created = []
         self.closed = []
 
@@ -23,6 +24,9 @@ class FakeKernel32:
 
     def CloseHandle(self, handle):
         self.closed.append(handle)
+        if self.close_error is not None:
+            raise self.close_error
+        return self.close_result
 
 
 class FakeFunction:
@@ -64,6 +68,36 @@ class SingleInstanceTests(unittest.TestCase):
         guard.acquire()
         guard.release()
         guard.release()
+        self.assertEqual(kernel.closed, [41])
+
+    def test_release_clears_handle_before_closehandle(self):
+        class ObservingKernel(FakeKernel32):
+            def CloseHandle(inner_self, handle):
+                self.assertIsNone(guard.handle)
+                return super().CloseHandle(handle)
+
+        kernel = ObservingKernel()
+        guard = SingleInstanceGuard(kernel)
+        guard.acquire()
+        guard.release()
+        self.assertIsNone(guard.handle)
+
+    def test_closehandle_false_keeps_handle_cleared(self):
+        kernel = FakeKernel32(close_result=False)
+        guard = SingleInstanceGuard(kernel)
+        guard.acquire()
+        guard.release()
+        guard.release()
+        self.assertIsNone(guard.handle)
+        self.assertEqual(kernel.closed, [41])
+
+    def test_closehandle_exception_is_safe_and_not_repeated(self):
+        kernel = FakeKernel32(close_error=RuntimeError("close failed"))
+        guard = SingleInstanceGuard(kernel)
+        guard.acquire()
+        guard.release()
+        guard.release()
+        self.assertIsNone(guard.handle)
         self.assertEqual(kernel.closed, [41])
 
     def test_large_handle_is_preserved_when_released(self):

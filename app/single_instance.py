@@ -46,9 +46,13 @@ class SingleInstanceGuard:
         return True
 
     def release(self) -> None:
-        if self.handle and self.kernel32 is not None:
-            self.kernel32.CloseHandle(self.handle)
-        self.handle = None
+        handle, self.handle = self.handle, None
+        if not handle or self.kernel32 is None:
+            return
+        try:
+            self.kernel32.CloseHandle(handle)
+        except Exception:
+            pass
 
     def __enter__(self):
         return self

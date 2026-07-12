@@ -530,6 +530,7 @@ class Dashboard:
             self._taskbar_mode = False
 
     def hide_to_tray(self) -> None:
+        self.settings_dialog.close()
         if not self.tray.started:
             return
         self.mini_widget.hide()

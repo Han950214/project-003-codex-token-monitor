@@ -149,6 +149,14 @@ class SystemTrayTests(unittest.TestCase):
         self.assertIn("self.root.iconify()", taskbar)
         self.assertIn("self.root.withdraw()", tray)
 
+    def test_hide_to_tray_closes_settings_before_hiding(self):
+        source = inspect.getsource(Dashboard.hide_to_tray)
+        self.assertIn("self.settings_dialog.close()", source)
+        self.assertIn("self.mini_widget.hide()", source)
+        self.assertIn("self.root.withdraw()", source)
+        self.assertIn('self.window_mode = "tray"', source)
+        self.assertNotIn("refresh", source)
+
     def test_close_stops_refresh_provider_tray_widget_and_root(self):
         source = inspect.getsource(Dashboard.close)
         for expected in ("auto_refresh.close()", "quota_provider.close()", "tray.stop()", "mini_widget.destroy()", "root.destroy()"):
