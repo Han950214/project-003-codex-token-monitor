@@ -68,6 +68,7 @@ class RolloutUsageResult:
     thread_cumulative_usage: TokenUsage | None = None
     observed_at: datetime | None = None
     refreshed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    turn_count: int = 0
 
     @property
     def thread_suffix(self) -> str | None:
@@ -86,6 +87,7 @@ class CodexSessionUsage:
     refreshed_at: datetime
     status: str
     rollout_path: Path | None = field(default=None, repr=False, compare=False)
+    turn_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,7 @@ class CodexRolloutReader:
         return RolloutUsageResult(
             session.rollout_filename, session.thread_id, session.instruction, True,
             session.thread_cumulative_usage, session.observed_at, result.refreshed_at,
+            session.turn_count,
         )
 
     def refresh_sessions(
@@ -222,7 +225,7 @@ class CodexRolloutReader:
         return CodexSessionUsage(
             result.thread_id, fallback, "safe timestamp fallback", path.name,
             result.instruction, result.thread_cumulative_usage, result.observed_at,
-            result.refreshed_at, result.instruction.status, path,
+            result.refreshed_at, result.instruction.status, path, result.turn_count,
         )
 
     def _read(self, path: Path, refreshed_at: datetime) -> tuple[datetime, RolloutUsageResult]:
@@ -272,7 +275,15 @@ class CodexRolloutReader:
         instruction = _instruction_from_events(events)
         if instruction is None:
             return datetime.min.replace(tzinfo=timezone.utc), RolloutUsageResult(path.name, thread_id, None, False, thread_cumulative_usage, newest_token_time, refreshed_at)
-        result = RolloutUsageResult(path.name, thread_id, instruction, True, thread_cumulative_usage, newest_token_time, refreshed_at)
+        turn_count = len({
+            _string(payload.get("turn_id"))
+            for name, payload, _when in events
+            if name == "task_started" and _string(payload.get("turn_id"))
+        })
+        result = RolloutUsageResult(
+            path.name, thread_id, instruction, True, thread_cumulative_usage,
+            newest_token_time, refreshed_at, turn_count,
+        )
         return newest_token_time or datetime.min.replace(tzinfo=timezone.utc), result
 
 

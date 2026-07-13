@@ -25,11 +25,11 @@ class UiPresenterTests(unittest.TestCase):
         instruction = InstructionUsage("turn", "exact", TokenUsage(100, 25, 20, 5, 120), 2, 1500, 1, 0, 0, True, False)
         view = present_dashboard(snapshot(instruction, CodexThreadTotal("thread-12345678", None, None, None, None, 999)), False)
         self.assertEqual(view.data_status, DataStatus.FRESH_REAL)
-        self.assertEqual([item.value for item in view.latest_usage[:5]], ["100", "20", "120", "25", "999"])
+        self.assertEqual([item.value for item in view.latest_usage[:5]], ["100", "20", "120", "25", "5"])
         self.assertEqual(view.latest_usage[5].value, "25.0%")
         self.assertEqual(view.telemetry_current_total, "120")
         self.assertEqual(view.telemetry_session_total, "999")
-        self.assertEqual([item.label for item in view.latest_usage], ["Input", "Output", "Current Total", "Cached", "Session Total", "Cache Hit"])
+        self.assertEqual([item.label for item in view.latest_usage], ["Input", "Output", "Total", "Cached", "Reasoning", "Cache Hit"])
         self.assertIn("including Reasoning", view.latest_usage[1].detail)
         self.assertEqual(view.usage_scope, "instruction")
         self.assertEqual(tuple(item.label for item in view.source_details), ("Data Source", "Current Task", "Model Calls", "Task Elapsed", "Data Sync"))
@@ -79,13 +79,13 @@ class UiPresenterTests(unittest.TestCase):
     def test_missing_instruction_increment_falls_back_to_thread_cumulative_usage(self):
         instruction = InstructionUsage("turn", "incomplete", None, 0, 12000, 0, 0, 1, False, False)
         view = present_dashboard(snapshot(instruction), False)
-        self.assertEqual([item.value for item in view.latest_usage[:5]], ["900", "99", "999", "200", "999"])
+        self.assertEqual([item.value for item in view.latest_usage[:5]], ["900", "99", "999", "200", "10"])
         self.assertEqual(view.latest_usage[5].value, "22.2%")
         self.assertEqual(view.usage_scope, "thread_cumulative")
         self.assertEqual(view.telemetry_current_total, "999")
         self.assertEqual(view.telemetry_cache_hit, "22.2% derived")
         self.assertEqual(view.telemetry_session_total, "999")
-        self.assertEqual([item.label for item in view.latest_usage], ["Input", "Output", "Current Total", "Cached", "Session Total", "Cache Hit"])
+        self.assertEqual([item.label for item in view.latest_usage], ["Input", "Output", "Total", "Cached", "Reasoning", "Cache Hit"])
         self.assertEqual(next(item for item in view.source_details if item.label == "Model Calls").value, "—")
         self.assertTrue(all(item.tone.value == "stale" for item in view.latest_usage))
         self.assertTrue(all(item.detail == "Thread cumulative usage; latest instruction unavailable" for item in view.latest_usage))
@@ -104,7 +104,7 @@ class UiPresenterTests(unittest.TestCase):
 
     def test_fallback_cards_keep_all_cumulative_values(self):
         view = self._fallback_view()
-        self.assertEqual([metric.value for metric in view.latest_usage], ["900", "99", "999", "200", "999", "22.2%"])
+        self.assertEqual([metric.value for metric in view.latest_usage], ["900", "99", "999", "200", "10", "22.2%"])
 
     def test_fallback_card_details_repeat_cumulative_boundary(self):
         view = self._fallback_view()

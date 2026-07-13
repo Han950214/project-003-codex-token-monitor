@@ -78,7 +78,7 @@ METRIC_ICONS = {
     "Output": "↗",
     "Current Total": "◆",
     "Cached": "▣",
-    "Session Total": "◉",
+    "Reasoning": "◉",
     "Cache Hit": "%",
 }
 
@@ -87,7 +87,7 @@ METRIC_ACCENTS = {
     "Output": ("#3B9B55", "#E9F7EC"),
     "Current Total": (COLORS.purple, COLORS.purple_soft),
     "Cached": (COLORS.orange, COLORS.orange_soft),
-    "Session Total": ("#627ED0", "#ECF0FF"),
+    "Reasoning": ("#627ED0", "#ECF0FF"),
     "Cache Hit": (COLORS.teal, COLORS.teal_soft),
 }
 

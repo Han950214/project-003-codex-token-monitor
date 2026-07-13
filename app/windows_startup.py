@@ -38,6 +38,24 @@ class WindowsStartupAdapter:
             return False
         return os.path.normcase(str(value)) == os.path.normcase(expected)
 
+    def path_status(self, executable_path: str | Path | None = None) -> str:
+        """Return a path-only health code without exposing the registry value."""
+        if not self.is_supported():
+            return "unused"
+        expected = self.command_for(executable_path or sys.executable)
+        try:
+            with self.registry.OpenKey(self.registry.HKEY_CURRENT_USER, RUN_KEY) as key:
+                value, _kind = self.registry.QueryValueEx(key, VALUE_NAME)
+        except FileNotFoundError:
+            return "unused"
+        except OSError:
+            return "failure"
+        raw = str(value)
+        if os.path.normcase(raw) != os.path.normcase(expected):
+            return "warning"
+        target = raw.strip().strip('"')
+        return "normal" if Path(target).is_file() else "warning"
+
     def enable(self, executable_path: str | Path) -> bool:
         if not self.is_supported():
             return False

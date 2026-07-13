@@ -8,6 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
+from app.dashboard_mode import normalize_dashboard_mode, normalize_widget_mode
 from app.i18n import DEFAULT_LANGUAGE, normalize_language
 from app.paths import ui_settings_path
 
@@ -17,6 +18,7 @@ STARTUP_MODES = {"dashboard", "widget", "tray"}
 DEFAULT_WIDGET_IDLE_OPACITY = 0.82
 MIN_WIDGET_IDLE_OPACITY = 0.30
 MAX_WIDGET_IDLE_OPACITY = 0.95
+EXIT_BEHAVIORS = {"ask", "minimize", "exit"}
 
 
 def _load_payload(path: Path) -> dict[str, object]:
@@ -69,6 +71,84 @@ def save_startup_mode(mode: str, path: Path | None = None) -> bool:
     return _save_payload(payload, path)
 
 
+def load_dashboard_mode(path: Path | None = None) -> str:
+    return normalize_dashboard_mode(_load_payload(path or ui_settings_path()).get("dashboard_mode"))
+
+
+def save_dashboard_mode(mode: str, path: Path | None = None) -> bool:
+    path = path or ui_settings_path()
+    payload = _load_payload(path)
+    payload["dashboard_mode"] = normalize_dashboard_mode(mode)
+    return _save_payload(payload, path)
+
+
+def load_widget_mode(path: Path | None = None) -> str:
+    return normalize_widget_mode(_load_payload(path or ui_settings_path()).get("widget_mode"))
+
+
+def save_widget_mode(mode: str, path: Path | None = None) -> bool:
+    path = path or ui_settings_path()
+    payload = _load_payload(path)
+    payload["widget_mode"] = normalize_widget_mode(mode)
+    return _save_payload(payload, path)
+
+
+def load_auto_refresh_enabled(path: Path | None = None) -> bool:
+    value = _load_payload(path or ui_settings_path()).get("auto_refresh_enabled")
+    return value if isinstance(value, bool) else False
+
+
+def save_auto_refresh_enabled(enabled: object, path: Path | None = None) -> bool:
+    path = path or ui_settings_path()
+    payload = _load_payload(path)
+    payload["auto_refresh_enabled"] = bool(enabled)
+    return _save_payload(payload, path)
+
+
+def load_exit_behavior(path: Path | None = None) -> str:
+    value = _load_payload(path or ui_settings_path()).get("exit_behavior")
+    return value if value in EXIT_BEHAVIORS else "ask"
+
+
+def save_exit_behavior(value: str, path: Path | None = None) -> bool:
+    path = path or ui_settings_path()
+    payload = _load_payload(path)
+    payload["exit_behavior"] = value if value in EXIT_BEHAVIORS else "ask"
+    return _save_payload(payload, path)
+
+
+def validate_ui_settings(path: Path | None = None) -> tuple[bool, str]:
+    path = path or ui_settings_path()
+    if not path.exists():
+        return True, "defaults"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False, "invalid_json"
+    if not isinstance(payload, dict):
+        return False, "invalid_root"
+    validators = {
+        "language": lambda value: value in {"zh-CN", "en"},
+        "startup_mode": lambda value: value in STARTUP_MODES,
+        "dashboard_mode": lambda value: value in {"simple", "advanced"},
+        "widget_mode": lambda value: value in {"compact", "expanded"},
+        "auto_refresh_enabled": lambda value: isinstance(value, bool),
+        "exit_behavior": lambda value: value in EXIT_BEHAVIORS,
+        "widget_idle_opacity": lambda value: normalize_widget_idle_opacity(value) == value,
+    }
+    for key, validator in validators.items():
+        if key in payload and not validator(payload[key]):
+            return False, f"invalid_{key}"
+    return True, "valid"
+
+
+def clear_widget_position(path: Path | None = None) -> bool:
+    path = path or ui_settings_path()
+    payload = _load_payload(path)
+    payload.pop("widget_position", None)
+    return _save_payload(payload, path)
+
+
 
 
 def normalize_widget_idle_opacity(value: object) -> float:
@@ -93,6 +173,8 @@ def save_widget_idle_opacity(value: object, path: Path | None = None) -> bool:
     payload = _load_payload(path)
     payload["widget_idle_opacity"] = normalize_widget_idle_opacity(value)
     return _save_payload(payload, path)
+
+
 def load_widget_position(path: Path | None = None) -> tuple[int, int] | None:
     path = path or ui_settings_path()
     value = _load_payload(path).get("widget_position")

@@ -1,12 +1,26 @@
 # Codex Token Monitor Skill
 
-Codex Token Monitor Skill is an independent local-first project for estimating and visualizing token usage in Codex Desktop workflows. It is designed as a GitHub-agent-skill-style toolkit with a Windows desktop floating window / Dashboard as the first user-facing surface.
+Codex Token Monitor Skill 是一个独立、本地优先的 **Codex 工作流状态助手**。默认极简模式直接回答“当前是否正常、有什么风险、为什么、下一步做什么”；高级模式继续展示当前指令与会话级安全数字。Windows 主界面、桌面组件、系统托盘和诊断流程均使用同一个进程内 snapshot 与同一条刷新路径。
 
 Current boundary: the Dashboard discovers multiple recent Codex Threads from Rollout JSONL, keeps their token data separate, auto-follows the latest activity, and can pin one Thread for monitoring. `state_5.sqlite` is queried once per full refresh for safe metadata, while user-facing titles come from one structured Codex `app-server` `thread/list` batch. The UI trusts the official `Thread.name` without inferring content from its wording; no preview or message body is decoded.
 
-关键边界：本项目当前独立开发，不修改 AOS 主仓库，不接入云端，不读取真实凭据，不做真实扣费。当前 Dashboard 从 Rollout JSONL 读取安全的数字元数据，展示当前或最近的单指令聚合；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。State Thread Total 仅在同一 Thread 的累计数值完全一致时标记为已对账。
+关键边界：本项目不替代 AOS，不创建知识库、项目记忆或项目上下文，不扫描项目文件，也不读取或保存 Prompt、Response、消息、工具输出或 Reasoning 正文。“准备新线程”只解释数字风险、打开 Codex，并复制不含项目内容的通用手工交接模板。当前 Dashboard 从 Rollout JSONL 读取安全数字元数据；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。
+
+## Phase 3.0 产品体验
+
+- 左侧导航固定为：状态中心、当前任务、历史记录、工具、设置。
+- `simple` 是默认 Dashboard 模式；首页只保留一个最高优先级建议、可靠额度、当前任务与三个快捷操作。
+- `advanced` 保留 Input、Output、Total、Cached、Reasoning、Cache Hit、会话累计、数据源、7/30/90 天、分页、固定选择和自动跟随。
+- Advisor v1 只使用本地安全数字和状态代码，阈值集中定义，缓存复用明确标为本地推导值。
+- 一键诊断独立检查版本、运行模式、Codex/app-server、额度、Rollout、安全数字、SQLite、设置、启动路径、托盘和数据新鲜度；单项失败不会中断其他检查。
+- 桌面组件提供默认 `compact` 状态胶囊和 `expanded` 展开视图；切换布局不读取数据、不重建 Tk root。
+- Dashboard 模式、组件模式、语言、透明度、启动模式、自动刷新和退出行为均保存在本产品 UI settings 中，损坏值使用安全默认值。
+
+详见 [产品交互](docs/product-interaction.md)、[工作流建议规则](docs/workflow-advisor.md) 与 [AOS 边界](docs/aos-boundary.md)。
 
 ## Historical MVP scope
+
+以下仅记录早期原型，不代表当前产品能力；当前版本已移除正文录入、手工 Run 和报告导出入口。
 
 - Manually start/end a Codex task monitoring run.
 - Paste or record the current Codex prompt and output.
@@ -69,15 +83,17 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
 
 便携版目标电脑不需要安装 Python。用户数据默认保存在 `%LOCALAPPDATA%\CodexTokenMonitor`，删除便携版目录不会自动删除用户数据。本阶段同时提供 one-folder 便携版和当前用户级安装器；两者保留系统托盘、用户可选的 HKCU 开机启动和单实例保护，但仍没有代码签名或自动更新。Windows 可能对未签名的新 exe 显示安全提示，详见 [Windows 便携版构建](docs/windows-portable-build.md)。
 
-## 桌面迷你组件与使用限额
+## 桌面组件与使用限额
 
-Phase 2.8-A 在主 Dashboard 最小化时隐藏主窗口，并显示一个置顶的桌面迷你组件；也可点击主界面的“显示迷你组件”按钮主动切换。组件默认位于主窗口所在显示器工作区右上角，以数据可读的半透明状态展示，鼠标悬停时恢复完整背景；支持拖动、手动刷新和恢复主界面。点击主窗口关闭或组件退出时会询问“最小化到任务栏 / 退出程序”，默认最小化到任务栏，并可勾选“今天不再提示”。恢复主界面只切换窗口，不重新查询数据，并保留最小化前固定的 Thread、时间范围、语言和自动刷新状态。
+桌面组件默认使用明显更小的 `compact` 状态胶囊，只显示状态、5 小时额度和展开按钮；`expanded` 显示当前状态、任务、轮次、本轮用量、会话累计、额度及少量操作。两种模式复用同一个 `CTkToplevel` 和共享 presentation，点击展开/收起、双击恢复、拖动或透明度变化均不重新查询数据。组件保持置顶，闲置使用用户透明度，鼠标进入恢复 100% 不透明。
 
 迷你组件显示 Codex 5 小时与每周窗口的已使用百分比、剩余百分比、重置时间，以及最小化前选中 Thread 的“本次指令 Total”和“当前会话累计 Total”。两项数值范围独立，不互相回填；指令数据未知时显示 `—`。组件标题栏提供恢复、直接最小化和退出：直接最小化会隐藏主界面与组件并保留任务栏图标，不弹退出询问；点击任务栏图标恢复主 Dashboard，不触发数据查询。额度通过本机已安装 Codex 的官方 `app-server` 结构化只读方法 `account/rateLimits/read` 获取；本项目不读取或保存 Cookie、Token、Authorization、Session Secret，也不读取 prompt、response、preview、message、tool output 或 reasoning 正文。未知值显示 `—`，刷新失败时保留上一份值并明确标记为陈旧，不伪造数据。
 
 系统托盘支持恢复主界面、显示迷你组件、隐藏全部窗口、手动刷新、切换自动刷新、打开设置和显式退出；恢复与窗口切换不查询数据。默认启动模式可设为主界面、迷你组件或仅托盘；“随 Windows 启动”默认关闭且仅冻结版 EXE 可用。详见 [桌面迷你组件](docs/desktop-mini-widget.md) 与 [Windows 托盘和启动设置](docs/windows-tray-and-startup.md)。当前仍不包含自动更新、额度预测、账户切换或云端同步。
 
 ## Current Status
+
+Phase 3.0 将默认入口重构为极简状态中心，并保留高级数据模式和既有运行边界。导航与模式切换只重绘当前内存 snapshot；只有手动刷新、自动刷新和一键诊断会访问真实数据。应用版本仍为 `0.1.0`。
 
 Phase 2.8-A-S 保留多 Thread 分离、500 条近期候选、已知路径回读和 Rollout 进程内缓存规则。近期列表每页 10 条，可在内存中翻页；点击近期行或下拉任务时直接切换完整刷新留下的快照，不重新读取 Rollout、SQLite、标题或额度。默认选择仍可自动跟随最近活动；主窗口最小化时会把当时实际选中的 Thread 解析为固定选择。近期范围默认 7 天，可切换 30 或 90 天。
 

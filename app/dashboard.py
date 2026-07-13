@@ -47,6 +47,7 @@ class MiniThreadSnapshot:
     session_total_tokens: int | None
     status: str
     observed_at: datetime | None
+    turn_count: int | None = None
 
 
 class DashboardViewModel:
@@ -167,6 +168,7 @@ class DashboardViewModel:
             selected.thread_cumulative_usage if selected else None,
             selected.observed_at if selected else None,
             result.refreshed_at,
+            selected.turn_count if selected else 0,
         )
         snapshot = DashboardSnapshot(
             (), summary, rollout, state_total, reconciliation == "reconciled",
@@ -180,22 +182,25 @@ class DashboardViewModel:
     def refresh_thread(self, thread_id: str | None) -> MiniThreadSnapshot:
         """Refresh one already-known Thread without changing Dashboard selection."""
         if not thread_id:
-            return MiniThreadSnapshot("", None, None, "no_selection", None)
+            return MiniThreadSnapshot("", None, None, "no_selection", None, None)
         session = self._load_known_pinned(thread_id)
         if session is None:
-            return MiniThreadSnapshot("", None, None, "unavailable", None)
+            return MiniThreadSnapshot("", None, None, "unavailable", None, None)
         session = _effective_session_status(session, datetime.now(session.observed_at.tzinfo))
         self.state_batch_loader((thread_id,))
         session = self._apply_title(session)
         self._known_sessions[thread_id] = session
         status = display_session_status(session, session.instruction)
         if status == "unavailable":
-            return MiniThreadSnapshot(session.display_title, None, None, status, session.observed_at)
+            return MiniThreadSnapshot(session.display_title, None, None, status, session.observed_at, session.turn_count)
         instruction = session.instruction
         instruction_total = instruction.usage.total_tokens if instruction is not None and instruction.usage is not None else None
         cumulative = session.thread_cumulative_usage
         session_total = cumulative.total_tokens if cumulative is not None else None
-        return MiniThreadSnapshot(session.display_title, instruction_total, session_total, status, session.observed_at)
+        return MiniThreadSnapshot(
+            session.display_title, instruction_total, session_total, status,
+            session.observed_at, session.turn_count,
+        )
 
     def _select(self, sessions: list[CodexSessionUsage]) -> CodexSessionUsage | None:
         if self.selection_mode == "auto":
@@ -227,7 +232,7 @@ class DashboardViewModel:
         rollout = RolloutUsageResult(
             selected.rollout_filename, selected.thread_id, selected.instruction,
             selected.status != "unavailable", selected.thread_cumulative_usage,
-            selected.observed_at, previous.rollout.refreshed_at,
+            selected.observed_at, previous.rollout.refreshed_at, selected.turn_count,
         )
         snapshot = replace(
             previous, rollout=rollout, state_total=_as_total(state_item),

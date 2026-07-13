@@ -156,7 +156,7 @@ def _recent_row(session) -> RecentSessionRow:
 
 
 def _latest_metrics(instruction, status: str, cumulative=None) -> tuple[MetricDisplay, ...]:
-    labels = ("Input", "Output", "Current Total", "Cached", "Session Total", "Cache Hit")
+    labels = ("Input", "Output", "Total", "Cached", "Reasoning", "Cache Hit")
     usage = instruction.usage if instruction is not None else None
     cumulative_fallback = usage is None and cumulative is not None
     if usage is None and not cumulative_fallback:
@@ -177,9 +177,8 @@ def _latest_metrics(instruction, status: str, cumulative=None) -> tuple[MetricDi
     if cumulative_fallback:
         details = ("Thread cumulative usage; latest instruction unavailable",) * 4
     metrics = [MetricDisplay(label, f"{value:,}", detail, tone) for label, value, detail in zip(labels[:4], values, details)]
-    session_value = f"{cumulative.total_tokens:,}" if cumulative is not None else "—"
-    session_detail = "Thread cumulative usage; latest instruction unavailable" if cumulative_fallback else "Selected session cumulative total"
-    metrics.append(MetricDisplay("Session Total", session_value, session_detail, tone if cumulative is not None else UiTone.UNKNOWN))
+    reasoning_detail = "Thread cumulative usage; latest instruction unavailable" if cumulative_fallback else "Reasoning subset of this instruction Output"
+    metrics.append(MetricDisplay("Reasoning", f"{usage.reasoning_output_tokens:,}", reasoning_detail, tone))
     cache_detail = "Thread cumulative usage; latest instruction unavailable" if cumulative_fallback else "Derived from Input; not an official rate"
     metrics.append(MetricDisplay("Cache Hit", hit, cache_detail, tone if hit != "—" else UiTone.UNKNOWN))
     return tuple(metrics)

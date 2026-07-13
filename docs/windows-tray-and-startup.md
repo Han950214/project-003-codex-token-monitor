@@ -4,10 +4,12 @@ Phase 2.8-B 为同一个 Dashboard 进程增加一个系统托盘图标。左键
 
 “最小化到任务栏”会保留 Windows 任务栏图标；“隐藏到系统托盘”会同时隐藏主界面与迷你组件，只留下托盘图标。两者使用独立的 `taskbar` / `tray` 状态，不改变选中 Thread、7/30/90 天范围、语言或自动刷新开关。托盘“退出应用”是直接退出路径，不受当天记住的最小化选择影响，并会停止自动刷新、关闭 app-server、移除托盘图标和销毁 Tk 窗口。
 
-设置窗口可选择下次启动模式：`dashboard`（默认）、`widget` 或 `tray`。每次启动仍只创建一个 Tk root、一个 Dashboard 和一个托盘控制器，只执行一次初始数据与额度读取；之后按设置显示对应窗口。没有可用 Thread 时，迷你组件的两项 Token 显示 `—`。
+设置页可选择下次启动模式：`dashboard`（默认）、`widget` 或 `tray`，并整合语言、随 Windows 启动、组件闲置透明度、Dashboard 默认模式、组件默认模式、自动刷新和退出行为。`dashboard_mode` 默认 `simple`，`widget_mode` 默认 `compact`；缺失或损坏值安全回退。保存设置只重绘当前内存状态，不读取 Rollout、SQLite、标题或额度。
+
+每次启动仍只创建一个 Tk root、一个 Dashboard 和一个托盘控制器，只执行一次初始数据与额度读取；之后按设置显示对应窗口。没有可用 Thread 时，组件数字显示 `—`。
 
 “随 Windows 启动”默认关闭，只支持 PyInstaller 冻结版 EXE，包括便携版和安装版。启用时仅写当前用户 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下名为 `CodexTokenMonitor` 的值，内容是当前 EXE 的带引号绝对路径；安装过程不会自动写入该值。卸载安装版时只删除本项目值，不触碰其他启动项。整个流程不请求管理员权限、不写 HKLM。源码模式会禁用开关并明确提示不支持。移动便携目录后，旧路径不会被误报为已启用。
 
 Windows named mutex 保证单实例。第二次启动不会创建 Dashboard 或托盘，也不会终止、扫描或读取已有进程；检测到首实例后安全退出。本阶段不实现跨进程唤醒。
 
-系统托盘和启动设置不读取或保存账号、凭据、Token 数据、Thread ID、prompt、response、preview、message、tool output 或 reasoning 正文。当前仍没有安装器、自动更新、代码签名、云同步或系统通知推送。
+系统托盘和启动设置不读取或保存账号、凭据、Token 数据、Thread ID、prompt、response、preview、message、tool output 或 reasoning 正文。当前已有用户级安装器，但仍没有自动更新、代码签名、云同步或系统通知推送。
