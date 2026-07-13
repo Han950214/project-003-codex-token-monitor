@@ -19,7 +19,7 @@ class I18nTests(unittest.TestCase):
     def test_key_translations_are_complete_in_both_languages(self):
         self.assertEqual(set(TRANSLATIONS["zh-CN"]), set(TRANSLATIONS["en"]))
         expected = {
-            "latest_usage": ("当前 / 最近指令 Usage", "Current / Latest Instruction Usage"),
+            "latest_usage": ("当前 / 最近指令用量", "Current / Latest Instruction Usage"),
             "manual_saved_runs": ("手动保存记录", "Manual Saved Runs"),
             "manual_run_input": ("手动 Run 输入", "Manual Run Input"),
             "export_report": ("导出报告", "Export Report"),
@@ -27,7 +27,7 @@ class I18nTests(unittest.TestCase):
             "last_7_days": ("最近 7 天", "Last 7 days"),
             "recent_sessions_note": ("显示最近检测到的 Codex 会话，最多检查 500 条近期记录。", "Showing recently detected Codex sessions; up to 500 recent records are checked."),
             "recent_sessions_note_truncated": ("记录较多，本次仅检查最近 500 条；可缩小时间范围以提高速度。", "Many records were found. Only the latest 500 were checked; choose a shorter time range for faster loading."),
-            "thread_cumulative_usage_title": ("会话累计 Usage（当前指令不可用）", "Session Cumulative Usage (Instruction Unavailable)"),
+            "thread_cumulative_usage_title": ("会话累计用量（当前指令不可用）", "Session Cumulative Usage (Instruction Unavailable)"),
             "token_usage": ("Token 使用", "Token Usage"),
             "instruction_total": ("本次指令", "Instruction Total"),
             "session_total_short": ("当前会话", "Session Total"),
@@ -57,13 +57,13 @@ class I18nTests(unittest.TestCase):
         self.assertEqual(localize_auto_refresh(True, "en"), "Auto Refresh: On (60s)")
 
     def test_cumulative_title_is_localized_in_chinese(self):
-        self.assertEqual(translate("thread_cumulative_usage_title", "zh-CN"), "会话累计 Usage（当前指令不可用）")
+        self.assertEqual(translate("thread_cumulative_usage_title", "zh-CN"), "会话累计用量（当前指令不可用）")
 
     def test_cumulative_title_is_localized_in_english(self):
         self.assertEqual(translate("thread_cumulative_usage_title", "en"), "Session Cumulative Usage (Instruction Unavailable)")
 
-    def test_instruction_title_remains_unchanged(self):
-        self.assertEqual(translate("latest_usage", "zh-CN"), "当前 / 最近指令 Usage")
+    def test_instruction_title_uses_chinese_usage_word(self):
+        self.assertEqual(translate("latest_usage", "zh-CN"), "当前 / 最近指令用量")
 
     def test_cumulative_title_key_exists_in_both_languages(self):
         self.assertIn("thread_cumulative_usage_title", TRANSLATIONS["zh-CN"])

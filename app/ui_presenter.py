@@ -156,35 +156,33 @@ def _recent_row(session) -> RecentSessionRow:
 
 
 def _latest_metrics(instruction, status: str, cumulative=None) -> tuple[MetricDisplay, ...]:
+    labels = ("Input", "Output", "Current Total", "Cached", "Session Total", "Cache Hit")
     usage = instruction.usage if instruction is not None else None
     cumulative_fallback = usage is None and cumulative is not None
     if usage is None and not cumulative_fallback:
-        return tuple(MetricDisplay(label, "—", "Unavailable", UiTone.UNKNOWN) for label in ("Input", "Output", "Total", "Cached", "Reasoning", "Cache Hit"))
+        return tuple(MetricDisplay(label, "—", "Unavailable", UiTone.UNKNOWN) for label in labels)
     usage = cumulative if cumulative_fallback else usage
     assert usage is not None
     hit = "—" if usage.input_tokens == 0 else f"{usage.cached_input_tokens / usage.input_tokens * 100:.1f}%"
-    tone = (
-        UiTone.ESTIMATE if status == "completed_partial" or (instruction is not None and instruction.unreconciled_events)
-        else (UiTone.STALE if status == "incomplete" else UiTone.FRESH)
-    )
+    tone = UiTone.ESTIMATE if status == "completed_partial" or (instruction is not None and instruction.unreconciled_events) else (UiTone.STALE if status == "incomplete" else UiTone.FRESH)
     if cumulative_fallback:
         tone = UiTone.STALE
-    values = (usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.cached_input_tokens, usage.reasoning_output_tokens)
+    values = (usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.cached_input_tokens)
     details = (
         "All model-call input context for this instruction",
         "All model-call output for this instruction, including Reasoning",
         "Input + Output for this instruction",
         "Cached subset of this instruction Input",
-        "Reasoning subset of this instruction Output",
     )
     if cumulative_fallback:
-        details = ("Thread cumulative usage; latest instruction unavailable",) * 5
-    metrics = [MetricDisplay(label, f"{value:,}", detail, tone) for label, value, detail in zip(("Input", "Output", "Total", "Cached", "Reasoning"), values, details)]
+        details = ("Thread cumulative usage; latest instruction unavailable",) * 4
+    metrics = [MetricDisplay(label, f"{value:,}", detail, tone) for label, value, detail in zip(labels[:4], values, details)]
+    session_value = f"{cumulative.total_tokens:,}" if cumulative is not None else "—"
+    session_detail = "Thread cumulative usage; latest instruction unavailable" if cumulative_fallback else "Selected session cumulative total"
+    metrics.append(MetricDisplay("Session Total", session_value, session_detail, tone if cumulative is not None else UiTone.UNKNOWN))
     cache_detail = "Thread cumulative usage; latest instruction unavailable" if cumulative_fallback else "Derived from Input; not an official rate"
     metrics.append(MetricDisplay("Cache Hit", hit, cache_detail, tone if hit != "—" else UiTone.UNKNOWN))
     return tuple(metrics)
-
-
 def _telemetry_current(instruction, cumulative=None) -> tuple[str, str]:
     usage = instruction.usage if instruction is not None else None
     if usage is None:

@@ -123,7 +123,7 @@ class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
 
     def test_widget_uses_one_toplevel_and_no_new_root_or_mainloop(self):
         source = inspect.getsource(DesktopMiniWidget)
-        self.assertEqual(source.count("ctk.CTkToplevel("), 1)
+        self.assertEqual(source.count("ctk.CTkToplevel("), 2)  # Widget plus opacity popover; no extra root.
         self.assertNotIn("ctk.CTk(", source)
         self.assertNotIn("mainloop(", source)
 
@@ -134,6 +134,17 @@ class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
         self.assertIn('"<Enter>"', source)
         self.assertIn('"<Leave>"', source)
 
+    def test_widget_icon_controls_have_localized_tooltips(self):
+        source = inspect.getsource(DesktopMiniWidget._build)
+        self.assertIn("WidgetTooltip(self.minimize_button", source)
+        self.assertIn("WidgetTooltip(self.exit_button", source)
+        self.assertIn('text="—"', source)
+        self.assertIn('text="×"', source)
+
+    def test_widget_idle_opacity_does_not_rebuild_window(self):
+        source = inspect.getsource(DesktopMiniWidget.set_idle_opacity)
+        self.assertIn("_refresh_pointer_opacity", source)
+        self.assertNotIn("CTkToplevel", source)
     def test_exit_dialog_defaults_enter_escape_and_close_to_minimize(self):
         source = inspect.getsource(ExitChoiceDialog.show)
         self.assertIn('self._choose("minimize")', source)

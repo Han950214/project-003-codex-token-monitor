@@ -39,7 +39,7 @@ class TelemetryBarTests(unittest.TestCase):
     def test_chinese_and_english_labels_preserve_six_field_order(self):
         self.assertEqual(
             telemetry_field_labels("zh-CN"),
-            ("Codex Token Monitor", "当前总计", "缓存命中率", "会话总计", "数据状态", "自动刷新"),
+            ("Codex Token Monitor", "当前总 Token", "缓存命中率", "会话总 Token", "数据状态", "自动刷新"),
         )
         self.assertEqual(telemetry_field_labels("en"), TELEMETRY_FIELD_LABELS)
 

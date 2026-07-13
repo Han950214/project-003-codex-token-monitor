@@ -32,6 +32,9 @@ class Colors:
     accent: str = "#3978F6"
     accent_hover: str = "#2D66D4"
     accent_soft: str = "#EAF1FF"
+    selection_background: str = "#D8E6FF"
+    selection_background_inactive: str = "#E4ECF8"
+    selection_foreground: str = "#102A56"
     real: str = "#248A52"
     real_soft: str = "#E8F6ED"
     estimate: str = "#A76812"
@@ -73,18 +76,18 @@ TONE_COLORS = {
 METRIC_ICONS = {
     "Input": "↳",
     "Output": "↗",
-    "Total": "◆",
+    "Current Total": "◆",
     "Cached": "▣",
-    "Reasoning": "✦",
+    "Session Total": "◉",
     "Cache Hit": "%",
 }
 
 METRIC_ACCENTS = {
     "Input": ("#4F8FEF", "#E8F1FF"),
     "Output": ("#3B9B55", "#E9F7EC"),
-    "Total": (COLORS.purple, COLORS.purple_soft),
+    "Current Total": (COLORS.purple, COLORS.purple_soft),
     "Cached": (COLORS.orange, COLORS.orange_soft),
-    "Reasoning": ("#627ED0", "#ECF0FF"),
+    "Session Total": ("#627ED0", "#ECF0FF"),
     "Cache Hit": (COLORS.teal, COLORS.teal_soft),
 }
 
@@ -111,7 +114,11 @@ def configure_treeview(root: ctk.CTk) -> ttk.Style:
         rowheight=28,
         font=(FONT_FAMILY, 10),
     )
-    style.map("Monitor.Treeview", background=[("selected", COLORS.accent_soft)], foreground=[("selected", COLORS.primary_text)])
+    style.map(
+        "Monitor.Treeview",
+        background=[("selected !focus", COLORS.selection_background_inactive), ("selected", COLORS.selection_background)],
+        foreground=[("selected !focus", COLORS.selection_foreground), ("selected", COLORS.selection_foreground)],
+    )
     style.configure(
         "Monitor.Treeview.Heading",
         background=COLORS.raised_surface,

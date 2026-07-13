@@ -109,7 +109,7 @@ class Dashboard:
             settings_path=UI_SETTINGS_PATH,
         )
         self.exit_dialog = ExitChoiceDialog(root, UI_SETTINGS_PATH)
-        self.settings_dialog = StartupSettingsDialog(root, UI_SETTINGS_PATH)
+        self.settings_dialog = StartupSettingsDialog(root, UI_SETTINGS_PATH, on_idle_opacity_saved=self.mini_widget.set_idle_opacity)
         self.tray = SystemTrayController(
             root,
             on_restore_dashboard=self.restore_dashboard,
@@ -190,22 +190,23 @@ class Dashboard:
         content = ctk.CTkFrame(self.root, fg_color="transparent", corner_radius=0)
         content.grid(row=1, column=0, sticky="nsew", padx=SPACE_4, pady=(0, SPACE_2))
         content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(0, minsize=42)
         content.grid_rowconfigure(5, weight=1)
-        self.latest_title = ctk.CTkLabel(content, text="", font=FONT_SECTION, text_color=COLORS.primary_text, anchor="w")
-        self.latest_title.grid(row=0, column=0, sticky="ew", pady=(0, SPACE_1))
+        self.latest_title = ctk.CTkLabel(content, text="", font=FONT_SECTION, text_color=COLORS.primary_text, anchor="w", height=30)
+        self.latest_title.grid(row=0, column=0, sticky="ew", pady=(0, SPACE_3))
         self._build_metric_cards(content)
         self.sources_title = ctk.CTkLabel(content, text="", font=FONT_SECTION, text_color=COLORS.primary_text, anchor="w")
-        self.sources_title.grid(row=2, column=0, sticky="ew", pady=(SPACE_2, SPACE_1))
+        self.sources_title.grid(row=2, column=0, sticky="ew", pady=(SPACE_3, SPACE_2))
         self._build_source_panel(content)
         self._build_recent_sessions(content)
 
     def _build_metric_cards(self, parent: ctk.CTkFrame) -> None:
         cards = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
-        cards.grid(row=1, column=0, sticky="ew")
+        cards.grid(row=1, column=0, sticky="ew", pady=(0, SPACE_2))
         for column, label in enumerate(METRIC_ICONS):
             cards.grid_columnconfigure(column, weight=1, uniform="metric")
             accent, soft = METRIC_ACCENTS[label]
-            card = ctk.CTkFrame(cards, fg_color=COLORS.surface, corner_radius=CARD_RADIUS, border_width=2 if label == "Total" else 1, border_color=accent if label == "Total" else COLORS.border)
+            card = ctk.CTkFrame(cards, fg_color=COLORS.surface, corner_radius=CARD_RADIUS, border_width=2 if label == "Current Total" else 1, border_color=accent if label == "Current Total" else COLORS.border)
             card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else SPACE_1, 0), pady=1)
             card.grid_columnconfigure(1, weight=1)
             ctk.CTkLabel(card, text=METRIC_ICONS[label], width=38, height=38, corner_radius=19, fg_color=soft, text_color=accent, font=(FONT_FAMILY, 19, "bold")).grid(row=0, column=0, rowspan=2, padx=(SPACE_3, SPACE_2), pady=(SPACE_3, SPACE_1))
@@ -330,9 +331,6 @@ class Dashboard:
             thread_id = selected[0]
             if thread_id not in self.selectable_thread_ids:
                 self.sessions_tree.selection_remove(thread_id)
-                return
-            # selection_set() during rendering must not behave like a user click.
-            if self.sessions_tree.focus() != thread_id:
                 return
             if self.view_model.selection_mode == "pinned" and self.view_model.selected_thread_id == thread_id:
                 return
@@ -632,6 +630,9 @@ class Dashboard:
             status = localize_presenter_text(row.status, self.language)
             activity = row.last_activity.astimezone().strftime("%m-%d %H:%M:%S") if row.last_activity else "—"
             self.sessions_tree.insert("", "end", iid=row.thread_id, values=(labels[row.thread_id], status, activity, row.thread_total, row.cache_hit))
+        if selected_id in page_ids:
+            self.sessions_tree.selection_set(selected_id)
+            self.sessions_tree.focus(selected_id)
         self.page_status_var.set(translate("page_status", self.language, current=self.current_page, total=page_count, count=len(all_rows)))
         self.previous_page_button.configure(state="normal" if self.current_page > 1 else "disabled")
         self.next_page_button.configure(state="normal" if self.current_page < page_count else "disabled")

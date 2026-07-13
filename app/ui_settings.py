@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import date
 from pathlib import Path
 from typing import Callable
@@ -13,6 +14,9 @@ from app.paths import ui_settings_path
 
 DEFAULT_UI_SETTINGS_PATH = ui_settings_path()
 STARTUP_MODES = {"dashboard", "widget", "tray"}
+DEFAULT_WIDGET_IDLE_OPACITY = 0.82
+MIN_WIDGET_IDLE_OPACITY = 0.30
+MAX_WIDGET_IDLE_OPACITY = 0.95
 
 
 def _load_payload(path: Path) -> dict[str, object]:
@@ -65,6 +69,30 @@ def save_startup_mode(mode: str, path: Path | None = None) -> bool:
     return _save_payload(payload, path)
 
 
+
+
+def normalize_widget_idle_opacity(value: object) -> float:
+    if isinstance(value, bool):
+        return DEFAULT_WIDGET_IDLE_OPACITY
+    try:
+        opacity = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_WIDGET_IDLE_OPACITY
+    if not math.isfinite(opacity):
+        return DEFAULT_WIDGET_IDLE_OPACITY
+    return min(MAX_WIDGET_IDLE_OPACITY, max(MIN_WIDGET_IDLE_OPACITY, opacity))
+
+
+def load_widget_idle_opacity(path: Path | None = None) -> float:
+    value = _load_payload(path or ui_settings_path()).get("widget_idle_opacity")
+    return normalize_widget_idle_opacity(value)
+
+
+def save_widget_idle_opacity(value: object, path: Path | None = None) -> bool:
+    path = path or ui_settings_path()
+    payload = _load_payload(path)
+    payload["widget_idle_opacity"] = normalize_widget_idle_opacity(value)
+    return _save_payload(payload, path)
 def load_widget_position(path: Path | None = None) -> tuple[int, int] | None:
     path = path or ui_settings_path()
     value = _load_payload(path).get("widget_position")

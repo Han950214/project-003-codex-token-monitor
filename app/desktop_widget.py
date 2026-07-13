@@ -15,7 +15,7 @@ import customtkinter as ctk
 from app.dashboard import MiniThreadSnapshot
 from app.i18n import localize_presenter_text, translate
 from app.quota import CodexQuotaSnapshot, QuotaWindow
-from app.ui_settings import load_widget_position, save_widget_position
+from app.ui_settings import load_widget_idle_opacity, load_widget_position, save_widget_idle_opacity, save_widget_position
 from app.ui_settings import save_exit_action_for_today
 from app.ui_theme import (
     CARD_RADIUS,
@@ -105,6 +105,38 @@ def _windows_monitor_work_area(hwnd: int) -> WorkArea:
     return WorkArea(rect.left, rect.top, rect.right, rect.bottom)
 
 
+class WidgetTooltip:
+    """Small delayed hover tooltip for compact widget controls."""
+
+    def __init__(self, widget: tk.Misc, text: Callable[[], str]) -> None:
+        self.widget, self.text, self.window, self.job = widget, text, None, None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+
+    def _schedule(self, _event: object = None) -> None:
+        self.job = self.widget.after(450, self.show)
+
+    def show(self) -> None:
+        self.job = None
+        if self.window is not None:
+            return
+        window = tk.Toplevel(self.widget)
+        window.withdraw()
+        window.overrideredirect(True)
+        window.attributes("-topmost", True)
+        tk.Label(window, text=self.text(), bg=COLORS.telemetry, fg=COLORS.telemetry_text, padx=7, pady=3).pack()
+        window.geometry(f"+{self.widget.winfo_rootx()}+{self.widget.winfo_rooty() + self.widget.winfo_height() + 4}")
+        window.deiconify()
+        self.window = window
+
+    def hide(self, _event: object = None) -> None:
+        if self.job is not None:
+            self.widget.after_cancel(self.job)
+            self.job = None
+        if self.window is not None:
+            self.window.destroy()
+            self.window = None
+
 class DesktopMiniWidget:
     def __init__(
         self,
@@ -124,11 +156,13 @@ class DesktopMiniWidget:
         self.on_exit = on_exit
         self.on_refresh = on_refresh
         self.settings_path = settings_path
+        self.idle_opacity = load_widget_idle_opacity(settings_path)
         self.language = "zh-CN"
         self.visible = False
         self.thread_id: str | None = None
         self._drag_start: tuple[int, int, int, int] | None = None
         self._opacity_job: str | None = None
+        self._opacity_popover: ctk.CTkToplevel | None = None
 
         self.window = ctk.CTkToplevel(root)
         self.window.withdraw()
@@ -160,16 +194,22 @@ class DesktopMiniWidget:
         title_bar.grid_columnconfigure(1, weight=1)
         icon = ctk.CTkLabel(title_bar, text="◆", text_color=COLORS.accent, font=(FONT_FAMILY, 18, "bold"))
         icon.grid(row=0, column=0, padx=(SPACE_4, SPACE_2), pady=SPACE_3)
-        self.title_label = ctk.CTkLabel(title_bar, text="Codex Token Monitor", font=(FONT_FAMILY, 13, "bold"), text_color=COLORS.primary_text, anchor="w")
+        self.title_label = ctk.CTkLabel(title_bar, text="Codex Token", width=108, font=(FONT_FAMILY, 13, "bold"), text_color=COLORS.primary_text, anchor="w")
         self.title_label.grid(row=0, column=1, sticky="ew", pady=SPACE_3)
         self.restore_button = ctk.CTkButton(title_bar, text="", command=self.on_restore, width=58, height=30, corner_radius=CONTROL_RADIUS, fg_color=COLORS.accent, hover_color=COLORS.accent_hover)
         self.restore_button.grid(row=0, column=2, padx=SPACE_1, pady=SPACE_3)
-        self.minimize_button = ctk.CTkButton(title_bar, text="", command=self.on_minimize, width=64, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
-        self.minimize_button.grid(row=0, column=3, padx=SPACE_1, pady=SPACE_3)
+        self.opacity_button = ctk.CTkButton(title_bar, text="◐", command=self._open_opacity_popover, width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
+        self.opacity_button.grid(row=0, column=3, padx=SPACE_1, pady=SPACE_3)
+        self.minimize_button = ctk.CTkButton(title_bar, text="—", command=self.on_minimize, width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
+        self.minimize_button.grid(row=0, column=4, padx=SPACE_1, pady=SPACE_3)
         self.tray_button = ctk.CTkButton(title_bar, text="◇", command=self.on_hide_to_tray, width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.accent, hover_color=COLORS.accent_soft)
-        self.tray_button.grid(row=0, column=4, padx=SPACE_1, pady=SPACE_3)
-        self.exit_button = ctk.CTkButton(title_bar, text="×", command=self.on_exit, width=44, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.error_soft)
-        self.exit_button.grid(row=0, column=5, padx=(SPACE_1, SPACE_3), pady=SPACE_3)
+        self.tray_button.grid(row=0, column=5, padx=SPACE_1, pady=SPACE_3)
+        self.exit_button = ctk.CTkButton(title_bar, text="×", command=self.on_exit, width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.error_soft)
+        self.exit_button.grid(row=0, column=6, padx=(SPACE_1, SPACE_3), pady=SPACE_3)
+        self.opacity_tooltip = WidgetTooltip(self.opacity_button, lambda: translate("widget_idle_opacity", self.language))
+        self.minimize_tooltip = WidgetTooltip(self.minimize_button, lambda: translate("minimize_widget", self.language))
+        self.tray_tooltip = WidgetTooltip(self.tray_button, lambda: translate("hide_to_tray", self.language))
+        self.exit_tooltip = WidgetTooltip(self.exit_button, lambda: translate("exit_application_short", self.language))
         for widget in (title_bar, icon, self.title_label):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag)
@@ -194,6 +234,37 @@ class DesktopMiniWidget:
         self.refresh_button = ctk.CTkButton(footer, text="↻", command=self.on_refresh, width=30, height=28, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.accent, hover_color=COLORS.accent_soft)
         self.refresh_button.grid(row=0, column=2, padx=(SPACE_1, SPACE_3), pady=SPACE_2)
 
+    def _open_opacity_popover(self) -> None:
+        if self._opacity_popover is not None and self._opacity_popover.winfo_exists():
+            self._opacity_popover.lift()
+            return
+        window = ctk.CTkToplevel(self.window)
+        window.title(translate("widget_idle_opacity", self.language))
+        window.geometry("270x112")
+        window.resizable(False, False)
+        window.attributes("-topmost", True)
+        window.transient(self.window)
+        self.window.update_idletasks()
+        popup_width, popup_height = 270, 112
+        right_x = self.window.winfo_rootx() + self.window.winfo_width() + 8
+        left_x = self.window.winfo_rootx() - popup_width - 8
+        x = left_x if left_x >= 0 else right_x
+        x = min(x, self.window.winfo_screenwidth() - popup_width - 8)
+        y = min(self.window.winfo_rooty(), self.window.winfo_screenheight() - popup_height - 8)
+        window.geometry(f"{popup_width}x{popup_height}+{max(8, x)}+{max(8, y)}")
+        label = ctk.CTkLabel(window, text=f"{translate('widget_idle_opacity', self.language)}: {int(self.idle_opacity * 100)}%", font=FONT_SMALL, anchor="w")
+        label.pack(fill="x", padx=SPACE_3, pady=(SPACE_3, SPACE_1))
+
+        def apply(value: float) -> None:
+            self.set_idle_opacity(value)
+            save_widget_idle_opacity(self.idle_opacity, self.settings_path)
+            label.configure(text=f"{translate('widget_idle_opacity', self.language)}: {int(self.idle_opacity * 100)}%")
+
+        slider = ctk.CTkSlider(window, from_=0.30, to=0.95, number_of_steps=13, command=apply)
+        slider.set(self.idle_opacity)
+        slider.pack(fill="x", padx=SPACE_3, pady=(0, SPACE_3))
+        self._opacity_popover = window
+        window.protocol("WM_DELETE_WINDOW", lambda: (window.destroy(), setattr(self, "_opacity_popover", None)))
     def _build_quota_card(self, parent: ctk.CTkFrame, row: int, accent: str, soft: str) -> None:
         card = ctk.CTkFrame(parent, fg_color=COLORS.surface, corner_radius=CARD_RADIUS, border_width=1, border_color=COLORS.border)
         card.grid(row=row, column=0, sticky="ew", pady=(0, SPACE_2))
@@ -242,7 +313,7 @@ class DesktopMiniWidget:
         self.window.deiconify()
         self.window.lift()
         self.window.attributes("-topmost", True)
-        self.window.attributes("-alpha", DEFAULT_ALPHA)
+        self.window.attributes("-alpha", self.idle_opacity)
         self.visible = True
 
     def hide(self) -> None:
@@ -290,7 +361,13 @@ class DesktopMiniWidget:
             left <= pointer_x < left + self.window.winfo_width()
             and top <= pointer_y < top + self.window.winfo_height()
         )
-        self.window.attributes("-alpha", HOVER_ALPHA if inside else DEFAULT_ALPHA)
+        self.window.attributes("-alpha", HOVER_ALPHA if inside else self.idle_opacity)
+
+    def set_idle_opacity(self, value: object) -> None:
+        from app.ui_settings import normalize_widget_idle_opacity
+        self.idle_opacity = normalize_widget_idle_opacity(value)
+        if self.visible:
+            self._refresh_pointer_opacity()
 
     def set_refreshing(self) -> None:
         self.data_status_var.set(translate("quota_refreshing", self.language))
@@ -304,8 +381,8 @@ class DesktopMiniWidget:
     ) -> None:
         self.language = language
         self.restore_button.configure(text=translate("restore_widget", language))
-        self.minimize_button.configure(text=translate("minimize_widget", language))
-        self.exit_button.configure(text=translate("exit_application_short", language))
+        self.minimize_button.configure(text="—")
+        self.exit_button.configure(text="×")
         self.quota_title_vars[0].set(translate("five_hour_limit", language))
         self.quota_title_vars[1].set(translate("weekly_limit", language))
         self.thread_heading.configure(text=translate("token_usage", language))
@@ -411,6 +488,7 @@ class ExitChoiceDialog:
     def __init__(self, root: ctk.CTk, settings_path: Path) -> None:
         self.root = root
         self.settings_path = settings_path
+        self.idle_opacity = load_widget_idle_opacity(settings_path)
         self.window: ctk.CTkToplevel | None = None
         self.remember_var: tk.BooleanVar | None = None
         self._on_choice: Callable[[str], None] | None = None

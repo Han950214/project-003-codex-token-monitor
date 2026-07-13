@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from app.ui_settings import (
-    LanguageController, load_language, load_startup_mode, save_language,
-    save_startup_mode,
+    LanguageController, load_language, load_startup_mode, load_widget_idle_opacity,
+    save_language, save_startup_mode, save_widget_idle_opacity,
 )
 from app.startup_settings import StartupSettingsDialog
 from app.main import Dashboard
@@ -64,6 +64,19 @@ class UiSettingsTests(unittest.TestCase):
                 self.assertEqual(load_startup_mode(path), mode)
                 self.assertEqual(load_language(path), "en")
 
+    def test_widget_idle_opacity_normalizes_and_preserves_existing_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ui-settings.json"
+            save_language("en", path)
+            self.assertTrue(save_widget_idle_opacity(0.70, path))
+            self.assertEqual(load_widget_idle_opacity(path), 0.70)
+            self.assertEqual(load_language(path), "en")
+            path.write_text('{"widget_idle_opacity":"nan"}', encoding="utf-8")
+            self.assertEqual(load_widget_idle_opacity(path), 0.82)
+            path.write_text('{"widget_idle_opacity":2}', encoding="utf-8")
+            self.assertEqual(load_widget_idle_opacity(path), 0.95)
+            path.write_text('{"widget_idle_opacity":0}', encoding="utf-8")
+            self.assertEqual(load_widget_idle_opacity(path), 0.30)
     def test_settings_dialog_uses_one_toplevel_and_no_root_or_mainloop(self):
         source = inspect.getsource(StartupSettingsDialog)
         self.assertEqual(source.count("ctk.CTkToplevel("), 1)
