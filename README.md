@@ -57,7 +57,17 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 dist\CodexTokenMonitor\CodexTokenMonitor.exe
 ```
 
-便携版目标电脑不需要安装 Python。用户数据默认保存在 `%LOCALAPPDATA%\CodexTokenMonitor`，删除便携版目录不会自动删除用户数据。本阶段提供 one-folder 便携版、系统托盘、用户可选的 HKCU 开机启动和单实例保护，但仍不是安装器，也没有代码签名或自动更新。Windows 可能对未签名的新 exe 显示安全提示，详见 [Windows 便携版构建](docs/windows-portable-build.md)。
+## 构建 Windows 安装版
+
+安装 Inno Setup 6 后执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
+```
+
+安装版按当前用户安装到 `%LOCALAPPDATA%\Programs\CodexTokenMonitor`，不需要管理员权限；默认创建开始菜单快捷方式，可选创建桌面快捷方式。卸载会清理程序文件、快捷方式和本项目开机启动值，但保留 `%LOCALAPPDATA%\CodexTokenMonitor` 用户数据。详见 [Windows 用户级安装器](docs/windows-installer.md)。
+
+便携版目标电脑不需要安装 Python。用户数据默认保存在 `%LOCALAPPDATA%\CodexTokenMonitor`，删除便携版目录不会自动删除用户数据。本阶段同时提供 one-folder 便携版和当前用户级安装器；两者保留系统托盘、用户可选的 HKCU 开机启动和单实例保护，但仍没有代码签名或自动更新。Windows 可能对未签名的新 exe 显示安全提示，详见 [Windows 便携版构建](docs/windows-portable-build.md)。
 
 ## 桌面迷你组件与使用限额
 
@@ -65,7 +75,7 @@ Phase 2.8-A 在主 Dashboard 最小化时隐藏主窗口，并显示一个置顶
 
 迷你组件显示 Codex 5 小时与每周窗口的已使用百分比、剩余百分比、重置时间，以及最小化前选中 Thread 的“本次指令 Total”和“当前会话累计 Total”。两项数值范围独立，不互相回填；指令数据未知时显示 `—`。组件标题栏提供恢复、直接最小化和退出：直接最小化会隐藏主界面与组件并保留任务栏图标，不弹退出询问；点击任务栏图标恢复主 Dashboard，不触发数据查询。额度通过本机已安装 Codex 的官方 `app-server` 结构化只读方法 `account/rateLimits/read` 获取；本项目不读取或保存 Cookie、Token、Authorization、Session Secret，也不读取 prompt、response、preview、message、tool output 或 reasoning 正文。未知值显示 `—`，刷新失败时保留上一份值并明确标记为陈旧，不伪造数据。
 
-系统托盘支持恢复主界面、显示迷你组件、隐藏全部窗口、手动刷新、切换自动刷新、打开设置和显式退出；恢复与窗口切换不查询数据。默认启动模式可设为主界面、迷你组件或仅托盘；“随 Windows 启动”默认关闭且仅便携版可用。详见 [桌面迷你组件](docs/desktop-mini-widget.md) 与 [Windows 托盘和启动设置](docs/windows-tray-and-startup.md)。当前仍不包含安装器、自动更新、额度预测、账户切换或云端同步。
+系统托盘支持恢复主界面、显示迷你组件、隐藏全部窗口、手动刷新、切换自动刷新、打开设置和显式退出；恢复与窗口切换不查询数据。默认启动模式可设为主界面、迷你组件或仅托盘；“随 Windows 启动”默认关闭且仅冻结版 EXE 可用。详见 [桌面迷你组件](docs/desktop-mini-widget.md) 与 [Windows 托盘和启动设置](docs/windows-tray-and-startup.md)。当前仍不包含自动更新、额度预测、账户切换或云端同步。
 
 ## Current Status
 
@@ -83,4 +93,4 @@ Phase 2.4-C added a stateful logs reader and optional low-frequency automatic re
 
 By default, usage, cost, cache, context, and budget values remain 本地估算 / local estimate. When available, the optional read-only `state_5.sqlite` adapter reads only safe fields and labels `threads.tokens_used` as `codex_state_sqlite / real total` for session total tokens only. The optional read-only `logs_2.sqlite` adapter uses SQLite JSON1 to extract only the latest `response.completed` numeric usage fields; Python receives no event body or body substring, and labels the values `codex_logs_sqlite / real usage`. It accepts only a complete JSON event with root `usage`, or the confirmed `SSE event: ` format with `response.usage`; both require a root `type` of `response.completed`, so keywords and fake usage objects inside content are ignored. Unavailable data uses `unknown`. Cache hit is derived from those numbers, not an official cache hit rate, and current/session cost remains an estimate, not billing. Set `CODEX_STATE_DB` and `CODEX_LOGS_DB` to configure database paths.
 
-The legacy logs adapter reports `connected`, `database missing`, `open failed`, `no response.completed`, or `parse failed`, but is not on the current Dashboard usage path. Installers, automatic updates, and Codex Desktop embedding are not implemented. The repository remains independent until integration is explicitly planned.
+The legacy logs adapter reports `connected`, `database missing`, `open failed`, `no response.completed`, or `parse failed`, but is not on the current Dashboard usage path. A per-user Windows installer is available; automatic updates and Codex Desktop embedding are not implemented. The repository remains independent until integration is explicitly planned.

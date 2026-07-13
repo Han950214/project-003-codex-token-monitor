@@ -6,7 +6,7 @@ Phase 2.8-B 为同一个 Dashboard 进程增加一个系统托盘图标。左键
 
 设置窗口可选择下次启动模式：`dashboard`（默认）、`widget` 或 `tray`。每次启动仍只创建一个 Tk root、一个 Dashboard 和一个托盘控制器，只执行一次初始数据与额度读取；之后按设置显示对应窗口。没有可用 Thread 时，迷你组件的两项 Token 显示 `—`。
 
-“随 Windows 启动”默认关闭，只支持 PyInstaller 便携 EXE。启用时仅写当前用户 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下名为 `CodexTokenMonitor` 的值，内容是当前 EXE 的带引号绝对路径；不请求管理员权限、不写 HKLM、不触碰其他启动项。源码模式会禁用开关并明确提示不支持。移动便携目录后，旧路径不会被误报为已启用。
+“随 Windows 启动”默认关闭，只支持 PyInstaller 冻结版 EXE，包括便携版和安装版。启用时仅写当前用户 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下名为 `CodexTokenMonitor` 的值，内容是当前 EXE 的带引号绝对路径；安装过程不会自动写入该值。卸载安装版时只删除本项目值，不触碰其他启动项。整个流程不请求管理员权限、不写 HKLM。源码模式会禁用开关并明确提示不支持。移动便携目录后，旧路径不会被误报为已启用。
 
 Windows named mutex 保证单实例。第二次启动不会创建 Dashboard 或托盘，也不会终止、扫描或读取已有进程；检测到首实例后安全退出。本阶段不实现跨进程唤醒。
 

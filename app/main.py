@@ -24,6 +24,7 @@ from app.paths import ui_settings_path
 from app.quota import CodexQuotaSnapshot
 from app.quota_provider import CodexAppServerQuotaProvider, QuotaProvider
 from app.single_instance import SingleInstanceGuard
+from app.version import __version__
 from app.startup_settings import StartupSettingsDialog
 from app.system_tray import SystemTrayController
 from app.telemetry_bar import TelemetryBar, build_telemetry_values
@@ -693,6 +694,7 @@ def _safe_print(message: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true", help="Run a non-GUI smoke check.")
+    parser.add_argument("--version", action="version", version=__version__)
     args = parser.parse_args()
     if args.smoke:
         smoke()

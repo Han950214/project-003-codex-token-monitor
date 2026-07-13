@@ -7,6 +7,7 @@ repo_root = Path(SPECPATH).resolve().parent
 datas = collect_data_files("customtkinter")
 datas.append((str(repo_root / "resources" / "pricing-config.sample.json"), "resources"))
 datas.append((str(repo_root / "resources" / "tray-icon.xbm"), "resources"))
+datas.append((str(repo_root / "resources" / "app-icon.ico"), "resources"))
 hiddenimports = collect_submodules("customtkinter") + collect_submodules("pystray")
 
 a = Analysis(
@@ -40,6 +41,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(repo_root / "resources" / "app-icon.ico"),
 )
 coll = COLLECT(
     exe,
