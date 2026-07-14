@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 
-DASHBOARD_MODES = ("simple", "advanced")
+DASHBOARD_MODES = ("simple", "advanced")  # Legacy settings compatibility only.
 WIDGET_MODES = ("compact", "expanded")
-NAVIGATION_ITEMS = ("status_center", "current_task", "history", "tools", "settings")
+NAVIGATION_ITEMS = ("status_center", "history", "tools", "settings")
+SECONDARY_PAGES = ("current_task",)
+ALL_PAGES = NAVIGATION_ITEMS + SECONDARY_PAGES
 
 
 @dataclass(frozen=True)
@@ -28,7 +30,7 @@ class AppShellState:
         return replace(self, widget_mode=mode if mode in WIDGET_MODES else "compact")
 
     def navigate(self, page: str) -> "AppShellState":
-        return replace(self, page=page if page in NAVIGATION_ITEMS else "status_center")
+        return replace(self, page=page if page in ALL_PAGES else "status_center")
 
 
 def normalize_dashboard_mode(value: object) -> str:

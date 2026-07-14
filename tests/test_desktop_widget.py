@@ -4,7 +4,9 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+import app.desktop_widget as desktop_widget_module
 from app.desktop_widget import (
     DEFAULT_ALPHA,
     DesktopMiniWidget,
@@ -14,6 +16,12 @@ from app.desktop_widget import (
     WIDGET_MARGIN,
     WIDGET_WIDTH,
     WorkArea,
+    WIDGET_ERROR,
+    WIDGET_SUCCESS,
+    WIDGET_UNKNOWN,
+    WIDGET_WARNING,
+    _bounded_title,
+    _quota_color,
     clamp_position,
     format_percent,
     format_reset_time,
@@ -22,6 +30,7 @@ from app.desktop_widget import (
 )
 from app.i18n import TRANSLATIONS
 from app.main import Dashboard
+from app.quota import QuotaKind, QuotaWindow
 from app.ui_settings import (
     load_language,
     load_widget_position,
@@ -33,10 +42,10 @@ from app.ui_settings import (
 
 
 class DesktopWidgetFormattingTests(unittest.TestCase):
-    def test_token_totals_use_exact_grouped_numbers_or_dash(self):
-        self.assertEqual(format_token_total(5_092_543), "5,092,543")
-        self.assertEqual(format_token_total(25_434_615), "25,434,615")
-        self.assertEqual(format_token_total(108_872_954), "108,872,954")
+    def test_token_totals_use_compact_numbers_or_dash(self):
+        self.assertEqual(format_token_total(5_092_543), "5.09M")
+        self.assertEqual(format_token_total(25_434_615), "25.43M")
+        self.assertEqual(format_token_total(108_872_954), "108.87M")
         self.assertEqual(format_token_total(None), "—")
 
     def test_integer_and_single_decimal_percent_format(self):
@@ -65,21 +74,46 @@ class DesktopWidgetFormattingTests(unittest.TestCase):
     def test_unknown_reset_time_is_dash(self):
         self.assertEqual(format_reset_time(None, "en"), "—")
 
+    def test_long_title_is_bounded_without_losing_full_title_source(self):
+        title = "Codex session with a very long safe title that must not resize the widget"
+        self.assertEqual(_bounded_title(title, 32), "Codex session with a very long…")
+        self.assertLessEqual(len(_bounded_title(title, 32)), 32)
+
+    def test_quota_color_tracks_reliability_and_remaining_risk(self):
+        observed = datetime(2026, 7, 14, tzinfo=timezone.utc)
+
+        def window(remaining: float) -> QuotaWindow:
+            return QuotaWindow.from_reset_duration(
+                QuotaKind.FIVE_HOUR,
+                used_percent=100 - remaining,
+                remaining_percent=remaining,
+                reset_after=timedelta(hours=1),
+                observed_at=observed,
+                source="test",
+            )
+
+        self.assertEqual(_quota_color(window(80), "normal"), WIDGET_SUCCESS)
+        self.assertEqual(_quota_color(window(20), "normal"), WIDGET_WARNING)
+        self.assertEqual(_quota_color(window(80), "stale"), WIDGET_WARNING)
+        self.assertEqual(_quota_color(window(80), "invalid"), WIDGET_ERROR)
+        unavailable = QuotaWindow.unavailable(QuotaKind.FIVE_HOUR, observed, "test")
+        self.assertEqual(_quota_color(unavailable, "unavailable"), WIDGET_UNKNOWN)
+
 
 class DesktopWidgetPositionTests(unittest.TestCase):
     def test_top_right_uses_sixteen_pixel_margin(self):
-        self.assertEqual(top_right_position(WorkArea(0, 0, 1920, 1040), WIDGET_WIDTH, WIDGET_HEIGHT, WIDGET_MARGIN), (1564, 16))
+        self.assertEqual(top_right_position(WorkArea(0, 0, 1920, 1040), WIDGET_WIDTH, WIDGET_HEIGHT, WIDGET_MARGIN), (1084, 16))
 
     def test_top_right_respects_offset_monitor_work_area(self):
-        self.assertEqual(top_right_position(WorkArea(-1280, 0, 0, 984), WIDGET_WIDTH, WIDGET_HEIGHT, WIDGET_MARGIN), (-356, 16))
+        self.assertEqual(top_right_position(WorkArea(-1280, 0, 0, 984), WIDGET_WIDTH, WIDGET_HEIGHT, WIDGET_MARGIN), (-836, 16))
 
     def test_position_is_clamped_inside_visible_work_area(self):
         area = WorkArea(0, 0, 1920, 1040)
-        self.assertEqual(clamp_position((-500, 3000), area, WIDGET_WIDTH, WIDGET_HEIGHT), (0, 540))
+        self.assertEqual(clamp_position((-500, 3000), area, WIDGET_WIDTH, WIDGET_HEIGHT), (0, 924))
 
     def test_oversized_widget_falls_back_to_work_area_origin(self):
         area = WorkArea(100, 50, 300, 250)
-        self.assertEqual(clamp_position((900, 900), area, WIDGET_WIDTH, WIDGET_HEIGHT), (100, 50))
+        self.assertEqual(clamp_position((900, 900), area, WIDGET_WIDTH, WIDGET_HEIGHT), (100, 134))
 
 
 class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
@@ -136,9 +170,12 @@ class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
 
     def test_widget_icon_controls_have_localized_tooltips(self):
         source = inspect.getsource(DesktopMiniWidget._build)
-        self.assertIn("WidgetTooltip(self.minimize_button", source)
+        self.assertIn("WidgetTooltip(self.restore_button", source)
+        self.assertIn("WidgetTooltip(self.refresh_button", source)
+        self.assertIn("WidgetTooltip(self.more_button", source)
+        self.assertIn('translate("more_tools"', source)
+        self.assertIn("WidgetTooltip(self.collapse_button", source)
         self.assertIn("WidgetTooltip(self.exit_button", source)
-        self.assertIn('text="—"', source)
         self.assertIn('text="×"', source)
 
     def test_widget_idle_opacity_does_not_rebuild_window(self):
@@ -150,6 +187,113 @@ class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
         self.assertIn('self._choose("minimize")', source)
         self.assertIn('translate("dont_ask_today"', source)
         self.assertIn('minimize_button.focus_set()', source)
+
+    def test_exit_dialog_executes_full_content_build_before_mapping_window(self):
+        events = []
+
+        class FakeVariable:
+            def __init__(self, *args, value=False, **kwargs):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        class FakeChild:
+            def __init__(self, kind, *args, **kwargs):
+                self.kind = kind
+                events.append(("create", kind, kwargs.get("text")))
+
+            def grid(self, *args, **kwargs):
+                events.append(("grid", self.kind))
+
+            def focus_set(self):
+                events.append(("focus", self.kind))
+
+        class FakeWindow:
+            def title(self, value):
+                events.append(("title", value))
+
+            def withdraw(self):
+                events.append(("withdraw",))
+
+            def geometry(self, value):
+                events.append(("geometry", value))
+
+            def resizable(self, *args):
+                pass
+
+            def configure(self, **kwargs):
+                pass
+
+            def transient(self, owner):
+                pass
+
+            def grid_columnconfigure(self, *args, **kwargs):
+                pass
+
+            def protocol(self, *args):
+                pass
+
+            def bind(self, *args):
+                pass
+
+            def update_idletasks(self):
+                events.append(("idle",))
+
+            def deiconify(self):
+                events.append(("deiconify",))
+
+            def lift(self):
+                pass
+
+            def grab_set(self):
+                events.append(("grab",))
+
+            def winfo_exists(self):
+                return True
+
+        class FakeOwner:
+            @staticmethod
+            def winfo_rootx():
+                return 100
+
+            @staticmethod
+            def winfo_rooty():
+                return 80
+
+            @staticmethod
+            def winfo_width():
+                return 800
+
+            @staticmethod
+            def winfo_height():
+                return 600
+
+        window = FakeWindow()
+        factories = {
+            "CTkLabel": lambda *args, **kwargs: FakeChild("label", *args, **kwargs),
+            "CTkCheckBox": lambda *args, **kwargs: FakeChild("checkbox", *args, **kwargs),
+            "CTkFrame": lambda *args, **kwargs: FakeChild("frame", *args, **kwargs),
+            "CTkButton": lambda *args, **kwargs: FakeChild("button", *args, **kwargs),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            dialog = ExitChoiceDialog(object(), Path(directory) / "settings.json")
+            with (
+                patch.object(desktop_widget_module.ctk, "CTkToplevel", return_value=window),
+                patch.multiple(desktop_widget_module.ctk, **factories),
+                patch.object(desktop_widget_module.tk, "BooleanVar", FakeVariable),
+            ):
+                dialog.show(owner=FakeOwner(), language="zh-CN", on_choice=lambda _action: None)
+
+        created = [event[1] for event in events if event[0] == "create"]
+        self.assertEqual(created.count("label"), 2)
+        self.assertEqual(created.count("checkbox"), 1)
+        self.assertEqual(created.count("button"), 2)
+        self.assertLess(events.index(("withdraw",)), next(
+            index for index, event in enumerate(events) if event[0] == "create"
+        ))
+        self.assertLess(events.index(("idle",)), events.index(("deiconify",)))
+        self.assertIn(("grab",), events)
 
     def test_dashboard_creates_single_widget_and_single_auto_refresh_controller(self):
         source = inspect.getsource(Dashboard.__init__)
@@ -164,12 +308,9 @@ class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
         self.assertIn('action == "exit"', decision)
         self.assertIn('self._minimize_to_taskbar()', decision)
 
-    def test_widget_minimize_has_a_direct_taskbar_callback(self):
+    def test_taskbar_callback_remains_available_from_dashboard(self):
         widget_source = inspect.getsource(DesktopMiniWidget.__init__)
         self.assertIn("on_minimize", widget_source)
-        build_source = inspect.getsource(DesktopMiniWidget._build)
-        self.assertIn("command=self.on_minimize", build_source)
-        self.assertNotIn("command=self.on_exit, width=64", build_source)
         dashboard_source = inspect.getsource(Dashboard.__init__)
         self.assertIn("on_minimize=self._minimize_to_taskbar", dashboard_source)
 
@@ -210,16 +351,60 @@ class DesktopWidgetSettingsAndLifecycleTests(unittest.TestCase):
         self.assertNotIn("rollout", source)
 
     def test_widget_has_two_side_by_side_token_indicators(self):
-        source = inspect.getsource(DesktopMiniWidget._build_thread_card)
+        source = inspect.getsource(DesktopMiniWidget._build)
         self.assertIn("instruction_total_var", source)
         self.assertIn("session_total_var", source)
-        self.assertIn("column=1, rowspan=2", source)
-        self.assertIn("height=52", source)
+        self.assertIn("_build_horizontal_metric", source)
 
-    def test_widget_keeps_token_card_title_to_two_lines_and_fixed_size(self):
-        source = inspect.getsource(DesktopMiniWidget._build_thread_card)
-        self.assertIn("height=36", source)
-        self.assertEqual((WIDGET_WIDTH, WIDGET_HEIGHT), (340, 500))
+    def test_widget_keeps_horizontal_reference_size_and_full_title_tooltip(self):
+        source = inspect.getsource(DesktopMiniWidget._build)
+        self.assertIn("thread_full_title_var", source)
+        self.assertIn("grid_propagate(False)", source)
+        self.assertEqual((WIDGET_WIDTH, WIDGET_HEIGHT), (820, 116))
+
+    def test_widget_uses_single_horizontal_quota_state(self):
+        constructor = inspect.getsource(DesktopMiniWidget.__init__)
+        self.assertIn("self.remaining_var", constructor)
+        self.assertIn("self.reset_var", constructor)
+        self.assertIn("self.quota_title_var", constructor)
+        self.assertIn("self.quota_ring", constructor)
+        self.assertNotIn("self.remaining_vars", constructor)
+        self.assertNotIn("self.quota_rings", constructor)
+
+    def test_horizontal_quota_update_uses_initialized_single_value_fields(self):
+        class Sink:
+            def __init__(self):
+                self.value = None
+                self.color = None
+
+            def set(self, value):
+                self.value = value
+
+            def configure(self, **kwargs):
+                self.color = kwargs.get("text_color")
+
+        observed = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        window = QuotaWindow.from_reset_duration(
+            QuotaKind.FIVE_HOUR,
+            used_percent=25,
+            remaining_percent=75,
+            reset_after=timedelta(hours=1),
+            observed_at=observed,
+            source="test",
+        )
+        widget = DesktopMiniWidget.__new__(DesktopMiniWidget)
+        widget.language = "zh-CN"
+        widget.remaining_var = Sink()
+        widget.reset_var = Sink()
+        widget.compact_quota_label = Sink()
+        widget.quota_value_label = Sink()
+        widget.quota_ring = None
+
+        widget._update_window(window, "normal")
+
+        self.assertEqual(widget.remaining_var.value, "剩余 75%")
+        self.assertEqual(widget.compact_quota_label.color, WIDGET_SUCCESS)
+        self.assertEqual(widget.quota_value_label.color, WIDGET_SUCCESS)
 
 
 if __name__ == "__main__":

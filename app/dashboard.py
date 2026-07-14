@@ -48,6 +48,7 @@ class MiniThreadSnapshot:
     status: str
     observed_at: datetime | None
     turn_count: int | None = None
+    full_title: str | None = None
 
 
 class DashboardViewModel:
@@ -192,7 +193,10 @@ class DashboardViewModel:
         self._known_sessions[thread_id] = session
         status = display_session_status(session, session.instruction)
         if status == "unavailable":
-            return MiniThreadSnapshot(session.display_title, None, None, status, session.observed_at, session.turn_count)
+            return MiniThreadSnapshot(
+                session.display_title, None, None, status, session.observed_at,
+                session.turn_count, session.full_title or session.display_title,
+            )
         instruction = session.instruction
         instruction_total = instruction.usage.total_tokens if instruction is not None and instruction.usage is not None else None
         cumulative = session.thread_cumulative_usage
@@ -200,6 +204,7 @@ class DashboardViewModel:
         return MiniThreadSnapshot(
             session.display_title, instruction_total, session_total, status,
             session.observed_at, session.turn_count,
+            session.full_title or session.display_title,
         )
 
     def _select(self, sessions: list[CodexSessionUsage]) -> CodexSessionUsage | None:
@@ -220,9 +225,18 @@ class DashboardViewModel:
     def _apply_title(self, session: CodexSessionUsage) -> CodexSessionUsage:
         title = self._title_cache.get(session.thread_id)
         if title:
-            return replace(session, display_title=_bounded_display_title(title), title_source="codex_app_server.thread_display_title")
+            full_title = _normalized_display_title(title)
+            return replace(
+                session,
+                display_title=_bounded_display_title(full_title),
+                title_source="codex_app_server.thread_display_title",
+                full_title=full_title,
+            )
         fallback = f"Codex Session · {session.observed_at.astimezone().strftime('%m-%d %H:%M')}"
-        return replace(session, display_title=fallback, title_source="safe timestamp fallback")
+        return replace(
+            session, display_title=fallback, title_source="safe timestamp fallback",
+            full_title=fallback,
+        )
 
     def _cached_snapshot(self, selected: CodexSessionUsage, mode: str) -> DashboardSnapshot:
         previous = self._last_snapshot
@@ -307,8 +321,12 @@ def _state_reconciliation(
 
 
 def _bounded_display_title(value: str, limit: int = 72) -> str:
-    title = " ".join(value.split())
+    title = _normalized_display_title(value)
     return title if len(title) <= limit else title[: limit - 1].rstrip() + "…"
+
+
+def _normalized_display_title(value: str) -> str:
+    return " ".join(value.split())
 
 
 def _effective_session_status(

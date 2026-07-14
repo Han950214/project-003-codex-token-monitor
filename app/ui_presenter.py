@@ -57,6 +57,9 @@ class RecentSessionRow:
     last_activity: object
     thread_total: str
     cache_hit: str
+    turn_count: int = 0
+    full_title: str = ""
+    thread_total_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,9 @@ def _recent_row(session) -> RecentSessionRow:
         session.thread_id, session.display_title, session.title_source,
         display_session_status(session, session.instruction),
         session.observed_at, f"{cumulative.total_tokens:,}" if cumulative else "—", hit,
+        getattr(session, "turn_count", 0),
+        getattr(session, "full_title", None) or session.display_title,
+        cumulative.total_tokens if cumulative else None,
     )
 
 

@@ -171,7 +171,6 @@ def inspect_settings_file(path: Path) -> str:
     if not isinstance(payload, dict):
         return "failure"
     modes = {
-        "dashboard_mode": {"simple", "advanced"},
         "widget_mode": {"compact", "expanded"},
         "startup_mode": {"dashboard", "widget", "tray"},
         "exit_behavior": {"ask", "minimize", "exit"},

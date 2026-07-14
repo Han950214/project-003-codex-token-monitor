@@ -27,6 +27,7 @@ class Colors:
     scrollbar_thumb: str = "#91A4BE"
     scrollbar_thumb_hover: str = "#6F849F"
     primary_text: str = "#152033"
+    on_accent: str = "#FFFFFF"
     secondary_text: str = "#667085"
     muted_text: str = "#8A96A8"
     accent: str = "#3978F6"
@@ -52,17 +53,39 @@ class Colors:
     orange: str = "#C87917"
     orange_soft: str = "#FFF0D6"
     telemetry: str = "#17263A"
+    telemetry_footer: str = "#132237"
+    telemetry_hover: str = "#263B56"
+    telemetry_border: str = "#314B69"
+    telemetry_action_hover: str = "#36516F"
+    telemetry_exit_hover: str = "#4A2630"
     telemetry_muted: str = "#9FB0C5"
+    telemetry_secondary: str = "#B9C7D9"
     telemetry_text: str = "#F7FAFC"
+    widget_purple: str = "#A884FF"
+    widget_success: str = "#72D68B"
+    widget_warning: str = "#F0B45C"
+    widget_error: str = "#FF8178"
 
 
 COLORS = Colors()
 FONT_FAMILY = "Segoe UI"
-FONT_BODY = (FONT_FAMILY, 13)
+PAGE_TITLE = (FONT_FAMILY, 22, "bold")
+STATUS_TITLE = (FONT_FAMILY, 19, "bold")
+SECTION_TITLE = (FONT_FAMILY, 15, "bold")
+CARD_TITLE = (FONT_FAMILY, 13, "bold")
+BODY = (FONT_FAMILY, 12)
+BODY_STRONG = (FONT_FAMILY, 12, "bold")
+CAPTION = (FONT_FAMILY, 10)
+METRIC = (FONT_FAMILY, 20, "bold")
+NAV = (FONT_FAMILY, 12)
+BUTTON = (FONT_FAMILY, 12, "bold")
+
+# Compatibility aliases for unchanged secondary surfaces.
+FONT_BODY = BODY
 FONT_SMALL = (FONT_FAMILY, 11)
-FONT_SECTION = (FONT_FAMILY, 15, "bold")
-FONT_TITLE = (FONT_FAMILY, 25, "bold")
-FONT_METRIC = (FONT_FAMILY, 22, "bold")
+FONT_SECTION = SECTION_TITLE
+FONT_TITLE = PAGE_TITLE
+FONT_METRIC = METRIC
 
 TONE_COLORS = {
     "fresh": (COLORS.real, COLORS.real_soft),

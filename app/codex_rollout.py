@@ -88,6 +88,7 @@ class CodexSessionUsage:
     status: str
     rollout_path: Path | None = field(default=None, repr=False, compare=False)
     turn_count: int = 0
+    full_title: str | None = None
 
 
 @dataclass(frozen=True)

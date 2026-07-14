@@ -130,7 +130,6 @@ def validate_ui_settings(path: Path | None = None) -> tuple[bool, str]:
     validators = {
         "language": lambda value: value in {"zh-CN", "en"},
         "startup_mode": lambda value: value in STARTUP_MODES,
-        "dashboard_mode": lambda value: value in {"simple", "advanced"},
         "widget_mode": lambda value: value in {"compact", "expanded"},
         "auto_refresh_enabled": lambda value: isinstance(value, bool),
         "exit_behavior": lambda value: value in EXIT_BEHAVIORS,

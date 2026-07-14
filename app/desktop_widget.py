@@ -21,9 +21,7 @@ from app.ui_settings import (
 )
 from app.ui_settings import save_exit_action_for_today
 from app.ui_theme import (
-    CARD_RADIUS,
     COLORS,
-    CONTROL_RADIUS,
     FONT_BODY,
     FONT_FAMILY,
     FONT_SECTION,
@@ -33,16 +31,22 @@ from app.ui_theme import (
     SPACE_3,
     SPACE_4,
 )
+from app.ui_icons import CircularProgress, create_icon
 from app.widget_presentation import present_widget
+from app.ui_format import format_compact_token_count, format_full_token_count
 
 
-WIDGET_WIDTH = 340
-WIDGET_HEIGHT = 500
+WIDGET_WIDTH = 820
+WIDGET_HEIGHT = 116
 COMPACT_WIDGET_WIDTH = 300
-COMPACT_WIDGET_HEIGHT = 88
+COMPACT_WIDGET_HEIGHT = 78
 WIDGET_MARGIN = 16
 DEFAULT_ALPHA = 0.82
 HOVER_ALPHA = 1.0
+WIDGET_SUCCESS = COLORS.widget_success
+WIDGET_WARNING = COLORS.widget_warning
+WIDGET_ERROR = COLORS.widget_error
+WIDGET_UNKNOWN = COLORS.telemetry_muted
 
 
 @dataclass(frozen=True)
@@ -182,20 +186,33 @@ class DesktopMiniWidget:
         self.window.attributes("-topmost", True)
         self.window.geometry(f"{WIDGET_WIDTH}x{WIDGET_HEIGHT}")
 
-        self.used_vars = [tk.StringVar(master=self.window, value="—") for _ in range(2)]
-        self.remaining_vars = [tk.StringVar(master=self.window, value="—") for _ in range(2)]
-        self.reset_vars = [tk.StringVar(master=self.window, value="—") for _ in range(2)]
-        self.quota_title_vars = [tk.StringVar(master=self.window, value="") for _ in range(2)]
+        self._status_icons = {
+            "normal": create_icon("shield", size=30, color=WIDGET_SUCCESS),
+            "warning": create_icon("shield", size=30, color=WIDGET_WARNING),
+            "error": create_icon("shield", size=30, color=WIDGET_ERROR),
+            "unknown": create_icon("shield", size=30, color=WIDGET_UNKNOWN),
+        }
+        self._action_icons = {
+            "open": create_icon("open", size=22, color=COLORS.telemetry_text),
+            "refresh": create_icon("refresh", size=22, color=COLORS.telemetry_text),
+            "more": create_icon("more", size=22, color=COLORS.telemetry_text),
+        }
+
+        self.remaining_var = tk.StringVar(master=self.window, value="—")
+        self.reset_var = tk.StringVar(master=self.window, value="—")
+        self.quota_title_var = tk.StringVar(master=self.window, value="")
         self.instruction_total_var = tk.StringVar(master=self.window, value="—")
         self.session_total_var = tk.StringVar(master=self.window, value="—")
+        self.instruction_full_var = tk.StringVar(master=self.window, value="—")
+        self.session_full_var = tk.StringVar(master=self.window, value="—")
+        self.thread_full_title_var = tk.StringVar(master=self.window, value="—")
         self.thread_title_var = tk.StringVar(master=self.window, value="")
         self.thread_status_var = tk.StringVar(master=self.window, value="")
         self.last_updated_var = tk.StringVar(master=self.window, value="—")
         self.data_status_var = tk.StringVar(master=self.window, value="")
         self.compact_status_var = tk.StringVar(master=self.window, value="")
         self.compact_quota_var = tk.StringVar(master=self.window, value="—")
-        self.compact_icon_var = tk.StringVar(master=self.window, value="●")
-        self.progress_bars: list[ctk.CTkProgressBar] = []
+        self.quota_ring: CircularProgress | None = None
         self._build()
         self.set_mode(self.mode, persist=False)
         self._bind_hover_opacity(self.window)
@@ -203,87 +220,175 @@ class DesktopMiniWidget:
     def _build(self) -> None:
         self.window.grid_columnconfigure(0, weight=1)
         self._build_compact()
-        self.expanded_frame = ctk.CTkFrame(self.window, fg_color=COLORS.window, corner_radius=0)
+        self.expanded_frame = ctk.CTkFrame(
+            self.window, fg_color=COLORS.telemetry, corner_radius=14,
+            border_width=1, border_color=COLORS.telemetry_border,
+        )
         self.expanded_frame.grid(row=0, column=0, sticky="nsew")
-        self.expanded_frame.grid_columnconfigure(0, weight=1)
-        title_bar = ctk.CTkFrame(self.expanded_frame, fg_color=COLORS.surface, corner_radius=0, height=54)
-        title_bar.grid(row=0, column=0, sticky="ew")
-        title_bar.grid_columnconfigure(1, weight=1)
-        icon = ctk.CTkLabel(title_bar, text="◆", text_color=COLORS.accent, font=(FONT_FAMILY, 18, "bold"))
-        icon.grid(row=0, column=0, padx=(SPACE_4, SPACE_2), pady=SPACE_3)
-        self.title_label = ctk.CTkLabel(title_bar, text="Codex Token", width=108, font=(FONT_FAMILY, 13, "bold"), text_color=COLORS.primary_text, anchor="w")
-        self.title_label.grid(row=0, column=1, sticky="ew", pady=SPACE_3)
-        self.collapse_button = ctk.CTkButton(title_bar, text="‹", command=lambda: self.set_mode("compact"), width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
-        self.collapse_button.grid(row=0, column=2, padx=SPACE_1, pady=SPACE_3)
-        self.restore_button = ctk.CTkButton(title_bar, text="", command=self.on_restore, width=58, height=30, corner_radius=CONTROL_RADIUS, fg_color=COLORS.accent, hover_color=COLORS.accent_hover)
-        self.restore_button.grid(row=0, column=3, padx=SPACE_1, pady=SPACE_3)
-        self.opacity_button = ctk.CTkButton(title_bar, text="◐", command=self._open_opacity_popover, width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
-        self.opacity_button.grid(row=0, column=4, padx=SPACE_1, pady=SPACE_3)
-        self.minimize_button = ctk.CTkButton(title_bar, text="—", command=self.on_minimize, width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
-        self.minimize_button.grid(row=0, column=5, padx=SPACE_1, pady=SPACE_3)
-        self.tray_button = ctk.CTkButton(title_bar, text="◇", command=self.on_hide_to_tray, width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.accent, hover_color=COLORS.accent_soft)
-        self.tray_button.grid(row=0, column=6, padx=SPACE_1, pady=SPACE_3)
-        self.exit_button = ctk.CTkButton(title_bar, text="×", command=self.on_exit, width=30, height=30, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.error_soft)
-        self.exit_button.grid(row=0, column=7, padx=(SPACE_1, SPACE_3), pady=SPACE_3)
-        self.opacity_tooltip = WidgetTooltip(self.opacity_button, lambda: translate("widget_idle_opacity", self.language))
-        self.minimize_tooltip = WidgetTooltip(self.minimize_button, lambda: translate("minimize_widget", self.language))
-        self.tray_tooltip = WidgetTooltip(self.tray_button, lambda: translate("hide_to_tray", self.language))
-        self.exit_tooltip = WidgetTooltip(self.exit_button, lambda: translate("exit_application_short", self.language))
-        for widget in (title_bar, icon, self.title_label):
+        for column, weight in enumerate((3, 2, 2, 2, 1, 1, 1, 0, 0)):
+            self.expanded_frame.grid_columnconfigure(column, weight=weight)
+
+        status_cell = ctk.CTkFrame(
+            self.expanded_frame, width=230, height=90, fg_color="transparent",
+        )
+        status_cell.grid(row=0, column=0, sticky="nsew", padx=(SPACE_4, SPACE_3), pady=SPACE_3)
+        status_cell.grid_columnconfigure(0, weight=1)
+        status_cell.grid_propagate(False)
+        self.expanded_status_label = ctk.CTkLabel(
+            status_cell, textvariable=self.compact_status_var,
+            image=self._status_icons["normal"], compound="left",
+            font=(FONT_FAMILY, 13, "bold"), text_color=COLORS.telemetry_text,
+            anchor="w",
+        )
+        self.expanded_status_label.grid(row=0, column=0, sticky="ew")
+        self.thread_title_label = ctk.CTkLabel(
+            status_cell, textvariable=self.thread_title_var, font=FONT_SMALL,
+            text_color=COLORS.telemetry_muted, anchor="w", width=214,
+        )
+        self.thread_title_label.grid(row=1, column=0, sticky="ew")
+        self.thread_heading = ctk.CTkLabel(
+            status_cell, textvariable=self.thread_status_var, font=(FONT_FAMILY, 10),
+            text_color=COLORS.telemetry_muted, anchor="w",
+        )
+        self.thread_heading.grid(row=2, column=0, sticky="ew")
+
+        self.instruction_label, self.instruction_value_label = self._build_horizontal_metric(
+            1, self.instruction_total_var, COLORS.accent,
+        )
+        self.session_label, self.session_value_label = self._build_horizontal_metric(
+            2, self.session_total_var, COLORS.widget_purple,
+        )
+        quota_cell = ctk.CTkFrame(self.expanded_frame, fg_color="transparent")
+        quota_cell.grid(row=0, column=3, sticky="nsew", padx=SPACE_3, pady=SPACE_3)
+        quota_cell.grid_columnconfigure(1, weight=1)
+        self.quota_title_label = ctk.CTkLabel(
+            quota_cell, textvariable=self.quota_title_var, font=(FONT_FAMILY, 10),
+            text_color=COLORS.telemetry_muted, anchor="w",
+        )
+        self.quota_title_label.grid(row=0, column=0, columnspan=2, sticky="ew")
+        quota_ring = CircularProgress(
+            quota_cell,
+            size=58,
+            background=COLORS.telemetry,
+            track=COLORS.telemetry_border,
+            color=WIDGET_SUCCESS,
+        )
+        quota_ring.grid(row=1, column=0, rowspan=2, padx=(0, SPACE_2), pady=(SPACE_1, 0))
+        self.quota_ring = quota_ring
+        self._set_quota_ring(quota_ring, None, WIDGET_UNKNOWN)
+        self.quota_value_label = ctk.CTkLabel(
+            quota_cell, textvariable=self.remaining_var,
+            font=(FONT_FAMILY, 13, "bold"), text_color=WIDGET_UNKNOWN, anchor="w",
+        )
+        self.quota_value_label.grid(row=1, column=1, sticky="sw")
+        ctk.CTkLabel(
+            quota_cell, textvariable=self.reset_var, font=(FONT_FAMILY, 9),
+            text_color=COLORS.telemetry_muted, anchor="w",
+        ).grid(row=2, column=1, sticky="nw")
+
+        self.restore_button = self._widget_action_button(4, "open", self.on_restore)
+        self.refresh_button = self._widget_action_button(5, "refresh", self.on_refresh)
+        self.more_button = self._widget_action_button(6, "more", self.on_more)
+        self.collapse_button = ctk.CTkButton(
+            self.expanded_frame, text="‹", command=lambda: self.set_mode("compact"),
+            width=28, height=28, corner_radius=14, fg_color="transparent",
+            text_color=COLORS.telemetry_muted, hover_color=COLORS.telemetry_hover,
+        )
+        self.collapse_button.grid(row=0, column=7, padx=SPACE_1, pady=SPACE_2, sticky="n")
+        self.exit_button = ctk.CTkButton(
+            self.expanded_frame, text="×", command=self.on_exit, width=28,
+            height=28, corner_radius=14, fg_color="transparent",
+            text_color=COLORS.telemetry_muted, hover_color=COLORS.telemetry_exit_hover,
+        )
+        self.exit_button.grid(row=0, column=8, padx=(0, SPACE_2), pady=SPACE_2, sticky="n")
+        self.footer_label = ctk.CTkLabel(
+            self.expanded_frame, textvariable=self.last_updated_var,
+            font=(FONT_FAMILY, 8), text_color=COLORS.telemetry_muted,
+        )
+        self.footer_label.grid(row=0, column=7, columnspan=2, sticky="s", pady=(0, SPACE_2))
+        self.status_label = ctk.CTkLabel(
+            status_cell, textvariable=self.data_status_var, font=(FONT_FAMILY, 9),
+            text_color=WIDGET_SUCCESS, anchor="w",
+        )
+        self.status_label.grid(row=3, column=0, sticky="ew")
+        WidgetTooltip(self.thread_title_label, lambda: self.thread_full_title_var.get())
+        WidgetTooltip(self.instruction_value_label, lambda: self.instruction_full_var.get())
+        WidgetTooltip(self.session_value_label, lambda: self.session_full_var.get())
+        WidgetTooltip(self.restore_button, lambda: translate("restore_widget", self.language))
+        WidgetTooltip(self.refresh_button, lambda: translate("manual_refresh", self.language))
+        WidgetTooltip(self.more_button, lambda: translate("more_tools", self.language))
+        WidgetTooltip(self.collapse_button, lambda: translate("widget_compact", self.language))
+        WidgetTooltip(self.exit_button, lambda: translate("exit_application_short", self.language))
+        for widget in (self.expanded_frame, status_cell, self.expanded_status_label, self.thread_title_label):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag)
             widget.bind("<ButtonRelease-1>", self._end_drag)
             widget.bind("<Double-Button-1>", lambda _event: self.on_restore())
 
-        body = ctk.CTkFrame(self.expanded_frame, fg_color="transparent", corner_radius=0)
-        body.grid(row=1, column=0, sticky="nsew", padx=SPACE_3, pady=(SPACE_2, SPACE_2))
-        body.grid_columnconfigure(0, weight=1)
-        accents = ((COLORS.accent, COLORS.accent_soft), (COLORS.real, COLORS.real_soft))
-        for row, (accent, soft) in enumerate(accents):
-            self._build_quota_card(body, row, accent, soft)
-        self._build_thread_card(body, 2)
+    def _build_horizontal_metric(
+        self, column: int, value_var: tk.StringVar, accent: str,
+    ) -> tuple[ctk.CTkLabel, ctk.CTkLabel]:
+        cell = ctk.CTkFrame(self.expanded_frame, fg_color="transparent")
+        cell.grid(row=0, column=column, sticky="nsew", padx=SPACE_3, pady=SPACE_3)
+        label = ctk.CTkLabel(
+            cell, text="", font=(FONT_FAMILY, 10),
+            text_color=COLORS.telemetry_muted, anchor="w",
+        )
+        label.grid(row=0, column=0, sticky="ew")
+        value_label = ctk.CTkLabel(
+            cell, textvariable=value_var, font=(FONT_FAMILY, 18, "bold"),
+            text_color=accent, anchor="w",
+        )
+        value_label.grid(row=1, column=0, sticky="ew", pady=(SPACE_1, 0))
+        return label, value_label
 
-        footer = ctk.CTkFrame(self.expanded_frame, fg_color=COLORS.surface, corner_radius=0)
-        footer.grid(row=2, column=0, sticky="ew")
-        footer.grid_columnconfigure(0, weight=1)
-        self.footer_label = ctk.CTkLabel(footer, textvariable=self.last_updated_var, font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
-        self.footer_label.grid(row=0, column=0, sticky="ew", padx=(SPACE_4, SPACE_2), pady=SPACE_2)
-        self.status_label = ctk.CTkLabel(footer, textvariable=self.data_status_var, font=(FONT_FAMILY, 11, "bold"), text_color=COLORS.real)
-        self.status_label.grid(row=0, column=1, padx=SPACE_2, pady=SPACE_2)
-        self.refresh_button = ctk.CTkButton(footer, text="↻", command=self.on_refresh, width=30, height=28, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.accent, hover_color=COLORS.accent_soft)
-        self.refresh_button.grid(row=0, column=2, padx=(SPACE_1, SPACE_3), pady=SPACE_2)
-        self.more_button = ctk.CTkButton(footer, text="⋯", command=self.on_more, width=30, height=28, corner_radius=CONTROL_RADIUS, fg_color="transparent", text_color=COLORS.secondary_text, hover_color=COLORS.accent_soft)
-        self.more_button.grid(row=0, column=3, padx=(0, SPACE_3), pady=SPACE_2)
+    def _widget_action_button(
+        self, column: int, icon_kind: str, command: Callable[[], None],
+    ) -> ctk.CTkButton:
+        button = ctk.CTkButton(
+            self.expanded_frame, text="", image=self._action_icons[icon_kind],
+            command=command, width=48, height=48,
+            corner_radius=12, fg_color=COLORS.telemetry_hover,
+            hover_color=COLORS.telemetry_action_hover,
+            text_color=COLORS.telemetry_text,
+        )
+        button.grid(row=0, column=column, padx=SPACE_1, pady=SPACE_4)
+        return button
 
     def _build_compact(self) -> None:
         self.compact_frame = ctk.CTkFrame(
             self.window, fg_color=COLORS.telemetry, corner_radius=18,
-            border_width=1, border_color="#314B69",
+            border_width=1, border_color=COLORS.telemetry_border,
         )
         self.compact_frame.grid(row=0, column=0, sticky="nsew")
         self.compact_frame.grid_columnconfigure(1, weight=1)
         self.compact_icon_label = icon = ctk.CTkLabel(
-            self.compact_frame, textvariable=self.compact_icon_var,
-            font=(FONT_FAMILY, 16, "bold"), text_color=COLORS.real,
+            self.compact_frame, text="", image=self._status_icons["normal"],
         )
         icon.grid(row=0, column=0, rowspan=2, padx=(SPACE_4, SPACE_2), pady=SPACE_3)
-        status = ctk.CTkLabel(
+        self.compact_status_label = status = ctk.CTkLabel(
             self.compact_frame, textvariable=self.compact_status_var,
             font=(FONT_FAMILY, 13, "bold"), text_color=COLORS.telemetry_text,
             anchor="w",
         )
         status.grid(row=0, column=1, sticky="sw", pady=(SPACE_3, 0))
-        quota = ctk.CTkLabel(
+        self.compact_quota_label = quota = ctk.CTkLabel(
             self.compact_frame, textvariable=self.compact_quota_var,
-            font=FONT_SMALL, text_color=COLORS.telemetry_muted, anchor="w",
+            font=FONT_SMALL, text_color=WIDGET_UNKNOWN, anchor="w",
         )
         quota.grid(row=1, column=1, sticky="nw", pady=(0, SPACE_3))
         self.expand_button = ctk.CTkButton(
             self.compact_frame, text="›", command=lambda: self.set_mode("expanded"),
-            width=34, height=34, corner_radius=17, fg_color="#263B56",
-            hover_color="#36516F", text_color=COLORS.telemetry_text,
+            width=34, height=34, corner_radius=17,
+            fg_color=COLORS.telemetry_hover,
+            hover_color=COLORS.telemetry_action_hover,
+            text_color=COLORS.telemetry_text,
         )
         self.expand_button.grid(row=0, column=2, rowspan=2, padx=SPACE_3)
+        WidgetTooltip(
+            self.expand_button,
+            lambda: translate("widget_expanded", self.language),
+        )
         for widget in (self.compact_frame, icon, status, quota):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag)
@@ -302,7 +407,7 @@ class DesktopMiniWidget:
         else:
             self.compact_frame.grid_remove()
             self.expanded_frame.grid()
-            self.window.configure(fg_color=COLORS.window)
+            self.window.configure(fg_color=COLORS.telemetry)
         try:
             x, y = self.window.winfo_x(), self.window.winfo_y()
             area = monitor_work_area(self.root)
@@ -348,35 +453,7 @@ class DesktopMiniWidget:
         slider.pack(fill="x", padx=SPACE_3, pady=(0, SPACE_3))
         self._opacity_popover = window
         window.protocol("WM_DELETE_WINDOW", lambda: (window.destroy(), setattr(self, "_opacity_popover", None)))
-    def _build_quota_card(self, parent: ctk.CTkFrame, row: int, accent: str, soft: str) -> None:
-        card = ctk.CTkFrame(parent, fg_color=COLORS.surface, corner_radius=CARD_RADIUS, border_width=1, border_color=COLORS.border)
-        card.grid(row=row, column=0, sticky="ew", pady=(0, SPACE_2))
-        card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(card, textvariable=self.quota_title_vars[row], font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w").grid(row=0, column=0, sticky="ew", padx=SPACE_3, pady=(SPACE_2, 0))
-        ctk.CTkLabel(card, textvariable=self.used_vars[row], font=(FONT_FAMILY, 18, "bold"), text_color=accent, anchor="w").grid(row=1, column=0, sticky="ew", padx=SPACE_3)
-        ctk.CTkLabel(card, textvariable=self.remaining_vars[row], font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="e").grid(row=1, column=1, padx=SPACE_3)
-        progress = ctk.CTkProgressBar(card, height=7, corner_radius=4, fg_color=soft, progress_color=accent)
-        progress.grid(row=2, column=0, columnspan=2, sticky="ew", padx=SPACE_3, pady=(SPACE_1, SPACE_1))
-        progress.set(0)
-        ctk.CTkLabel(card, textvariable=self.reset_vars[row], font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w").grid(row=3, column=0, columnspan=2, sticky="ew", padx=SPACE_3, pady=(0, SPACE_2))
-        self.progress_bars.append(progress)
 
-    def _build_thread_card(self, parent: ctk.CTkFrame, row: int) -> None:
-        card = ctk.CTkFrame(parent, fg_color=COLORS.surface, corner_radius=CARD_RADIUS, border_width=1, border_color=COLORS.border)
-        card.grid(row=row, column=0, sticky="ew")
-        card.grid_columnconfigure(0, weight=1)
-        card.grid_columnconfigure(2, weight=1)
-        self.thread_heading = ctk.CTkLabel(card, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
-        self.thread_heading.grid(row=0, column=0, columnspan=3, sticky="ew", padx=SPACE_3, pady=(SPACE_2, 0))
-        self.instruction_label = ctk.CTkLabel(card, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
-        self.instruction_label.grid(row=1, column=0, sticky="ew", padx=(SPACE_3, SPACE_1))
-        self.session_label = ctk.CTkLabel(card, text="", font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w")
-        self.session_label.grid(row=1, column=2, sticky="ew", padx=(SPACE_2, SPACE_3))
-        ctk.CTkFrame(card, width=1, height=52, fg_color=COLORS.border, corner_radius=0).grid(row=1, column=1, rowspan=2, sticky="ns", pady=(SPACE_1, SPACE_1))
-        ctk.CTkLabel(card, textvariable=self.instruction_total_var, font=(FONT_FAMILY, 17, "bold"), text_color=COLORS.purple, anchor="w").grid(row=2, column=0, sticky="ew", padx=(SPACE_3, SPACE_1))
-        ctk.CTkLabel(card, textvariable=self.session_total_var, font=(FONT_FAMILY, 17, "bold"), text_color=COLORS.purple, anchor="w").grid(row=2, column=2, sticky="ew", padx=(SPACE_2, SPACE_3))
-        ctk.CTkLabel(card, textvariable=self.thread_title_var, font=FONT_BODY, text_color=COLORS.primary_text, anchor="w", justify="left", wraplength=290, height=36).grid(row=3, column=0, columnspan=3, sticky="ew", padx=SPACE_3)
-        ctk.CTkLabel(card, textvariable=self.thread_status_var, font=FONT_SMALL, text_color=COLORS.secondary_text, anchor="w").grid(row=4, column=0, columnspan=3, sticky="ew", padx=SPACE_3, pady=(0, SPACE_2))
 
     def show(
         self,
@@ -458,6 +535,8 @@ class DesktopMiniWidget:
         self.data_status_var.set(translate("quota_refreshing", self.language))
         self.compact_status_var.set(translate("quota_refreshing", self.language))
         self.status_label.configure(text_color=COLORS.accent)
+        self.compact_status_label.configure(text_color=COLORS.accent)
+        self.expanded_status_label.configure(text_color=COLORS.accent)
 
     def update(
         self,
@@ -468,34 +547,51 @@ class DesktopMiniWidget:
     ) -> None:
         self.language = language
         presentation = present_widget(quota, thread, recommendation, language)
-        self.restore_button.configure(text=translate("restore_widget", language))
-        self.minimize_button.configure(text="—")
-        self.exit_button.configure(text="×")
-        self.quota_title_vars[0].set(translate("five_hour_limit", language))
-        self.quota_title_vars[1].set(translate("weekly_limit", language))
-        self.thread_heading.configure(text=translate("token_usage", language))
+        self.quota_title_var.set(translate("five_hour_limit", language))
         self.instruction_label.configure(text=translate("instruction_total", language))
         self.session_label.configure(text=translate("session_total_short", language))
-        for index, window in enumerate((quota.five_hour, quota.weekly)):
-            self._update_window(index, window)
+        self._update_window(quota.five_hour, quota.source_status)
         self.compact_status_var.set(presentation.status_text)
         self.compact_quota_var.set(presentation.quota_text)
+        status_icon_key = {
+            "normal": "normal",
+            "optimize": "warning",
+            "new_thread": "warning",
+            "quota_risk": "warning",
+            "data_unavailable": "error",
+        }.get(presentation.status, "unknown")
+        status_icon = self._status_icons[status_icon_key]
         status_color = {
-            "normal": COLORS.real, "optimize": COLORS.orange,
-            "new_thread": COLORS.orange, "quota_risk": COLORS.orange,
-            "data_unavailable": COLORS.error,
-        }.get(presentation.status, COLORS.unknown)
-        self.compact_icon_label.configure(text_color=status_color)
+            "normal": WIDGET_SUCCESS,
+            "warning": WIDGET_WARNING,
+            "error": WIDGET_ERROR,
+            "unknown": WIDGET_UNKNOWN,
+        }[status_icon_key]
+        self.compact_icon_label.configure(image=status_icon)
+        self.compact_status_label.configure(text_color=status_color)
+        self.expanded_status_label.configure(image=status_icon, text_color=status_color)
 
         if thread.status == "no_selection":
             self.thread_title_var.set(translate("no_selected_thread", language))
+            self.thread_full_title_var.set(translate("no_selected_thread", language))
             self.instruction_total_var.set("—")
             self.session_total_var.set("—")
+            self.instruction_full_var.set("—")
+            self.session_full_var.set("—")
             self.thread_status_var.set(translate("quota_unavailable", language))
         else:
-            self.thread_title_var.set(_bounded_title(presentation.task_title))
+            self.thread_title_var.set(_bounded_title(presentation.task_title, limit=32))
+            self.thread_full_title_var.set(presentation.task_title)
             self.instruction_total_var.set(presentation.instruction_total)
             self.session_total_var.set(presentation.session_total)
+            self.instruction_full_var.set(
+                "—" if thread.instruction_total_tokens is None
+                else f"{format_full_token_count(thread.instruction_total_tokens)} Tokens"
+            )
+            self.session_full_var.set(
+                "—" if thread.session_total_tokens is None
+                else f"{format_full_token_count(thread.session_total_tokens)} Tokens"
+            )
             self.thread_status_var.set(
                 f"{presentation.status_text} · {translate('task_turns', language)} {presentation.turn_count_text}"
             )
@@ -508,29 +604,35 @@ class DesktopMiniWidget:
         }.get(quota.source_status, "quota_unavailable")
         self.data_status_var.set(translate(status_key, language))
         color = {
-            "normal": COLORS.real,
-            "stale": COLORS.stale,
-            "invalid": COLORS.error,
-        }.get(quota.source_status, COLORS.unknown)
+            "normal": WIDGET_SUCCESS,
+            "stale": WIDGET_WARNING,
+            "invalid": WIDGET_ERROR,
+        }.get(quota.source_status, WIDGET_UNKNOWN)
         self.status_label.configure(text_color=color)
 
-    def _update_window(self, index: int, window: QuotaWindow) -> None:
-        used = format_percent(window.used_percent) if window.available else "—"
+    def _update_window(self, window: QuotaWindow, source_status: str) -> None:
         remaining = format_percent(window.remaining_percent) if window.available else "—"
         if self.language == "zh-CN":
-            self.used_vars[index].set(f"{translate('used_percent', self.language)} {used}")
-            self.remaining_vars[index].set(f"{translate('remaining_percent', self.language)} {remaining}")
-            self.reset_vars[index].set(f"{translate('reset_time', self.language)}：{format_reset_time(window.reset_at, self.language, window.observed_at)}")
+            self.remaining_var.set(f"{translate('remaining_percent', self.language)} {remaining}")
+            self.reset_var.set(f"{translate('reset_time', self.language)}：{format_reset_time(window.reset_at, self.language, window.observed_at)}")
         else:
-            self.used_vars[index].set(f"{used} {translate('used_percent', self.language)}")
-            self.remaining_vars[index].set(f"{remaining} {translate('remaining_percent', self.language)}")
-            self.reset_vars[index].set(f"{translate('reset_time', self.language)}: {format_reset_time(window.reset_at, self.language, window.observed_at)}")
-        if window.available and window.used_percent is not None:
-            self.progress_bars[index].configure(progress_color=(COLORS.accent, COLORS.real)[index])
-            self.progress_bars[index].set(window.used_percent / 100.0)
-        else:
-            self.progress_bars[index].configure(progress_color=COLORS.border)
-            self.progress_bars[index].set(0)
+            self.remaining_var.set(f"{remaining} {translate('remaining_percent', self.language)}")
+            self.reset_var.set(f"{translate('reset_time', self.language)}: {format_reset_time(window.reset_at, self.language, window.observed_at)}")
+        value = window.remaining_percent if window.available else None
+        color = _quota_color(window, source_status)
+        self.compact_quota_label.configure(text_color=color)
+        self.quota_value_label.configure(text_color=color)
+        if self.quota_ring is not None:
+            self._set_quota_ring(self.quota_ring, value, color)
+
+    @staticmethod
+    def _set_quota_ring(
+        ring: CircularProgress, value: float | None, color: str,
+    ) -> None:
+        ring.set(value, color=color)
+        for item in ring.find_all():
+            if ring.type(item) == "text":
+                ring.itemconfigure(item, fill=COLORS.telemetry_text)
 
     def _start_drag(self, event: tk.Event) -> None:
         self._drag_start = (event.x_root, event.y_root, self.window.winfo_x(), self.window.winfo_y())
@@ -557,8 +659,21 @@ def format_percent(value: float | None) -> str:
     return f"{int(value)}%" if value.is_integer() else f"{value:.1f}%"
 
 
+def _quota_color(window: QuotaWindow, source_status: str) -> str:
+    """Choose a high-contrast semantic color for reliable remaining quota."""
+    if source_status == "invalid":
+        return WIDGET_ERROR
+    if source_status == "stale" or window.stale:
+        return WIDGET_WARNING
+    if not window.available or window.remaining_percent is None:
+        return WIDGET_UNKNOWN
+    if window.remaining_percent <= 20.0:
+        return WIDGET_WARNING
+    return WIDGET_SUCCESS
+
+
 def format_token_total(value: int | None) -> str:
-    return f"{value:,}" if value is not None else "—"
+    return format_compact_token_count(value)
 
 
 def format_reset_time(
@@ -605,6 +720,10 @@ class ExitChoiceDialog:
             return
         self._on_choice = on_choice
         window = self.window = ctk.CTkToplevel(self.root)
+        # CTkToplevel is mapped immediately on Windows. Keep it hidden until
+        # every CustomTkinter child has been created and geometry is settled,
+        # otherwise a slow first paint can briefly expose an empty client area.
+        window.withdraw()
         window.title(translate("exit_prompt_title", language))
         window.geometry("390x210")
         window.resizable(False, False)

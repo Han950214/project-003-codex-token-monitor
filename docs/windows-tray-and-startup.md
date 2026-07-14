@@ -4,7 +4,7 @@ Phase 2.8-B 为同一个 Dashboard 进程增加一个系统托盘图标。左键
 
 “最小化到任务栏”会保留 Windows 任务栏图标；“隐藏到系统托盘”会同时隐藏主界面与迷你组件，只留下托盘图标。两者使用独立的 `taskbar` / `tray` 状态，不改变选中 Thread、7/30/90 天范围、语言或自动刷新开关。托盘“退出应用”是直接退出路径，不受当天记住的最小化选择影响，并会停止自动刷新、关闭 app-server、移除托盘图标和销毁 Tk 窗口。
 
-设置页可选择下次启动模式：`dashboard`（默认）、`widget` 或 `tray`，并整合语言、随 Windows 启动、组件闲置透明度、Dashboard 默认模式、组件默认模式、自动刷新和退出行为。`dashboard_mode` 默认 `simple`，`widget_mode` 默认 `compact`；缺失或损坏值安全回退。保存设置只重绘当前内存状态，不读取 Rollout、SQLite、标题或额度。
+设置页可选择下次启动模式：`dashboard`（主界面，默认）、`widget` 或 `tray`，并整合语言、随 Windows 启动、组件闲置透明度、组件默认状态、自动刷新和退出行为。主界面只有统一状态中心，不提供 Dashboard 模式设置；旧配置中的 `dashboard_mode` 会被安全忽略。`widget_mode` 继续使用 `compact` / `expanded`，缺失或损坏值安全回退。保存设置只重绘当前内存状态，不读取 Rollout、SQLite、标题或额度。
 
 每次启动仍只创建一个 Tk root、一个 Dashboard 和一个托盘控制器，只执行一次初始数据与额度读取；之后按设置显示对应窗口。没有可用 Thread 时，组件数字显示 `—`。
 
