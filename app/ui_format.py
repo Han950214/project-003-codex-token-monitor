@@ -39,9 +39,9 @@ def ellipsize_title(value: str | None, limit: int = 48) -> str:
 
 
 def metric_columns_for_width(width: int) -> int:
-    if width >= 800:
-        return 5
-    if width >= 560:
+    if width >= 1_100:
+        return 6
+    if width >= 900:
         return 3
     if width >= 380:
         return 2
@@ -49,11 +49,9 @@ def metric_columns_for_width(width: int) -> int:
 
 
 def dashboard_layout_for_width(width: int) -> str:
-    # The wide layout is intentionally reserved for genuinely large content
-    # areas so Tk child requests cannot squeeze its left column at 1280px.
-    if width >= 1_400:
+    if width >= 1_200:
         return "wide"
-    if width >= 640:
+    if width >= 900:
         return "medium"
     return "narrow"
 

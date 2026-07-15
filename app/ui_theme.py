@@ -13,40 +13,40 @@ SPACE_2 = 8
 SPACE_3 = 12
 SPACE_4 = 16
 SPACE_6 = 24
-CARD_RADIUS = 12
-CONTROL_RADIUS = 8
+CARD_RADIUS = 8
+CONTROL_RADIUS = 4
 
 
 @dataclass(frozen=True)
 class Colors:
-    window: str = "#F4F7FB"
+    window: str = "#F3F4F6"
     surface: str = "#FFFFFF"
-    raised_surface: str = "#F8FAFD"
-    border: str = "#DDE4EE"
-    border_strong: str = "#C8D3E1"
+    raised_surface: str = "#F8FAFC"
+    border: str = "#D1D5DB"
+    border_strong: str = "#94A3B8"
     scrollbar_thumb: str = "#91A4BE"
     scrollbar_thumb_hover: str = "#6F849F"
-    primary_text: str = "#152033"
+    primary_text: str = "#111827"
     on_accent: str = "#FFFFFF"
-    secondary_text: str = "#667085"
-    muted_text: str = "#8A96A8"
-    accent: str = "#3978F6"
-    accent_hover: str = "#2D66D4"
-    accent_soft: str = "#EAF1FF"
+    secondary_text: str = "#4B5563"
+    muted_text: str = "#6B7280"
+    accent: str = "#2563EB"
+    accent_hover: str = "#1D4ED8"
+    accent_soft: str = "#EFF6FF"
     selection_background: str = "#D8E6FF"
     selection_background_inactive: str = "#E4ECF8"
     selection_foreground: str = "#102A56"
-    real: str = "#248A52"
+    real: str = "#15803D"
     real_soft: str = "#E8F6ED"
-    estimate: str = "#A76812"
+    estimate: str = "#BC4800"
     estimate_soft: str = "#FFF4DC"
     stale: str = "#9A6417"
     stale_soft: str = "#FFF1D8"
-    error: str = "#BC3A32"
+    error: str = "#BA1A1A"
     error_soft: str = "#FDECEB"
     unknown: str = "#728096"
     unknown_soft: str = "#EEF1F5"
-    purple: str = "#7A4FD1"
+    purple: str = "#7C3AED"
     purple_soft: str = "#F1EBFF"
     teal: str = "#258E92"
     teal_soft: str = "#E4F6F5"
@@ -73,12 +73,12 @@ PAGE_TITLE = (FONT_FAMILY, 22, "bold")
 STATUS_TITLE = (FONT_FAMILY, 19, "bold")
 SECTION_TITLE = (FONT_FAMILY, 15, "bold")
 CARD_TITLE = (FONT_FAMILY, 13, "bold")
-BODY = (FONT_FAMILY, 12)
-BODY_STRONG = (FONT_FAMILY, 12, "bold")
-CAPTION = (FONT_FAMILY, 10)
+BODY = (FONT_FAMILY, 13)
+BODY_STRONG = (FONT_FAMILY, 13, "bold")
+CAPTION = (FONT_FAMILY, 11)
 METRIC = (FONT_FAMILY, 20, "bold")
-NAV = (FONT_FAMILY, 12)
-BUTTON = (FONT_FAMILY, 12, "bold")
+NAV = (FONT_FAMILY, 13)
+BUTTON = (FONT_FAMILY, 13, "bold")
 
 # Compatibility aliases for unchanged secondary surfaces.
 FONT_BODY = BODY
@@ -134,8 +134,8 @@ def configure_treeview(root: ctk.CTk) -> ttk.Style:
         foreground=COLORS.primary_text,
         borderwidth=0,
         relief="flat",
-        rowheight=28,
-        font=(FONT_FAMILY, 10),
+        rowheight=36,
+        font=(FONT_FAMILY, 11),
     )
     style.map(
         "Monitor.Treeview",
@@ -148,7 +148,7 @@ def configure_treeview(root: ctk.CTk) -> ttk.Style:
         foreground=COLORS.secondary_text,
         borderwidth=0,
         relief="flat",
-        font=(FONT_FAMILY, 10, "bold"),
+        font=(FONT_FAMILY, 11, "bold"),
         padding=(SPACE_2, SPACE_2),
     )
     style.map("Monitor.Treeview.Heading", background=[("active", COLORS.raised_surface)])

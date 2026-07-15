@@ -6,15 +6,15 @@ Current boundary: the status center discovers multiple recent Codex Threads from
 
 关键边界：本项目不替代 AOS，不创建知识库、项目记忆或项目上下文，不扫描项目文件，也不读取或保存 Prompt、Response、消息、工具输出或 Reasoning 正文。“准备新线程”只解释数字风险、打开 Codex，并复制不含项目内容的通用手工交接模板。状态中心从 Rollout JSONL 读取安全数字元数据；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。
 
-## Phase 3.0 产品体验
+## Phase 3.1-B1 产品体验
 
-- 左侧一级导航固定为四项：状态中心、历史记录、工具、设置；当前任务不再是一级入口，而是可从状态中心、最近任务、历史记录或 Advisor 操作进入的二级详情。
-- 状态中心默认显示一个最高优先级 Advisor、五项核心指标（本轮用量、会话累计、缓存复用、模型思考消耗、额度剩余）、当前任务摘要、5 小时与每周额度、四项快捷操作和最近 5 条任务。
-- 当前任务详情和指标详情按需展示 Input、Output、Total、Cached、Reasoning、Cache Hit 等完整安全数字；历史记录页保留 7/30/90 天、每页 10 条、分页、状态筛选、固定选择、自动跟随和选中高亮。
-- Advisor v1 只使用本地安全数字和状态代码，阈值集中定义，缓存复用明确标为本地推导值。
-- 一键诊断独立检查版本、运行模式、Codex/app-server、额度、Rollout、安全数字、SQLite、设置、启动路径、托盘和数据新鲜度；单项失败不会中断其他检查。
-- 桌面组件只保留 `compact`（收起）和 `expanded`（展开）两种显示状态；它们不是主界面模式，切换状态不读取数据、不重建 Tk root。
-- 设置页不提供 Dashboard 模式选项；旧配置中的 `dashboard_mode` 会被安全忽略。组件默认状态、语言、透明度、启动模式、自动刷新和退出行为仍保存在本产品 UI settings 中，损坏值使用安全默认值。
+- 左侧一级导航固定为六项：概览、会话、用量趋势、建议、工具、设置；会话详情作为二级页面或宽屏侧栏呈现。
+- 概览默认显示六项核心指标、当前会话、额度状态、趋势预览、四项快捷操作和最近 5 条会话。
+- 会话页保留 7/30/90 天、每页 10 条、分页、状态筛选和安全标题搜索；行切换只读取完整刷新留下的进程内 snapshot。
+- 用量趋势只展示真实样本，并明确区分 `available`、`insufficient`、`unavailable` 与 `stale`；样本不足时不绘制伪造曲线。
+- 建议页只展示 Advisor v1 已生成的建议与安全数字证据；工具页按诊断、数据、工作流、帮助分组，未实现的数据操作统一标记为 Coming soon。
+- 设置页按通用、刷新与通知、Windows、桌面组件、隐私与关于分组；刷新周期固定为 60 秒，不新增无效阈值或伪配置。
+- 桌面组件继续只保留 `compact` 与 `expanded` 两种显示状态；切换导航、语言、会话和组件状态均不触发数据读取或重建 Tk root。
 
 详见 [产品交互](docs/product-interaction.md)、[工作流建议规则](docs/workflow-advisor.md) 与 [AOS 边界](docs/aos-boundary.md)。
 
@@ -93,7 +93,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
 
 ## Current Status
 
-Phase 3.0-UI-Final 将主界面统一为单一状态中心：核心安全数字默认可见，详细技术字段按需查看。导航、页面切换、任务内存切换和组件收起/展开只重绘当前内存 snapshot；只有初始加载、手动刷新、自动刷新和一键诊断会访问真实数据。应用版本仍为 `0.1.0`。
+Phase 3.1-B1 已完成 Analytics UI shell：六项导航、六项概览 KPI、会话搜索与分页、真实趋势质量状态、Advisor 建议页、工具与设置分组、会话详情和诊断弹窗均保持 CustomTkinter 本地桌面实现。导航、页面切换、会话内存切换、语言切换和组件收起/展开只重绘当前内存 snapshot；只有初始加载、手动刷新、自动刷新和重新运行诊断会访问真实数据。应用版本仍为 `0.1.0`。
 
 Phase 2.8-A-S 保留多 Thread 分离、500 条近期候选、已知路径回读和 Rollout 进程内缓存规则。近期列表每页 10 条，可在内存中翻页；点击近期行或下拉任务时直接切换完整刷新留下的快照，不重新读取 Rollout、SQLite、标题或额度。默认选择仍可自动跟随最近活动；主窗口最小化时会把当时实际选中的 Thread 解析为固定选择。近期范围默认 7 天，可切换 30 或 90 天。
 

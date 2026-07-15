@@ -35,6 +35,14 @@ def create_icon(
     elif kind == "history":
         draw.ellipse((*points(((4, 4), (20, 20)))[0], *points(((4, 4), (20, 20)))[1]), outline=color, width=width)
         draw.line(points(((12, 7), (12, 12), (16, 14))), fill=color, width=width, joint="curve")
+    elif kind == "trend":
+        draw.line(points(((3, 19), (8, 13), (12, 16), (20, 6))), fill=color, width=width, joint="curve")
+        draw.line(points(((16, 6), (20, 6), (20, 10))), fill=color, width=width, joint="curve")
+    elif kind == "recommendation":
+        draw.ellipse((*points(((6, 3), (18, 15)))[0], *points(((6, 3), (18, 15)))[1]), outline=color, width=width)
+        draw.line(points(((9, 18), (15, 18))), fill=color, width=width)
+        draw.line(points(((10, 21), (14, 21))), fill=color, width=width)
+        draw.line(points(((12, 7), (12, 11))), fill=color, width=width)
     elif kind == "tools":
         draw.rounded_rectangle((*points(((3, 8), (21, 20)))[0], *points(((3, 8), (21, 20)))[1]), radius=max(1, round(2 * scale)), outline=color, width=width)
         draw.rounded_rectangle((*points(((8, 4), (16, 10)))[0], *points(((8, 4), (16, 10)))[1]), radius=max(1, round(2 * scale)), outline=color, width=width)

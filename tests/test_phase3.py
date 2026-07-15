@@ -150,12 +150,16 @@ class FakeCanvas:
 
 
 class FakeRoot(FakeWidget):
-    def __init__(self, width):
+    def __init__(self, width, window_scaling=1.0):
         super().__init__()
         self.width = width
+        self.window_scaling = window_scaling
 
     def winfo_width(self):
         return self.width
+
+    def _reverse_window_scaling(self, value):
+        return int(value / self.window_scaling)
 
 
 class QueryBomb:
@@ -218,23 +222,26 @@ class Phase3ModeTests(unittest.TestCase):
 
     def test_navigation_preserves_selection_pagination_and_auto_refresh(self):
         state = AppShellState(
-            page="history", selected_thread_id="thread-1", history_page=3,
+            page="sessions", selected_thread_id="thread-1", history_page=3,
             auto_refresh_enabled=True,
         )
-        changed = state.navigate("current_task")
+        changed = state.navigate("session_detail")
         self.assertEqual(changed.selected_thread_id, "thread-1")
         self.assertEqual(changed.history_page, 3)
         self.assertTrue(changed.auto_refresh_enabled)
-        self.assertEqual(changed.page, "current_task")
-        self.assertEqual(changed.navigate("status_center").page, "status_center")
+        self.assertEqual(changed.page, "session_detail")
+        self.assertEqual(changed.navigate("overview").page, "overview")
 
     def test_invalid_navigation_returns_to_status_center(self):
-        self.assertEqual(AppShellState(page="history").navigate("missing").page, "status_center")
+        self.assertEqual(AppShellState(page="sessions").navigate("missing").page, "overview")
 
-    def test_navigation_has_exactly_four_product_entries(self):
-        self.assertEqual(NAVIGATION_ITEMS, ("status_center", "history", "tools", "settings"))
-        self.assertNotIn("current_task", NAVIGATION_ITEMS)
-        self.assertIn("current_task", ALL_PAGES)
+    def test_navigation_has_exactly_six_product_entries(self):
+        self.assertEqual(NAVIGATION_ITEMS, (
+            "overview", "sessions", "usage_trends", "recommendations",
+            "tools", "settings",
+        ))
+        self.assertNotIn("session_detail", NAVIGATION_ITEMS)
+        self.assertIn("session_detail", ALL_PAGES)
 
     def test_navigation_and_secondary_current_task_are_query_free(self):
         dashboard = object.__new__(Dashboard)
@@ -242,27 +249,27 @@ class Phase3ModeTests(unittest.TestCase):
             selected_thread_id="thread-1", history_page=2,
             auto_refresh_enabled=True,
         )
-        dashboard.current_nav_page = "status_center"
+        dashboard.current_nav_page = "overview"
         dashboard.page_frames = {page: FakeWidget() for page in ALL_PAGES}
         dashboard.nav_buttons = {page: FakeWidget() for page in NAVIGATION_ITEMS}
         dashboard.view_model = QueryBomb()
         dashboard.quota_provider = QueryBomb()
 
-        Dashboard.show_page(dashboard, "current_task")
+        Dashboard.show_page(dashboard, "session_detail")
 
-        self.assertEqual(dashboard.shell_state.page, "current_task")
+        self.assertEqual(dashboard.shell_state.page, "session_detail")
         self.assertEqual(dashboard.shell_state.selected_thread_id, "thread-1")
         self.assertEqual(dashboard.shell_state.history_page, 2)
-        self.assertTrue(dashboard.page_frames["current_task"].visible)
-        self.assertFalse(dashboard.page_frames["status_center"].visible)
+        self.assertTrue(dashboard.page_frames["session_detail"].visible)
+        self.assertFalse(dashboard.page_frames["overview"].visible)
         self.assertEqual(
-            dashboard.nav_buttons["status_center"].options["fg_color"],
+            dashboard.nav_buttons["sessions"].options["fg_color"],
             main_module.COLORS.accent,
         )
 
-        Dashboard.show_page(dashboard, "status_center")
-        self.assertEqual(dashboard.shell_state.page, "status_center")
-        self.assertTrue(dashboard.page_frames["status_center"].visible)
+        Dashboard.show_page(dashboard, "overview")
+        self.assertEqual(dashboard.shell_state.page, "overview")
+        self.assertTrue(dashboard.page_frames["overview"].visible)
 
     def test_dashboard_mode_controls_are_not_built(self):
         source = inspect.getsource(Dashboard._build_header) + inspect.getsource(Dashboard._build_settings_page)
@@ -327,10 +334,10 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
 
     def test_metric_column_helper_boundaries(self):
         cases = {
-            800: 5,
-            799: 3,
-            560: 3,
-            559: 2,
+            1100: 6,
+            1099: 3,
+            900: 3,
+            899: 2,
             380: 2,
             379: 1,
         }
@@ -341,10 +348,10 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
 
     def test_core_metric_layout_uses_wide_medium_and_narrow_columns(self):
         cases = {
-            800: ((0, 0), (0, 1), (0, 2), (0, 3), (0, 4)),
-            700: ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1)),
-            500: ((0, 0), (0, 1), (1, 0), (1, 1), (2, 0)),
-            320: ((0, 0), (1, 0), (2, 0), (3, 0), (4, 0)),
+            1100: ((0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5)),
+            1000: ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)),
+            800: ((0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)),
+            320: ((0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0)),
         }
         for width, expected in cases.items():
             with self.subTest(width=width):
@@ -369,14 +376,15 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
     def test_wide_status_layout_uses_balanced_columns(self):
         dashboard = object.__new__(Dashboard)
         dashboard.status_page = FakeWidget()
-        cards = [FakeWidget() for _ in range(6)]
+        cards = [FakeWidget() for _ in range(7)]
         (
             dashboard.status_advice_card,
             dashboard.core_metrics_panel,
             dashboard.task_summary_card,
             dashboard.quota_center_card,
-            dashboard.quick_actions_card,
+            dashboard.trend_preview_card,
             dashboard.status_recent_card,
+            dashboard.quick_actions_card,
         ) = cards
         core_widths = []
         dashboard._layout_core_metrics = core_widths.append
@@ -385,24 +393,17 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(card.grid_calls[-1][1]["column"] for card in cards),
-            (0, 1, 0, 1, 0, 1),
-        )
-        self.assertTrue(all(
-            "columnspan" not in card.grid_calls[-1][1] for card in cards
-        ))
-        self.assertEqual(
-            tuple(card.options["width"] for card in cards),
-            ((1_400 - main_module.SPACE_2) // 2,) * 6,
+            (0, 0, 0, 1, 0, 1, 0),
         )
         self.assertEqual(
-            tuple(card.options["height"] for card in cards),
-            (260, 260, 260, 260, 360, 360),
+            tuple(card.grid_calls[-1][1].get("columnspan", 1) for card in cards),
+            (2, 2, 1, 1, 1, 1, 2),
         )
         self.assertTrue(all(
-            ("propagate", (False,), {}) in card.configure_calls
+            ("propagate", (True,), {}) in card.configure_calls
             for card in cards
         ))
-        self.assertEqual(core_widths, [700 - main_module.SPACE_2])
+        self.assertEqual(core_widths, [1_400])
 
         Dashboard._apply_status_layout(dashboard, 1_200)
         self.assertTrue(all(
@@ -413,10 +414,9 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
     def test_dashboard_layout_helper_boundaries(self):
         cases = {
             1_400: "wide",
-            1_399: "medium",
-            1_200: "medium",
-            640: "medium",
-            639: "narrow",
+            1_199: "medium",
+            900: "medium",
+            899: "narrow",
         }
         self.assertEqual(
             {width: dashboard_layout_for_width(width) for width in cases},
@@ -425,16 +425,18 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
 
     def test_history_filters_reflow_to_two_rows_below_wide_width(self):
         for width, expected_rows in (
-            (1040, (0, 0, 0, 0, 0, 0, 0)),
-            (900, (0, 0, 1, 1, 1, 1, 0)),
+            (1200, (0, 0, 0, 0, 0, 0, 0, 0, 0)),
+            (900, (0, 0, 0, 0, 1, 1, 1, 1, 0)),
         ):
             with self.subTest(width=width):
                 dashboard = object.__new__(Dashboard)
                 dashboard.history_selector = FakeWidget()
-                controls = [FakeWidget() for _ in range(7)]
+                controls = [FakeWidget() for _ in range(9)]
                 (
                     dashboard.task_selector_label,
                     dashboard.task_menu,
+                    dashboard.session_search_label,
+                    dashboard.session_search_entry,
                     dashboard.range_selector_label,
                     dashboard.range_menu,
                     dashboard.status_filter_label,
@@ -466,30 +468,47 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
         self.assertEqual(rendered, [dashboard.presentation])
 
     def test_resize_changes_layout_without_querying_product_data(self):
-        dashboard = object.__new__(Dashboard)
-        dashboard.root = FakeRoot(1_000)
-        dashboard._layout_job = "pending"
-        dashboard._sidebar_collapsed = False
-        dashboard.sidebar = FakeWidget()
-        dashboard.brand_name = FakeWidget()
-        dashboard.brand_icon = FakeWidget()
-        dashboard.status_reason_label = FakeWidget()
-        dashboard.view_model = QueryBomb()
-        dashboard.quota_provider = QueryBomb()
-        sidebar_label_calls = []
-        layout_widths = []
-        dashboard._apply_sidebar_labels = lambda: sidebar_label_calls.append(True)
-        dashboard._apply_status_layout = layout_widths.append
-
-        Dashboard._apply_responsive_layout(dashboard)
-
-        self.assertIsNone(dashboard._layout_job)
-        self.assertTrue(dashboard._sidebar_collapsed)
-        self.assertEqual(sidebar_label_calls, [True])
-        self.assertEqual(
-            layout_widths,
-            [max(320, 1_000 - 64 - (main_module.SPACE_4 * 2))],
+        cases = (
+            (980, 1.25, True, 64),
+            (980, 1.5, True, 64),
+            (1_180, 1.25, False, 184),
         )
+        for logical_width, scaling, collapsed, sidebar_width in cases:
+            with self.subTest(logical_width=logical_width, scaling=scaling):
+                dashboard = object.__new__(Dashboard)
+                dashboard.root = FakeRoot(
+                    int(logical_width * scaling), window_scaling=scaling,
+                )
+                dashboard._layout_job = "pending"
+                dashboard._sidebar_collapsed = False
+                dashboard.sidebar = FakeWidget()
+                dashboard.brand_name = FakeWidget()
+                dashboard.brand_icon = FakeWidget()
+                dashboard.status_reason_label = FakeWidget()
+                dashboard.auto_switch = FakeWidget()
+                dashboard.mini_widget_button = FakeWidget()
+                dashboard.header_settings_button = FakeWidget()
+                dashboard.language_menu = FakeWidget()
+                dashboard.header_message_label = FakeWidget()
+                dashboard.view_model = QueryBomb()
+                dashboard.quota_provider = QueryBomb()
+                sidebar_label_calls = []
+                layout_widths = []
+                dashboard._apply_sidebar_labels = lambda: sidebar_label_calls.append(True)
+                dashboard._apply_status_layout = layout_widths.append
+
+                Dashboard._apply_responsive_layout(dashboard)
+
+                self.assertIsNone(dashboard._layout_job)
+                self.assertEqual(dashboard._sidebar_collapsed, collapsed)
+                self.assertEqual(sidebar_label_calls, [True] if collapsed else [])
+                self.assertEqual(
+                    layout_widths,
+                    [max(
+                        320,
+                        logical_width - sidebar_width - (main_module.SPACE_4 * 2),
+                    )],
+                )
 
     def test_recent_task_selection_pins_cached_snapshot_without_leaving_status_center(self):
         snapshot = object()
@@ -557,7 +576,7 @@ class Phase3LocalVisualTests(unittest.TestCase):
             return kwargs
 
         kinds = (
-            "shield", "home", "history", "tools", "settings",
+            "shield", "home", "history", "trend", "recommendation", "tools", "settings",
             "pulse", "open", "refresh", "widget", "more",
         )
         with patch.object(ui_icons_module.ctk, "CTkImage", fake_ctk_image):
@@ -630,7 +649,7 @@ class Phase3AdvisorTests(unittest.TestCase):
 
         Dashboard._execute_primary_action(dashboard)
 
-        self.assertEqual(pages, ["current_task"])
+        self.assertEqual(pages, ["session_detail"])
 
     def test_stale_data_is_data_unavailable_status(self):
         result = evaluate_advice(advisor_input(data_age_seconds=round(DATA_STALE_AFTER.total_seconds()) + 1))
@@ -907,7 +926,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         source = inspect.getsource(Dashboard._build_status_advice)
         self.assertEqual(source.count("self.primary_action_button ="), 1)
 
-    def test_status_center_builds_five_metrics_five_recent_and_four_quick_actions(self):
+    def test_overview_builds_six_metrics_five_recent_and_four_quick_actions(self):
         dashboard = object.__new__(Dashboard)
         dashboard.root = object()
         dashboard.core_metric_widgets = []
@@ -940,9 +959,9 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             tuple(item["semantic"] for item in dashboard.core_metric_widgets),
             CORE_METRICS,
         )
-        self.assertEqual(len(dashboard.core_metric_widgets), 5)
+        self.assertEqual(len(dashboard.core_metric_widgets), 6)
         self.assertTrue(all(
-            item["card"].options["width"] == 96
+            item["card"].options["width"] == 128
             for item in dashboard.core_metric_widgets
         ))
         self.assertTrue(all(
@@ -987,18 +1006,111 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         for forbidden in ("knowledge", "project_export", "context_restore", "scan_project"):
             self.assertNotIn(forbidden, source.lower())
 
+    def test_tools_build_four_groups_and_disable_unimplemented_actions(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.root = object()
+        dashboard.diagnostic_rows = []
+        parent = FakeWidget()
+        with (
+            patch.multiple(
+                main_module.ctk,
+                CTkScrollableFrame=FakeWidget,
+                CTkFrame=FakeWidget,
+                CTkLabel=FakeWidget,
+                CTkButton=FakeWidget,
+            ),
+            patch.object(main_module.tk, "StringVar", FakeVar),
+        ):
+            Dashboard._build_tools_page(dashboard, parent)
+
+        self.assertEqual(set(dashboard.tool_group_titles), {
+            "diagnostics", "data", "workflow", "help",
+        })
+        self.assertEqual(len(dashboard.tool_group_cards), 4)
+        self.assertTrue(all(
+            button.options.get("state") == "disabled"
+            for button in dashboard.coming_soon_buttons
+        ))
+
+    def test_settings_builds_five_contract_groups(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.root = object()
+        dashboard.auto_refresh_var = FakeVar(value=False)
+        dashboard.startup_adapter = SimpleNamespace(
+            is_enabled=lambda _path: False,
+            is_supported=lambda: True,
+        )
+        parent = FakeWidget()
+        with (
+            patch.multiple(
+                main_module.ctk,
+                CTkScrollableFrame=FakeWidget,
+                CTkFrame=FakeWidget,
+                CTkLabel=FakeWidget,
+                CTkButton=FakeWidget,
+                CTkOptionMenu=FakeWidget,
+                CTkSwitch=FakeWidget,
+                CTkSlider=FakeWidget,
+            ),
+            patch.object(main_module.tk, "BooleanVar", FakeVar),
+            patch.object(main_module.tk, "DoubleVar", FakeVar),
+            patch.object(main_module.tk, "StringVar", FakeVar),
+        ):
+            Dashboard._build_settings_page(dashboard, parent)
+
+        self.assertEqual(set(dashboard.settings_group_titles), {
+            "general", "refresh", "windows", "widget", "privacy",
+        })
+        self.assertEqual(len(dashboard.settings_group_cards), 5)
+        self.assertEqual(main_module.DEFAULT_AUTO_REFRESH_SECONDS, 60)
+
+    def test_diagnostic_results_use_one_dialog_and_no_second_mainloop(self):
+        source = inspect.getsource(Dashboard._show_diagnostic_dialog)
+        self.assertEqual(source.count("ctk.CTkToplevel("), 1)
+        self.assertNotIn("mainloop", source)
+        self.assertNotIn("rollout_path", source)
+        self.assertNotIn("exception", source.lower())
+
+    def test_new_analytics_copy_excludes_stitch_off_domain_terms(self):
+        keys = {
+            "trend_page_description", "trend_quality_available_message",
+            "trend_quality_insufficient_message", "trend_quality_unavailable_message",
+            "trend_quality_stale_message", "recommendations_description",
+            "tools_group_diagnostics", "tools_group_data", "tools_group_workflow",
+            "tools_group_help", "backup_monitor_data", "restore_monitor_data",
+            "clear_monitor_cache",
+        }
+        forbidden = (
+            "enterprise", "latency", "cluster", "deployment", "infrastructure",
+            "global node map", "telemetry", "raw trace", "dollar savings",
+            "potential savings", "network bandwidth", "request rate",
+        )
+        for language in ("zh-CN", "en"):
+            copy = " ".join(TRANSLATIONS[language][key] for key in keys).lower()
+            for term in forbidden:
+                self.assertNotIn(term, copy)
+
     def test_all_new_product_keys_are_bilingual(self):
         keys = {
-            "nav_status_center", "nav_current_task", "nav_history", "nav_tools",
+            "nav_overview", "nav_sessions", "nav_usage_trends",
+            "nav_recommendations", "nav_session_detail", "nav_tools",
             "nav_settings", "status_advice_title", "core_metrics_title",
             "core_metric_current_turn", "core_metric_session_total",
             "core_metric_cache_reuse", "core_metric_reasoning",
-            "core_metric_quota_remaining", "quota_center_title",
+            "core_metric_five_hour_quota", "core_metric_weekly_quota",
+            "quota_center_title",
             "current_task_card_title", "quick_actions_title",
-            "one_click_diagnostics", "open_codex", "view_history", "more_tools",
+            "one_click_diagnostics", "open_codex", "prepare_new_thread", "more_tools",
             "recent_tasks_title", "view_all_tasks", "five_hour_limit",
             "weekly_limit", "back_status_center", "prepare_new_thread",
             "diagnostics_title", "widget_compact", "widget_expanded",
+            "trend_quality_available_title", "trend_quality_insufficient_title",
+            "trend_quality_unavailable_title", "trend_quality_stale_title",
+            "tools_group_diagnostics", "tools_group_data",
+            "tools_group_workflow", "tools_group_help",
+            "settings_group_general", "settings_group_refresh",
+            "settings_group_windows", "settings_group_widget",
+            "settings_group_privacy", "coming_soon",
         }
         self.assertTrue(keys.issubset(TRANSLATIONS["zh-CN"]))
         self.assertTrue(keys.issubset(TRANSLATIONS["en"]))

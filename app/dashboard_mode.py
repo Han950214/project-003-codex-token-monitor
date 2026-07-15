@@ -7,8 +7,15 @@ from dataclasses import dataclass, replace
 
 DASHBOARD_MODES = ("simple", "advanced")  # Legacy settings compatibility only.
 WIDGET_MODES = ("compact", "expanded")
-NAVIGATION_ITEMS = ("status_center", "history", "tools", "settings")
-SECONDARY_PAGES = ("current_task",)
+NAVIGATION_ITEMS = (
+    "overview",
+    "sessions",
+    "usage_trends",
+    "recommendations",
+    "tools",
+    "settings",
+)
+SECONDARY_PAGES = ("session_detail",)
 ALL_PAGES = NAVIGATION_ITEMS + SECONDARY_PAGES
 
 
@@ -16,7 +23,7 @@ ALL_PAGES = NAVIGATION_ITEMS + SECONDARY_PAGES
 class AppShellState:
     """UI-only state; transitions never access Rollout, SQLite, titles, or quota."""
 
-    page: str = "status_center"
+    page: str = "overview"
     dashboard_mode: str = "simple"
     widget_mode: str = "compact"
     selected_thread_id: str | None = None
@@ -30,7 +37,7 @@ class AppShellState:
         return replace(self, widget_mode=mode if mode in WIDGET_MODES else "compact")
 
     def navigate(self, page: str) -> "AppShellState":
-        return replace(self, page=page if page in ALL_PAGES else "status_center")
+        return replace(self, page=page if page in ALL_PAGES else "overview")
 
 
 def normalize_dashboard_mode(value: object) -> str:
