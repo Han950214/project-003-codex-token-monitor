@@ -19,7 +19,7 @@ if __package__ in {None, ""}:
 from app.auto_refresh import AutoRefreshController, DEFAULT_AUTO_REFRESH_SECONDS
 from app.advisor import AdvisorResult, Recommendation, build_advisor_input, evaluate_advice
 from app.analytics_ui import (
-    TREND_STALE_AFTER, TrendView, metric_samples, summarize_metric,
+    TREND_STALE_AFTER, TrendView, metric_observed_at, metric_samples, summarize_metric,
     trend_view_from_query,
 )
 from app.app_actions import open_codex, open_data_directory
@@ -869,12 +869,18 @@ class Dashboard:
             text_color=COLORS.primary_text, anchor="w",
         )
         self.trend_preview_title.grid(row=0, column=0, sticky="ew")
+        self.trend_preview_scope_var = tk.StringVar(master=self.root, value="")
+        self.trend_preview_scope = ctk.CTkLabel(
+            header, textvariable=self.trend_preview_scope_var, font=CAPTION,
+            text_color=COLORS.accent, anchor="e",
+        )
+        self.trend_preview_scope.grid(row=0, column=1, padx=SPACE_2)
         self.trend_preview_open = ctk.CTkButton(
             header, text="", command=lambda: self.show_page("usage_trends"),
             width=96, height=28, fg_color="transparent",
             text_color=COLORS.accent, hover_color=COLORS.accent_soft,
         )
-        self.trend_preview_open.grid(row=0, column=1)
+        self.trend_preview_open.grid(row=0, column=2)
         self.trend_preview_state_var = tk.StringVar(master=self.root, value="—")
         self.trend_preview_message_var = tk.StringVar(master=self.root, value="")
         self.trend_preview_state = ctk.CTkLabel(
@@ -1249,6 +1255,13 @@ class Dashboard:
             width=190, height=34,
         )
         self.trend_metric_menu.grid(row=0, column=3, sticky="w")
+        self.trend_scope_var = tk.StringVar(master=self.root, value="")
+        self.trend_scope_label = ctk.CTkLabel(
+            selectors, textvariable=self.trend_scope_var, font=CAPTION,
+            text_color=COLORS.accent, fg_color=COLORS.accent_soft,
+            corner_radius=8, padx=8,
+        )
+        self.trend_scope_label.grid(row=0, column=4, padx=(SPACE_3, 0))
         self.trend_group_labels: dict[str, str] = {}
         self.trend_metric_labels: dict[str, str] = {}
 
@@ -2259,7 +2272,8 @@ class Dashboard:
         return evaluate_advice(build_advisor_input(
             self.snapshot,
             self.quota_snapshot,
-            history_samples=(*self.trend_view.samples, *self.trend_view.quota_samples),
+            history_samples=self.trend_view.samples,
+            quota_history_samples=self.trend_view.quota_samples,
         ))
 
     def _apply_cached_snapshot(self, snapshot) -> None:
@@ -2585,6 +2599,9 @@ class Dashboard:
             return
         view = self.trend_view
         summary = summarize_metric(view, self.trend_metric)
+        scope_key = self._trend_scope_key(self.trend_metric)
+        self.trend_scope_var.set(translate(scope_key, self.language))
+        self.trend_preview_scope_var.set(translate("trend_scope_thread", self.language))
         quality = self._trend_metric_quality(view, self.trend_metric, summary.sample_count)
         tone, soft = {
             "empty": (COLORS.unknown, COLORS.unknown_soft),
@@ -2616,9 +2633,14 @@ class Dashboard:
         self.trend_summary_vars["samples"].set(
             translate("trend_sample_count", self.language, count=summary.sample_count)
         )
+        updated_at = summary.end_at
+        if self.trend_metric == "five_hour":
+            updated_at = view.five_hour_last_seen_at
+        elif self.trend_metric == "weekly":
+            updated_at = view.weekly_last_seen_at
         self.trend_summary_vars["updated"].set(
-            summary.end_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-            if summary.end_at is not None else "—"
+            updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            if updated_at is not None else "—"
         )
         for key, value in {
             "current": summary.current,
@@ -2685,17 +2707,21 @@ class Dashboard:
         if view.error_code:
             return "unavailable"
         if metric in {"five_hour", "weekly"}:
-            relevant_samples = view.quota_samples
-            latest = view.quota_samples[-1] if view.quota_samples else None
             prefix = "five_hour" if metric == "five_hour" else "weekly"
-            if latest is not None and not getattr(latest, f"{prefix}_available", False):
+            relevant_samples = tuple(
+                sample for sample in view.quota_samples
+                if metric_observed_at(sample, metric) is not None
+            )
+            available = getattr(view, f"{prefix}_available", None)
+            stale = bool(getattr(view, f"{prefix}_stale", False))
+            last_seen = getattr(view, f"{prefix}_last_seen_at", None)
+            if available is False:
                 return "unavailable"
-            if latest is not None and getattr(latest, f"{prefix}_stale", False):
+            if stale:
                 return "stale"
-            latest_at = getattr(latest, "sampled_at", None)
             if (
-                latest_at is not None
-                and datetime.now(timezone.utc) - latest_at > TREND_STALE_AFTER
+                last_seen is not None
+                and datetime.now(timezone.utc) - last_seen > TREND_STALE_AFTER
             ):
                 return "stale"
         elif view.quality in {"unavailable", "stale"}:
@@ -2707,6 +2733,18 @@ class Dashboard:
         if sample_count < 2:
             return "insufficient"
         return "available"
+
+    @staticmethod
+    def _trend_scope_key(metric: str) -> str:
+        return "trend_scope_global" if metric in {"five_hour", "weekly"} else "trend_scope_thread"
+
+    @staticmethod
+    def _history_scope_key(source: str) -> str:
+        return (
+            "trend_scope_global"
+            if source == "global_quota_history"
+            else "trend_scope_thread"
+        )
 
     @staticmethod
     def _format_trend_value(metric: str, value: float | None, *, signed: bool = False) -> str:
@@ -2723,7 +2761,7 @@ class Dashboard:
     def _trend_points(self, view: TrendView, metric: str) -> tuple[TrendPoint, ...]:
         points: list[TrendPoint] = []
         for sample, value in metric_samples(view, metric):
-            observed_at = getattr(sample, "sampled_at", getattr(sample, "observed_at", None))
+            observed_at = metric_observed_at(sample, metric)
             if observed_at is None:
                 continue
             if metric == "five_hour":
@@ -2823,6 +2861,15 @@ class Dashboard:
                     metric=translate(f"evidence_{history.metric}", self.language),
                     direction=translate(direction_key, self.language),
                     count=history.sample_count,
+                )
+                history_text = translate(
+                    "recommendation_history_scope",
+                    self.language,
+                    scope=translate(
+                        self._history_scope_key(history.source),
+                        self.language,
+                    ),
+                    value=history_text,
                 )
             widget["history"].set(
                 translate("recommendation_history", self.language, value=history_text)

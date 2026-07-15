@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import queue
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from app.analytics_ui import TrendView
@@ -90,13 +90,17 @@ class HistoryIntegrationContractTests(unittest.TestCase):
         )
         quota_samples = (
             SimpleNamespace(
-                sampled_at=now,
+                five_hour_observed_at=now,
+                five_hour_last_seen_at=now,
                 five_hour_available=True,
                 five_hour_stale=True,
             ),
         )
         view = TrendView(
             7, "available", token_samples, now, quota_samples=quota_samples,
+            five_hour_last_seen_at=now,
+            five_hour_available=True,
+            five_hour_stale=True,
         )
 
         self.assertEqual(
@@ -104,6 +108,111 @@ class HistoryIntegrationContractTests(unittest.TestCase):
         )
         self.assertEqual(
             Dashboard._trend_metric_quality(view, "five_hour", 1), "stale",
+        )
+
+    def test_quota_last_seen_controls_freshness_without_moving_value_time(self):
+        now = datetime.now(timezone.utc)
+        value_time = now - timedelta(minutes=10)
+        sample = SimpleNamespace(
+            five_hour_observed_at=value_time,
+            five_hour_last_seen_at=now,
+            five_hour_remaining_percent=42.0,
+            five_hour_available=True,
+            five_hour_stale=False,
+        )
+        fresh = TrendView(
+            7, "stale", (), None,
+            quota_samples=(sample,),
+            five_hour_last_seen_at=now,
+            five_hour_available=True,
+            five_hour_stale=False,
+        )
+        old = TrendView(
+            7, "available", (), None,
+            quota_samples=(sample,),
+            five_hour_last_seen_at=now - timedelta(minutes=4),
+            five_hour_available=True,
+            five_hour_stale=False,
+        )
+
+        self.assertEqual(
+            Dashboard._trend_metric_quality(fresh, "five_hour", 1), "insufficient",
+        )
+        self.assertEqual(
+            Dashboard._trend_metric_quality(old, "five_hour", 1), "stale",
+        )
+
+    def test_each_quota_window_has_independent_quality(self):
+        now = datetime.now(timezone.utc)
+        sample = SimpleNamespace(
+            five_hour_observed_at=now,
+            five_hour_remaining_percent=50.0,
+            five_hour_available=True,
+            five_hour_stale=False,
+            weekly_observed_at=now,
+            weekly_remaining_percent=40.0,
+            weekly_available=True,
+            weekly_stale=True,
+        )
+        view = TrendView(
+            7, "available", (), None,
+            quota_samples=(sample,),
+            five_hour_last_seen_at=now,
+            weekly_last_seen_at=now,
+            five_hour_available=True,
+            five_hour_stale=False,
+            weekly_available=True,
+            weekly_stale=True,
+        )
+
+        self.assertEqual(
+            Dashboard._trend_metric_quality(view, "five_hour", 1), "insufficient",
+        )
+        self.assertEqual(
+            Dashboard._trend_metric_quality(view, "weekly", 1), "stale",
+        )
+
+    def test_chart_points_use_metric_source_times(self):
+        token_time = datetime(2026, 7, 15, 8, tzinfo=timezone.utc)
+        quota_time = token_time + timedelta(minutes=1)
+        capture_time = token_time + timedelta(hours=1)
+        token = SimpleNamespace(
+            source_observed_at=token_time,
+            sampled_at=capture_time,
+            source_available=True,
+            total_tokens=100,
+            source_type="dashboard",
+            token_stale=False,
+        )
+        quota = SimpleNamespace(
+            five_hour_observed_at=quota_time,
+            sampled_at=capture_time,
+            five_hour_available=True,
+            five_hour_stale=False,
+            five_hour_remaining_percent=50.0,
+            five_hour_source="codex_app_server",
+        )
+        view = TrendView(7, "available", (token,), token_time, quota_samples=(quota,))
+        dashboard = object.__new__(Dashboard)
+
+        self.assertEqual(dashboard._trend_points(view, "total")[0].observed_at, token_time)
+        self.assertEqual(
+            dashboard._trend_points(view, "five_hour")[0].observed_at, quota_time,
+        )
+
+    def test_all_metrics_have_explicit_thread_or_global_scope(self):
+        for metric in (
+            "input", "output", "total", "cached", "cache_reuse", "reasoning",
+            "session_total", "turn_count",
+        ):
+            self.assertEqual(Dashboard._trend_scope_key(metric), "trend_scope_thread")
+        for metric in ("five_hour", "weekly"):
+            self.assertEqual(Dashboard._trend_scope_key(metric), "trend_scope_global")
+        self.assertEqual(
+            Dashboard._history_scope_key("global_quota_history"), "trend_scope_global",
+        )
+        self.assertEqual(
+            Dashboard._history_scope_key("token_monitor_history"), "trend_scope_thread",
         )
 
     def test_smoke_initializes_the_history_database(self):

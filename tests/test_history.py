@@ -89,11 +89,15 @@ def observation(
         session_total_tokens=session_total,
         turn_count=turns,
         quota_source_status="normal",
+        five_hour_observed_at=quota_observed_at,
+        five_hour_last_seen_at=quota_observed_at,
         five_hour_used_percent=100.0 - five_remaining,
         five_hour_remaining_percent=five_remaining,
         five_hour_reset_at=NOW + timedelta(hours=4),
         five_hour_source="codex_app_server",
         five_hour_available=True,
+        weekly_observed_at=quota_observed_at,
+        weekly_last_seen_at=quota_observed_at,
         weekly_used_percent=100.0 - weekly_remaining,
         weekly_remaining_percent=weekly_remaining,
         weekly_reset_at=NOW + timedelta(days=5),
@@ -104,7 +108,7 @@ def observation(
 
 class HistorySchemaTests(unittest.TestCase):
     def test_constants_match_phase_contract(self):
-        self.assertEqual((SCHEMA_VERSION, RETENTION_DAYS, MAX_HISTORY_ROWS), (1, 90, 200_000))
+        self.assertEqual((SCHEMA_VERSION, RETENTION_DAYS, MAX_HISTORY_ROWS), (2, 90, 200_000))
 
     def test_new_database_initializes_versioned_schema_and_unique_index(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -112,7 +116,7 @@ class HistorySchemaTests(unittest.TestCase):
             store = UsageHistoryStore(path, clock=lambda: NOW)
             self.assertTrue(store.initialize())
             with closing(sqlite3.connect(path)) as connection, connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
                 columns = {
                     row[1] for row in connection.execute(
                         "PRAGMA table_info(usage_history_samples)"
@@ -124,6 +128,8 @@ class HistorySchemaTests(unittest.TestCase):
                     )
                 }
             self.assertIn("sample_fingerprint", columns)
+            self.assertIn("five_hour_last_seen_at_utc", columns)
+            self.assertIn("weekly_last_seen_at_utc", columns)
             self.assertIn("ux_usage_history_samples_fingerprint", indexes)
 
     def test_existing_database_and_unrelated_data_are_preserved(self):
@@ -157,6 +163,75 @@ class HistorySchemaTests(unittest.TestCase):
                 }
             self.assertIn("weekly_remaining_percent", columns)
             self.assertIn("sample_fingerprint", columns)
+
+    def test_v1_database_adds_window_times_and_preserves_existing_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            observed = NOW - timedelta(minutes=2)
+            observed_text = observed.isoformat(timespec="microseconds").replace(
+                "+00:00", "Z",
+            )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE usage_history_samples("
+                    "id INTEGER PRIMARY KEY, sampled_at_utc TEXT, "
+                    "quota_observed_at_utc TEXT, five_hour_available INTEGER, "
+                    "five_hour_stale INTEGER, weekly_available INTEGER, "
+                    "weekly_stale INTEGER, total_tokens INTEGER)"
+                )
+                connection.execute(
+                    "INSERT INTO usage_history_samples VALUES("
+                    "1, ?, ?, 1, 0, 1, 0, 321)",
+                    (observed_text, observed_text),
+                )
+                connection.execute("PRAGMA user_version=1")
+
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            self.assertTrue(store.initialize())
+
+            with closing(sqlite3.connect(path)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                row = connection.execute(
+                    "SELECT total_tokens, five_hour_observed_at_utc, "
+                    "five_hour_last_seen_at_utc, weekly_observed_at_utc, "
+                    "weekly_last_seen_at_utc FROM usage_history_samples WHERE id=1"
+                ).fetchone()
+            self.assertEqual(version, 2)
+            self.assertEqual(row, (321, observed_text, observed_text, observed_text, observed_text))
+
+    def test_v1_stale_quota_row_is_preserved_without_invented_window_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            observed_text = NOW.isoformat(timespec="microseconds").replace(
+                "+00:00", "Z",
+            )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE usage_history_samples("
+                    "id INTEGER PRIMARY KEY, sampled_at_utc TEXT, "
+                    "quota_observed_at_utc TEXT, five_hour_available INTEGER, "
+                    "five_hour_stale INTEGER, five_hour_remaining_percent REAL, "
+                    "weekly_available INTEGER, weekly_stale INTEGER)"
+                )
+                connection.execute(
+                    "INSERT INTO usage_history_samples VALUES("
+                    "1, ?, ?, 1, 1, 50.0, 0, 0)",
+                    (observed_text, observed_text),
+                )
+                connection.execute("PRAGMA user_version=1")
+
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            result = store.query(7, "thread-1", now=NOW)
+
+            with closing(sqlite3.connect(path)) as connection:
+                row = connection.execute(
+                    "SELECT five_hour_observed_at_utc, "
+                    "five_hour_remaining_percent FROM usage_history_samples WHERE id=1"
+                ).fetchone()
+            self.assertEqual(row, (None, 50.0))
+            self.assertEqual(result.quota_samples, ())
 
     def test_partial_schema_rows_survive_migration_and_first_retention_pass(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -216,12 +291,8 @@ class HistorySchemaTests(unittest.TestCase):
             ]
 
             self.assertEqual(values, [300.0])
-            self.assertEqual(
-                [sample.total_tokens for sample in result.samples], [100, 200, 300],
-            )
-            self.assertEqual(
-                sum(sample.legacy_unknown_time for sample in result.samples), 2,
-            )
+            self.assertEqual([sample.total_tokens for sample in result.samples], [300])
+            self.assertFalse(any(sample.legacy_unknown_time for sample in result.samples))
 
     def test_initialize_enables_wal_for_nonblocking_readers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -364,7 +435,7 @@ class HistoryStoreTests(unittest.TestCase):
         )
         self.assertEqual(first.sample_fingerprint, later.sample_fingerprint)
 
-    def test_token_and_quota_changes_each_create_a_new_sample(self):
+    def test_token_and_quota_changes_create_independent_logical_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)
             first = observation()
@@ -378,13 +449,197 @@ class HistoryStoreTests(unittest.TestCase):
             quota_change = replace(
                 token_change,
                 sampled_at=NOW + timedelta(seconds=2),
+                quota_observed_at=NOW + timedelta(seconds=2),
+                five_hour_observed_at=NOW + timedelta(seconds=2),
+                five_hour_last_seen_at=NOW + timedelta(seconds=2),
                 five_hour_used_percent=25.0,
                 five_hour_remaining_percent=75.0,
             )
             self.assertTrue(store.record(first))
             self.assertTrue(store.record(token_change))
             self.assertTrue(store.record(quota_change))
-            self.assertEqual(store.query(7, "thread-1", now=NOW).sample_count, 3)
+            result = store.query(7, "thread-1", now=NOW + timedelta(seconds=2))
+            view = trend_view_from_query(result)
+            self.assertEqual(result.sample_count, 2)
+            self.assertEqual(len(metric_samples(view, "total")), 2)
+            self.assertEqual(result.end_at, NOW)
+            self.assertEqual(len(metric_samples(view, "five_hour")), 2)
+
+    def test_quota_only_change_does_not_refresh_stale_token_or_end_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            token_time = NOW - timedelta(minutes=10)
+            first = observation(
+                source_observed_at=token_time,
+                token_stale=True,
+                quota_observed_at=NOW - timedelta(minutes=1),
+            )
+            quota_change = replace(
+                first,
+                sampled_at=NOW,
+                quota_observed_at=NOW,
+                five_hour_observed_at=NOW,
+                five_hour_last_seen_at=NOW,
+                five_hour_used_percent=25.0,
+                five_hour_remaining_percent=75.0,
+            )
+            self.assertTrue(store.record(first))
+            self.assertTrue(store.record(quota_change))
+
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(result.sample_count, 1)
+            self.assertEqual(result.end_at, token_time)
+            self.assertEqual(result.status, "stale")
+            self.assertEqual(len(metric_samples(trend_view_from_query(result), "total")), 1)
+
+    def test_same_quota_success_updates_last_seen_without_new_row_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            first_seen = NOW - timedelta(minutes=10)
+            later_seen = NOW
+            first = observation(
+                quota_observed_at=first_seen,
+            )
+            first = replace(
+                first,
+                five_hour_observed_at=first_seen,
+                five_hour_last_seen_at=first_seen,
+                weekly_observed_at=first_seen,
+                weekly_last_seen_at=first_seen,
+            )
+            repeated = replace(
+                first,
+                sampled_at=later_seen,
+                quota_observed_at=later_seen,
+                five_hour_observed_at=later_seen,
+                five_hour_last_seen_at=later_seen,
+                weekly_observed_at=later_seen,
+                weekly_last_seen_at=later_seen,
+            )
+            self.assertTrue(store.record(first))
+            self.assertFalse(store.record(repeated))
+
+            result = store.query(7, "thread-1", now=later_seen)
+            restarted = self.make_store(directory).query(7, "thread-1", now=later_seen)
+            with closing(sqlite3.connect(store.path)) as connection:
+                row_count = connection.execute(
+                    "SELECT COUNT(*) FROM usage_history_samples"
+                ).fetchone()[0]
+
+            self.assertEqual(row_count, 1)
+            self.assertEqual(len(metric_samples(trend_view_from_query(result), "five_hour")), 1)
+            self.assertEqual(result.five_hour_last_seen_at, later_seen)
+            self.assertEqual(restarted.five_hour_last_seen_at, later_seen)
+            self.assertEqual(result.end_at, first.source_observed_at)
+
+    def test_quota_windows_project_independently_when_reliable_times_cross(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            middle = observation(
+                sampled_at=NOW - timedelta(minutes=5),
+                source_observed_at=NOW - timedelta(minutes=5),
+                quota_observed_at=NOW - timedelta(minutes=5),
+                five_remaining=60.0,
+                weekly_remaining=80.0,
+            )
+            middle = replace(
+                middle,
+                five_hour_observed_at=NOW - timedelta(minutes=5),
+                five_hour_last_seen_at=NOW - timedelta(minutes=5),
+                weekly_observed_at=NOW - timedelta(minutes=5),
+                weekly_last_seen_at=NOW - timedelta(minutes=5),
+            )
+            crossed = observation(
+                sampled_at=NOW,
+                source_observed_at=NOW,
+                quota_observed_at=NOW,
+                five_remaining=50.0,
+                weekly_remaining=90.0,
+            )
+            crossed = replace(
+                crossed,
+                five_hour_observed_at=NOW,
+                five_hour_last_seen_at=NOW,
+                weekly_observed_at=NOW - timedelta(minutes=10),
+                weekly_last_seen_at=NOW - timedelta(minutes=10),
+            )
+            self.assertTrue(store.record(middle))
+            self.assertTrue(store.record(crossed))
+
+            result = store.query(7, "thread-1", now=NOW)
+            view = trend_view_from_query(result)
+            five = metric_samples(view, "five_hour")
+            weekly = metric_samples(view, "weekly")
+
+            self.assertEqual(
+                [(sample.five_hour_observed_at, value) for sample, value in five],
+                [
+                    (NOW - timedelta(minutes=5), 60.0),
+                    (NOW, 50.0),
+                ],
+            )
+            self.assertEqual(
+                [(sample.weekly_observed_at, value) for sample, value in weekly],
+                [
+                    (NOW - timedelta(minutes=10), 90.0),
+                    (NOW - timedelta(minutes=5), 80.0),
+                ],
+            )
+            self.assertEqual(result.five_hour_last_seen_at, NOW)
+            self.assertEqual(
+                result.weekly_last_seen_at, NOW - timedelta(minutes=5),
+            )
+
+    def test_mini_and_dashboard_same_token_observation_project_once_with_full_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            dashboard = observation(source_observed_at=NOW - timedelta(seconds=20))
+            mini = replace(
+                dashboard,
+                sampled_at=NOW + timedelta(seconds=1),
+                source_type="mini",
+                input_tokens=None,
+                output_tokens=None,
+                cached_tokens=None,
+                reasoning_tokens=None,
+            )
+            self.assertTrue(store.record(mini))
+            self.assertTrue(store.record(dashboard))
+
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(result.sample_count, 1)
+            self.assertEqual(result.samples[0].source_type, "dashboard")
+            self.assertEqual(
+                (
+                    result.samples[0].input_tokens,
+                    result.samples[0].output_tokens,
+                    result.samples[0].cached_tokens,
+                    result.samples[0].reasoning_tokens,
+                ),
+                (100, 20, 40, 5),
+            )
+
+    def test_different_reliable_token_times_remain_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            first = observation(source_observed_at=NOW - timedelta(seconds=20))
+            second = replace(
+                first,
+                sampled_at=NOW + timedelta(seconds=1),
+                source_observed_at=NOW - timedelta(seconds=10),
+            )
+            store.record(first)
+            store.record(second)
+
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(result.sample_count, 2)
+            self.assertEqual(
+                [item.source_observed_at for item in result.samples],
+                [NOW - timedelta(seconds=20), NOW - timedelta(seconds=10)],
+            )
 
     def test_thread_filter_does_not_mix_tokens_and_quota_is_global(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -399,8 +654,33 @@ class HistoryStoreTests(unittest.TestCase):
             ))
             result = store.query(7, "thread-1", now=NOW)
             self.assertEqual({item.thread_safe_id for item in result.samples}, {"thread-1"})
+            self.assertEqual(result.sample_count, 1)
+            self.assertEqual(result.end_at, NOW - timedelta(seconds=10))
             self.assertEqual(len(result.quota_samples), 2)
             self.assertTrue(all(item.thread_safe_id is None for item in result.quota_samples))
+
+    def test_token_range_uses_source_time_not_local_sample_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            locally_new_source_old = observation(
+                sampled_at=NOW,
+                source_observed_at=NOW - timedelta(days=8),
+                total=111,
+            )
+            locally_old_source_new = observation(
+                sampled_at=NOW - timedelta(days=8),
+                source_observed_at=NOW - timedelta(days=1),
+                total=222,
+            )
+            self.assertTrue(store.record(locally_new_source_old))
+            self.assertTrue(store.record(locally_old_source_new))
+
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(result.sample_count, 1)
+            self.assertEqual(result.samples[0].total_tokens, 222)
+            self.assertEqual(result.start_at, NOW - timedelta(days=1))
+            self.assertEqual(result.end_at, NOW - timedelta(days=1))
 
     def test_range_boundaries_are_utc_and_supported_ranges_query(self):
         with tempfile.TemporaryDirectory() as directory:

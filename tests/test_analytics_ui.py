@@ -5,10 +5,14 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from app.analytics_ui import (
+    SafeTrendSample,
     TREND_QUALITY_STATES,
     TREND_STALE_AFTER,
+    TrendView,
     build_trend_view,
     classify_trend_quality,
+    metric_observed_at,
+    metric_samples,
     summarize_metric,
     trend_view_from_query,
 )
@@ -117,7 +121,8 @@ class TrendQualityTests(unittest.TestCase):
     def test_local_query_projection_and_summary_keep_thread_and_global_scope(self):
         thread_samples = tuple(
             SimpleNamespace(
-                sampled_at=NOW - timedelta(minutes=2 - index),
+                sampled_at=NOW + timedelta(hours=1),
+                source_observed_at=NOW - timedelta(minutes=2 - index),
                 total_tokens=value,
                 cache_reuse_ratio=0.25,
             )
@@ -125,9 +130,19 @@ class TrendQualityTests(unittest.TestCase):
         )
         quota_samples = (
             SimpleNamespace(
-                sampled_at=NOW,
+                sampled_at=NOW + timedelta(hours=1),
+                five_hour_observed_at=NOW - timedelta(minutes=1),
+                five_hour_available=True,
+                five_hour_used_percent=57.5,
                 five_hour_remaining_percent=42.5,
+                five_hour_reset_at=NOW + timedelta(hours=2),
+                five_hour_source="codex_app_server",
+                weekly_observed_at=NOW - timedelta(minutes=1),
+                weekly_available=True,
+                weekly_used_percent=25.0,
                 weekly_remaining_percent=75.0,
+                weekly_reset_at=NOW + timedelta(days=2),
+                weekly_source="codex_app_server",
             ),
         )
         result = SimpleNamespace(
@@ -136,8 +151,14 @@ class TrendQualityTests(unittest.TestCase):
             samples=thread_samples,
             quota_samples=quota_samples,
             metrics_available=("total_tokens", "five_hour_remaining_percent"),
-            start_at=thread_samples[0].sampled_at,
-            end_at=thread_samples[-1].sampled_at,
+            start_at=thread_samples[0].source_observed_at,
+            end_at=thread_samples[-1].source_observed_at,
+            token_start_at=thread_samples[0].source_observed_at,
+            token_end_at=thread_samples[-1].source_observed_at,
+            quota_start_at=quota_samples[0].five_hour_observed_at,
+            quota_end_at=quota_samples[0].five_hour_observed_at,
+            five_hour_last_seen_at=NOW,
+            weekly_last_seen_at=NOW - timedelta(seconds=5),
             error_code=None,
         )
 
@@ -150,6 +171,105 @@ class TrendQualityTests(unittest.TestCase):
         self.assertEqual(total.scope, "thread")
         self.assertEqual((quota.current, quota.scope), (42.5, "global"))
         self.assertEqual((reuse.current, reuse.derived), (25.0, True))
+        self.assertEqual((total.start_at, total.end_at), (
+            thread_samples[0].source_observed_at,
+            thread_samples[-1].source_observed_at,
+        ))
+        self.assertEqual(quota.end_at, quota_samples[0].five_hour_observed_at)
+        self.assertEqual((view.token_start_at, view.token_end_at), (
+            result.token_start_at, result.token_end_at,
+        ))
+        self.assertEqual((view.quota_start_at, view.quota_end_at), (
+            result.quota_start_at, result.quota_end_at,
+        ))
+        self.assertEqual(view.five_hour_last_seen_at, NOW)
+        self.assertEqual(view.weekly_last_seen_at, NOW - timedelta(seconds=5))
+
+    def test_history_token_metrics_never_fall_back_to_sampled_at(self):
+        reliable = NOW - timedelta(minutes=5)
+        sample = SimpleNamespace(
+            sampled_at=NOW,
+            source_observed_at=reliable,
+            source_available=True,
+            total_tokens=100,
+        )
+        unknown = SimpleNamespace(
+            sampled_at=NOW,
+            source_observed_at=None,
+            observed_at=NOW,
+            source_available=True,
+            total_tokens=200,
+        )
+        view = TrendView(7, "insufficient", (sample, unknown), reliable)
+
+        summary = summarize_metric(view, "total")
+
+        self.assertEqual(summary.sample_count, 1)
+        self.assertEqual((summary.start_at, summary.end_at), (reliable, reliable))
+        self.assertEqual(metric_observed_at(unknown, "total"), None)
+
+    def test_safe_snapshot_sample_uses_observed_at(self):
+        sample = SafeTrendSample(NOW, 80, 20, 100, 10, 5, 200, 3, 12.5)
+        view = TrendView(7, "insufficient", (sample,), NOW)
+
+        self.assertEqual(summarize_metric(view, "total").end_at, NOW)
+
+    def test_quota_metrics_deduplicate_each_window_independently(self):
+        five_reset = NOW + timedelta(hours=4)
+        week_reset = NOW + timedelta(days=4)
+
+        def quota_sample(minutes: int, five: float, weekly: float):
+            observed = NOW + timedelta(minutes=minutes)
+            return SimpleNamespace(
+                sampled_at=observed + timedelta(hours=2),
+                five_hour_observed_at=observed,
+                five_hour_last_seen_at=observed,
+                five_hour_available=True,
+                five_hour_used_percent=100.0 - five,
+                five_hour_remaining_percent=five,
+                five_hour_reset_at=five_reset,
+                five_hour_source="codex_app_server",
+                weekly_observed_at=observed,
+                weekly_last_seen_at=observed,
+                weekly_available=True,
+                weekly_used_percent=100.0 - weekly,
+                weekly_remaining_percent=weekly,
+                weekly_reset_at=week_reset,
+                weekly_source="codex_app_server",
+            )
+
+        first = quota_sample(0, 80.0, 90.0)
+        weekly_only_change = quota_sample(1, 80.0, 85.0)
+        five_only_change = quota_sample(2, 70.0, 85.0)
+        view = TrendView(
+            7, "available", (), None,
+            quota_samples=(first, weekly_only_change, five_only_change),
+        )
+
+        five = metric_samples(view, "five_hour")
+        weekly = metric_samples(view, "weekly")
+
+        self.assertEqual([value for _, value in five], [80.0, 70.0])
+        self.assertEqual([value for _, value in weekly], [90.0, 85.0])
+        self.assertIs(five[0][0], weekly_only_change)
+        self.assertIs(weekly[-1][0], five_only_change)
+
+    def test_quota_summary_uses_window_observed_at_not_sampled_at(self):
+        observed = NOW - timedelta(minutes=10)
+        sample = SimpleNamespace(
+            sampled_at=NOW,
+            five_hour_observed_at=observed,
+            five_hour_available=True,
+            five_hour_used_percent=25.0,
+            five_hour_remaining_percent=75.0,
+            five_hour_reset_at=NOW + timedelta(hours=3),
+            five_hour_source="codex_app_server",
+        )
+        view = TrendView(7, "insufficient", (), None, quota_samples=(sample,))
+
+        summary = summarize_metric(view, "five_hour")
+
+        self.assertEqual((summary.start_at, summary.end_at), (observed, observed))
 
 
 if __name__ == "__main__":

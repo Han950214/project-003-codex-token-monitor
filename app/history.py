@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from app.quota import CodexQuotaSnapshot, QuotaWindow
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RETENTION_DAYS = 90
 MAX_HISTORY_ROWS = 200_000
 HISTORY_STALE_AFTER = timedelta(minutes=3)
@@ -58,6 +58,8 @@ class HistoryObservation:
     session_total_tokens: int | None = None
     turn_count: int | None = None
     quota_source_status: str = "unavailable"
+    five_hour_observed_at: datetime | None = None
+    five_hour_last_seen_at: datetime | None = None
     five_hour_used_percent: float | None = None
     five_hour_remaining_percent: float | None = None
     five_hour_reset_at: datetime | None = None
@@ -65,6 +67,8 @@ class HistoryObservation:
     five_hour_available: bool = False
     five_hour_stale: bool = False
     five_hour_error_code: str | None = None
+    weekly_observed_at: datetime | None = None
+    weekly_last_seen_at: datetime | None = None
     weekly_used_percent: float | None = None
     weekly_remaining_percent: float | None = None
     weekly_reset_at: datetime | None = None
@@ -78,7 +82,9 @@ class HistoryObservation:
     def __post_init__(self) -> None:
         for name in (
             "sampled_at", "source_observed_at", "quota_observed_at",
-            "five_hour_reset_at", "weekly_reset_at",
+            "five_hour_observed_at", "five_hour_last_seen_at",
+            "five_hour_reset_at", "weekly_observed_at",
+            "weekly_last_seen_at", "weekly_reset_at",
         ):
             object.__setattr__(self, name, _aware_utc(getattr(self, name), name))
         object.__setattr__(self, "thread_safe_id", _safe_identifier(self.thread_safe_id))
@@ -113,6 +119,12 @@ class HistoryObservation:
             "weekly_used_percent", "weekly_remaining_percent",
         ):
             _validate_percent(getattr(self, name), name)
+        for prefix in ("five_hour", "weekly"):
+            if (
+                not getattr(self, f"{prefix}_available")
+                or getattr(self, f"{prefix}_stale")
+            ):
+                object.__setattr__(self, f"{prefix}_last_seen_at", None)
 
     @classmethod
     def from_dashboard(
@@ -276,6 +288,17 @@ class HistoryQueryResult:
     stale: bool = False
     metrics_available: tuple[str, ...] = ()
     error_code: str | None = None
+    queried_at: datetime | None = None
+    token_start_at: datetime | None = None
+    token_end_at: datetime | None = None
+    quota_start_at: datetime | None = None
+    quota_end_at: datetime | None = None
+    five_hour_last_seen_at: datetime | None = None
+    weekly_last_seen_at: datetime | None = None
+    five_hour_available: bool | None = None
+    five_hour_stale: bool = False
+    weekly_available: bool | None = None
+    weekly_stale: bool = False
 
 
 _COLUMN_DEFINITIONS = {
@@ -298,6 +321,8 @@ _COLUMN_DEFINITIONS = {
     "session_total_tokens": "INTEGER",
     "turn_count": "INTEGER",
     "quota_source_status": "TEXT NOT NULL DEFAULT 'unavailable'",
+    "five_hour_observed_at_utc": "TEXT",
+    "five_hour_last_seen_at_utc": "TEXT",
     "five_hour_used_percent": "REAL",
     "five_hour_remaining_percent": "REAL",
     "five_hour_reset_at_utc": "TEXT",
@@ -305,6 +330,8 @@ _COLUMN_DEFINITIONS = {
     "five_hour_available": "INTEGER NOT NULL DEFAULT 0",
     "five_hour_stale": "INTEGER NOT NULL DEFAULT 0",
     "five_hour_error_code": "TEXT",
+    "weekly_observed_at_utc": "TEXT",
+    "weekly_last_seen_at_utc": "TEXT",
     "weekly_used_percent": "REAL",
     "weekly_remaining_percent": "REAL",
     "weekly_reset_at_utc": "TEXT",
@@ -372,6 +399,8 @@ class UsageHistoryStore:
                         values,
                     )
                     inserted = cursor.rowcount == 1
+                    if not inserted:
+                        self._refresh_duplicate_quota_last_seen(connection, observation)
                     if inserted:
                         self._prune_capacity(connection)
                         self._prune_if_due(connection, self.clock(), in_transaction=True)
@@ -397,31 +426,31 @@ class UsageHistoryStore:
             return HistoryQueryResult(
                 range_days, "unavailable", error_code=self.last_error,
             )
-        cutoff = _iso_utc(now - timedelta(days=range_days))
+        cutoff_at = now - timedelta(days=range_days)
+        cutoff = _iso_utc(cutoff_at)
         try:
             with closing(self._connect()) as connection:
                 if thread_safe_id is None:
                     rows = connection.execute(
-                        f"SELECT * FROM {_TABLE} WHERE sampled_at_utc >= ? "
-                        "ORDER BY sampled_at_utc, id",
+                        f"SELECT * FROM {_TABLE} WHERE source_observed_at_utc >= ? "
+                        "ORDER BY source_observed_at_utc, sampled_at_utc, id",
                         (cutoff,),
                     ).fetchall()
                 else:
                     safe_thread = _safe_identifier(thread_safe_id)
                     rows = connection.execute(
-                        f"SELECT * FROM {_TABLE} WHERE sampled_at_utc >= ? "
-                        "AND thread_safe_id IS ? ORDER BY sampled_at_utc, id",
+                        f"SELECT * FROM {_TABLE} WHERE source_observed_at_utc >= ? "
+                        "AND thread_safe_id IS ? "
+                        "ORDER BY source_observed_at_utc, sampled_at_utc, id",
                         (cutoff, safe_thread),
                     ).fetchall()
                 quota_rows = connection.execute(
-                    f"SELECT * FROM {_TABLE} WHERE sampled_at_utc >= ? "
-                    "ORDER BY sampled_at_utc, id",
-                    (cutoff,),
+                    f"SELECT * FROM {_TABLE} ORDER BY sampled_at_utc, id",
                 ).fetchall()
-            samples = tuple(_sample_from_row(row) for row in rows)
-            quota_samples = _global_quota_samples(quota_rows)
+            samples = _thread_token_samples(rows)
+            quota = _global_quota_projection(quota_rows, cutoff_at)
             self.last_error = None
-            return _query_result(range_days, samples, quota_samples, now)
+            return _query_result(range_days, samples, quota, now)
         except (OSError, sqlite3.Error, ValueError) as exc:
             self.last_error = _storage_error_code(exc)
             return HistoryQueryResult(
@@ -451,6 +480,40 @@ class UsageHistoryStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=2000")
         return connection
+
+    @staticmethod
+    def _refresh_duplicate_quota_last_seen(
+        connection: sqlite3.Connection,
+        observation: HistoryObservation,
+    ) -> None:
+        updates: dict[str, str] = {}
+        parameters: list[object] = []
+        for prefix in ("five_hour", "weekly"):
+            last_seen = getattr(observation, f"{prefix}_last_seen_at")
+            if last_seen is None:
+                continue
+            column = f"{prefix}_last_seen_at_utc"
+            updates[column] = (
+                f"CASE WHEN {column} IS NULL OR {column} < ? THEN ? ELSE {column} END"
+            )
+            value = _iso_utc(last_seen)
+            parameters.extend((value, value))
+        if not updates:
+            return
+        if observation.quota_observed_at is not None:
+            updates["quota_observed_at_utc"] = (
+                "CASE WHEN quota_observed_at_utc IS NULL OR quota_observed_at_utc < ? "
+                "THEN ? ELSE quota_observed_at_utc END"
+            )
+            value = _iso_utc(observation.quota_observed_at)
+            parameters.extend((value, value))
+        parameters.append(observation.sample_fingerprint)
+        connection.execute(
+            f"UPDATE {_TABLE} SET "
+            + ", ".join(f"{column} = {expression}" for column, expression in updates.items())
+            + " WHERE sample_fingerprint = ?",
+            tuple(parameters),
+        )
 
     def _migrate(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
@@ -499,6 +562,21 @@ class UsageHistoryStore:
                     "WHERE sampled_at_utc IS NULL OR sampled_at_utc = ''",
                     (migration_time,),
                 )
+            for prefix in ("five_hour", "weekly"):
+                observed_column = f"{prefix}_observed_at_utc"
+                last_seen_column = f"{prefix}_last_seen_at_utc"
+                connection.execute(
+                    f"UPDATE {_TABLE} SET {observed_column} = quota_observed_at_utc "
+                    f"WHERE {observed_column} IS NULL "
+                    f"AND {prefix}_available = 1 AND {prefix}_stale = 0 "
+                    "AND quota_observed_at_utc IS NOT NULL"
+                )
+                connection.execute(
+                    f"UPDATE {_TABLE} SET {last_seen_column} = {observed_column} "
+                    f"WHERE {last_seen_column} IS NULL "
+                    f"AND {prefix}_available = 1 AND {prefix}_stale = 0 "
+                    f"AND {observed_column} IS NOT NULL"
+                )
             connection.execute(
                 f"UPDATE {_TABLE} SET sample_fingerprint = "
                 "'legacy-' || printf('%016x', id) "
@@ -515,6 +593,10 @@ class UsageHistoryStore:
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_thread_sampled_at "
                 f"ON {_TABLE}(thread_safe_id, sampled_at_utc, id)"
+            )
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_thread_source_observed "
+                f"ON {_TABLE}(thread_safe_id, source_observed_at_utc, id)"
             )
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             connection.commit()
@@ -586,6 +668,10 @@ def _quota_values(quota: "CodexQuotaSnapshot") -> dict[str, object]:
 
 def _window_values(prefix: str, window: "QuotaWindow") -> dict[str, object]:
     return {
+        f"{prefix}_observed_at": window.observed_at,
+        f"{prefix}_last_seen_at": (
+            window.observed_at if window.available and not window.stale else None
+        ),
         f"{prefix}_used_percent": window.used_percent,
         f"{prefix}_remaining_percent": window.remaining_percent,
         f"{prefix}_reset_at": window.reset_at,
@@ -617,6 +703,8 @@ def _observation_row(observation: HistoryObservation) -> tuple[object, ...]:
         "session_total_tokens": observation.session_total_tokens,
         "turn_count": observation.turn_count,
         "quota_source_status": observation.quota_source_status,
+        "five_hour_observed_at_utc": _iso_utc(observation.five_hour_observed_at),
+        "five_hour_last_seen_at_utc": _iso_utc(observation.five_hour_last_seen_at),
         "five_hour_used_percent": observation.five_hour_used_percent,
         "five_hour_remaining_percent": observation.five_hour_remaining_percent,
         "five_hour_reset_at_utc": _iso_utc(observation.five_hour_reset_at),
@@ -624,6 +712,8 @@ def _observation_row(observation: HistoryObservation) -> tuple[object, ...]:
         "five_hour_available": int(observation.five_hour_available),
         "five_hour_stale": int(observation.five_hour_stale),
         "five_hour_error_code": observation.five_hour_error_code,
+        "weekly_observed_at_utc": _iso_utc(observation.weekly_observed_at),
+        "weekly_last_seen_at_utc": _iso_utc(observation.weekly_last_seen_at),
         "weekly_used_percent": observation.weekly_used_percent,
         "weekly_remaining_percent": observation.weekly_remaining_percent,
         "weekly_reset_at_utc": _iso_utc(observation.weekly_reset_at),
@@ -658,6 +748,8 @@ def _sample_from_row(row: sqlite3.Row) -> HistorySample:
         session_total_tokens=row["session_total_tokens"],
         turn_count=row["turn_count"],
         quota_source_status=row["quota_source_status"],
+        five_hour_observed_at=_parse_utc(row["five_hour_observed_at_utc"]),
+        five_hour_last_seen_at=_parse_utc(row["five_hour_last_seen_at_utc"]),
         five_hour_used_percent=row["five_hour_used_percent"],
         five_hour_remaining_percent=row["five_hour_remaining_percent"],
         five_hour_reset_at=_parse_utc(row["five_hour_reset_at_utc"]),
@@ -665,6 +757,8 @@ def _sample_from_row(row: sqlite3.Row) -> HistorySample:
         five_hour_available=bool(row["five_hour_available"]),
         five_hour_stale=bool(row["five_hour_stale"]),
         five_hour_error_code=row["five_hour_error_code"],
+        weekly_observed_at=_parse_utc(row["weekly_observed_at_utc"]),
+        weekly_last_seen_at=_parse_utc(row["weekly_last_seen_at_utc"]),
         weekly_used_percent=row["weekly_used_percent"],
         weekly_remaining_percent=row["weekly_remaining_percent"],
         weekly_reset_at=_parse_utc(row["weekly_reset_at_utc"]),
@@ -680,52 +774,358 @@ def _sample_from_row(row: sqlite3.Row) -> HistorySample:
     )
 
 
-def _global_quota_samples(rows: list[sqlite3.Row]) -> tuple[HistorySample, ...]:
-    result: list[HistorySample] = []
-    previous: tuple[object, ...] | None = None
+_TOKEN_FIELDS = (
+    "input_tokens", "output_tokens", "total_tokens", "cached_tokens",
+    "reasoning_tokens", "session_total_tokens", "turn_count",
+)
+
+
+def _thread_token_samples(rows: list[sqlite3.Row]) -> tuple[HistorySample, ...]:
+    """Project combined rows into deterministic Thread Token observations."""
+
+    groups: dict[tuple[object, ...], list[HistorySample]] = {}
     for row in rows:
         sample = _sample_from_row(row)
-        identity = (
-            sample.quota_source_status,
-            sample.five_hour_used_percent, sample.five_hour_remaining_percent,
-            sample.five_hour_reset_at, sample.five_hour_source,
-            sample.five_hour_available, sample.five_hour_stale,
-            sample.five_hour_error_code,
-            sample.weekly_used_percent, sample.weekly_remaining_percent,
-            sample.weekly_reset_at, sample.weekly_source,
-            sample.weekly_available, sample.weekly_stale,
-            sample.weekly_error_code,
+        if sample.legacy_unknown_time or sample.source_observed_at is None:
+            continue
+        token = _token_only(sample)
+        key = (
+            token.thread_safe_id,
+            token.source_observed_at,
+            token.source_status,
+            token.source_available,
+            token.token_stale,
+            token.token_stale_reason,
         )
-        quota_only = replace(
-            sample,
-            source_observed_at=None,
-            thread_safe_id=None,
-            model_safe_id=None,
-            source_type="global_quota",
-            source_status="global_quota",
-            source_available=False,
-            token_stale=False,
-            token_stale_reason=None,
-            input_tokens=None,
-            output_tokens=None,
-            total_tokens=None,
-            cached_tokens=None,
-            reasoning_tokens=None,
-            session_total_tokens=None,
-            turn_count=None,
-        )
-        if identity == previous and result:
-            result[-1] = quota_only
+        candidates = groups.setdefault(key, [])
+        for index, existing in enumerate(candidates):
+            if _token_values_compatible(existing, token):
+                candidates[index] = _merge_token_samples(existing, token)
+                break
         else:
-            result.append(quota_only)
-            previous = identity
-    return tuple(result)
+            candidates.append(token)
+    projected = [sample for candidates in groups.values() for sample in candidates]
+    projected.sort(key=lambda sample: (
+        sample.source_observed_at,
+        sample.sampled_at,
+        sample.sample_id,
+    ))
+    return tuple(projected)
+
+
+def _token_only(sample: HistorySample) -> HistorySample:
+    return replace(
+        sample,
+        quota_observed_at=None,
+        quota_source_status="unavailable",
+        five_hour_observed_at=None,
+        five_hour_last_seen_at=None,
+        five_hour_used_percent=None,
+        five_hour_remaining_percent=None,
+        five_hour_reset_at=None,
+        five_hour_source="unknown",
+        five_hour_available=False,
+        five_hour_stale=False,
+        five_hour_error_code=None,
+        weekly_observed_at=None,
+        weekly_last_seen_at=None,
+        weekly_used_percent=None,
+        weekly_remaining_percent=None,
+        weekly_reset_at=None,
+        weekly_source="unknown",
+        weekly_available=False,
+        weekly_stale=False,
+        weekly_error_code=None,
+    )
+
+
+def _token_values_compatible(first: HistorySample, second: HistorySample) -> bool:
+    return all(
+        getattr(first, name) is None
+        or getattr(second, name) is None
+        or getattr(first, name) == getattr(second, name)
+        for name in _TOKEN_FIELDS
+    )
+
+
+def _merge_token_samples(first: HistorySample, second: HistorySample) -> HistorySample:
+    def rank(sample: HistorySample) -> tuple[int, int, int]:
+        source_rank = {"dashboard": 2, "mini": 1}.get(sample.source_type, 0)
+        completeness = sum(getattr(sample, name) is not None for name in _TOKEN_FIELDS)
+        return completeness, source_rank, -sample.sample_id
+
+    preferred, other = (first, second) if rank(first) >= rank(second) else (second, first)
+    values = {
+        name: (
+            getattr(preferred, name)
+            if getattr(preferred, name) is not None
+            else getattr(other, name)
+        )
+        for name in _TOKEN_FIELDS
+    }
+    if preferred.model_safe_id is None:
+        values["model_safe_id"] = other.model_safe_id
+    return replace(preferred, **values)
+
+
+@dataclass(frozen=True)
+class _QuotaProjection:
+    samples: tuple[HistorySample, ...] = ()
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    five_hour_last_seen_at: datetime | None = None
+    weekly_last_seen_at: datetime | None = None
+    five_hour_available: bool | None = None
+    five_hour_stale: bool = False
+    weekly_available: bool | None = None
+    weekly_stale: bool = False
+
+
+def _global_quota_projection(
+    rows: list[sqlite3.Row], cutoff: datetime,
+) -> _QuotaProjection:
+    raw = [
+        _quota_only(_sample_from_row(row))
+        for row in rows
+        if not bool(row["legacy_unknown_time"])
+    ]
+    raw.sort(key=lambda sample: (sample.sampled_at, sample.sample_id))
+    state_sample: dict[str, HistorySample | None] = {
+        "five_hour": None, "weekly": None,
+    }
+    state_observed: dict[str, datetime | None] = {
+        "five_hour": None, "weekly": None,
+    }
+    state_last_seen: dict[str, datetime | None] = {
+        "five_hour": None, "weekly": None,
+    }
+    window_events: dict[str, tuple[HistorySample, ...]] = {}
+    current_available: dict[str, bool | None] = {}
+    current_stale: dict[str, bool] = {}
+    for prefix in ("five_hour", "weekly"):
+        events, available, stale = _quota_window_events(raw, prefix)
+        window_events[prefix] = events
+        current_available[prefix] = available
+        current_stale[prefix] = stale
+        if events:
+            state_last_seen[prefix] = getattr(
+                events[-1], f"{prefix}_last_seen_at",
+            )
+
+    timeline: dict[datetime, dict[str, list[HistorySample]]] = {}
+    for prefix, events in window_events.items():
+        for event in events:
+            observed_at = getattr(event, f"{prefix}_observed_at")
+            if observed_at is not None:
+                timeline.setdefault(observed_at, {}).setdefault(prefix, []).append(event)
+
+    events: list[HistorySample] = []
+    for observed_at in sorted(timeline):
+        changes = timeline[observed_at]
+        rounds = max(len(items) for items in changes.values())
+        for index in range(rounds):
+            current_changes: list[HistorySample] = []
+            for prefix in ("five_hour", "weekly"):
+                prefix_events = changes.get(prefix, [])
+                if index >= len(prefix_events):
+                    continue
+                event = prefix_events[index]
+                current_changes.append(event)
+                state_sample[prefix] = event
+                state_observed[prefix] = getattr(event, f"{prefix}_observed_at")
+                state_last_seen[prefix] = getattr(event, f"{prefix}_last_seen_at")
+            current = max(current_changes, key=lambda sample: sample.sample_id)
+            events.append(_compose_quota_state(
+                current, state_sample, state_observed, state_last_seen,
+            ))
+
+    visible: list[HistorySample] = []
+    observed_times: list[datetime] = []
+    for sample in events:
+        masked = sample
+        visible_window = False
+        for prefix in ("five_hour", "weekly"):
+            observed_at = getattr(masked, f"{prefix}_observed_at")
+            if observed_at is None or observed_at < cutoff:
+                masked = _mask_quota_window(masked, prefix)
+            else:
+                visible_window = True
+                observed_times.append(observed_at)
+        if visible_window:
+            visible.append(masked)
+    return _QuotaProjection(
+        samples=tuple(visible),
+        start_at=min(observed_times) if observed_times else None,
+        end_at=max(observed_times) if observed_times else None,
+        five_hour_last_seen_at=state_last_seen["five_hour"],
+        weekly_last_seen_at=state_last_seen["weekly"],
+        five_hour_available=current_available["five_hour"],
+        five_hour_stale=current_stale["five_hour"],
+        weekly_available=current_available["weekly"],
+        weekly_stale=current_stale["weekly"],
+    )
+
+
+def _quota_window_events(
+    raw: list[HistorySample], prefix: str,
+) -> tuple[tuple[HistorySample, ...], bool | None, bool]:
+    """Build one window's value stream using only that window's reliable time."""
+
+    status_sample: HistorySample | None = None
+    status_key: tuple[datetime, int] | None = None
+    candidates: list[HistorySample] = []
+    for sample in raw:
+        status_at = _window_status_time(sample, prefix)
+        if status_at is not None:
+            key = status_at, sample.sample_id
+            if status_key is None or key >= status_key:
+                status_key = key
+                status_sample = sample
+        if _quota_window_identity(sample, prefix) is not None:
+            candidates.append(sample)
+    candidates.sort(key=lambda sample: (
+        getattr(sample, f"{prefix}_observed_at"), sample.sample_id,
+    ))
+
+    events: list[HistorySample] = []
+    identity: tuple[object, ...] | None = None
+    prototype: HistorySample | None = None
+    observed_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    for sample in candidates:
+        sample_identity = _quota_window_identity(sample, prefix)
+        if sample_identity != identity:
+            identity = sample_identity
+            prototype = sample
+            observed_at = getattr(sample, f"{prefix}_observed_at")
+            last_seen_at = getattr(sample, f"{prefix}_last_seen_at")
+            events.append(_quota_window_event(
+                sample, prototype, prefix, observed_at, last_seen_at,
+            ))
+        else:
+            last_seen_at = _latest_time(
+                last_seen_at, getattr(sample, f"{prefix}_last_seen_at"),
+            )
+            assert prototype is not None
+            events[-1] = _quota_window_event(
+                sample, prototype, prefix, observed_at, last_seen_at,
+            )
+    available = (
+        None if status_sample is None
+        else bool(getattr(status_sample, f"{prefix}_available"))
+    )
+    stale = bool(
+        status_sample is not None
+        and getattr(status_sample, f"{prefix}_stale")
+    )
+    return tuple(events), available, stale
+
+
+def _quota_window_event(
+    current: HistorySample,
+    prototype: HistorySample,
+    prefix: str,
+    observed_at: datetime | None,
+    last_seen_at: datetime | None,
+) -> HistorySample:
+    other = "weekly" if prefix == "five_hour" else "five_hour"
+    event = _mask_quota_window(_quota_only(current), other)
+    values = {
+        f"{prefix}_{suffix}": getattr(prototype, f"{prefix}_{suffix}")
+        for suffix in ("used_percent", "remaining_percent", "reset_at", "source")
+    }
+    values[f"{prefix}_observed_at"] = observed_at
+    values[f"{prefix}_last_seen_at"] = last_seen_at
+    return replace(event, **values)
+
+
+def _quota_only(sample: HistorySample) -> HistorySample:
+    return replace(
+        sample,
+        source_observed_at=None,
+        thread_safe_id=None,
+        model_safe_id=None,
+        source_type="global_quota",
+        source_status="global_quota",
+        source_available=False,
+        token_stale=False,
+        token_stale_reason=None,
+        input_tokens=None,
+        output_tokens=None,
+        total_tokens=None,
+        cached_tokens=None,
+        reasoning_tokens=None,
+        session_total_tokens=None,
+        turn_count=None,
+    )
+
+
+def _quota_window_identity(
+    sample: HistorySample, prefix: str,
+) -> tuple[object, ...] | None:
+    observed_at = getattr(sample, f"{prefix}_observed_at")
+    used = getattr(sample, f"{prefix}_used_percent")
+    remaining = getattr(sample, f"{prefix}_remaining_percent")
+    reset_at = getattr(sample, f"{prefix}_reset_at")
+    if observed_at is None or (used is None and remaining is None and reset_at is None):
+        return None
+    return used, remaining, reset_at, getattr(sample, f"{prefix}_source")
+
+
+def _window_status_time(sample: HistorySample, prefix: str) -> datetime | None:
+    last_seen = getattr(sample, f"{prefix}_last_seen_at")
+    if last_seen is not None:
+        return last_seen
+    return sample.quota_observed_at or sample.sampled_at
+
+
+def _compose_quota_state(
+    current: HistorySample,
+    state_sample: dict[str, HistorySample | None],
+    state_observed: dict[str, datetime | None],
+    state_last_seen: dict[str, datetime | None],
+) -> HistorySample:
+    values: dict[str, object] = {}
+    for prefix in ("five_hour", "weekly"):
+        prototype = state_sample[prefix]
+        if prototype is None:
+            continue
+        for suffix in (
+            "used_percent", "remaining_percent", "reset_at", "source",
+            "available", "stale", "error_code",
+        ):
+            values[f"{prefix}_{suffix}"] = getattr(prototype, f"{prefix}_{suffix}")
+        values[f"{prefix}_observed_at"] = state_observed[prefix]
+        values[f"{prefix}_last_seen_at"] = state_last_seen[prefix]
+    return replace(current, **values)
+
+
+def _mask_quota_window(sample: HistorySample, prefix: str) -> HistorySample:
+    return replace(sample, **{
+        f"{prefix}_observed_at": None,
+        f"{prefix}_last_seen_at": None,
+        f"{prefix}_used_percent": None,
+        f"{prefix}_remaining_percent": None,
+        f"{prefix}_reset_at": None,
+        f"{prefix}_source": "unknown",
+        f"{prefix}_available": False,
+        f"{prefix}_stale": False,
+        f"{prefix}_error_code": None,
+    })
+
+
+def _latest_time(first: datetime | None, second: datetime | None) -> datetime | None:
+    if first is None:
+        return second
+    if second is None:
+        return first
+    return max(first, second)
 
 
 def _query_result(
     range_days: int,
     samples: tuple[HistorySample, ...],
-    quota_samples: tuple[HistorySample, ...],
+    quota: _QuotaProjection,
     now: datetime,
 ) -> HistoryQueryResult:
     if not samples:
@@ -736,7 +1136,8 @@ def _query_result(
             status = "unavailable"
         elif (
             latest.token_stale
-            or now - latest.sampled_at > HISTORY_STALE_AFTER
+            or latest.source_observed_at is None
+            or now - latest.source_observed_at > HISTORY_STALE_AFTER
         ):
             status = "stale"
         elif len(samples) < 2:
@@ -754,18 +1155,31 @@ def _query_result(
     for name in (
         "five_hour_remaining_percent", "weekly_remaining_percent",
     ):
-        if any(getattr(sample, name) is not None for sample in quota_samples):
+        if any(getattr(sample, name) is not None for sample in quota.samples):
             available.add(name)
+    token_start_at = samples[0].source_observed_at if samples else None
+    token_end_at = samples[-1].source_observed_at if samples else None
     return HistoryQueryResult(
         range_days=range_days,
         status=status,
         samples=samples,
-        quota_samples=quota_samples,
+        quota_samples=quota.samples,
         sample_count=len(samples),
-        start_at=samples[0].sampled_at if samples else None,
-        end_at=samples[-1].sampled_at if samples else None,
+        start_at=token_start_at,
+        end_at=token_end_at,
         stale=status == "stale",
         metrics_available=tuple(sorted(available)),
+        queried_at=now,
+        token_start_at=token_start_at,
+        token_end_at=token_end_at,
+        quota_start_at=quota.start_at,
+        quota_end_at=quota.end_at,
+        five_hour_last_seen_at=quota.five_hour_last_seen_at,
+        weekly_last_seen_at=quota.weekly_last_seen_at,
+        five_hour_available=quota.five_hour_available,
+        five_hour_stale=quota.five_hour_stale,
+        weekly_available=quota.weekly_available,
+        weekly_stale=quota.weekly_stale,
     )
 
 

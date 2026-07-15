@@ -3,19 +3,48 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+from app.analytics_ui import metric_samples, trend_view_from_query
 from app.paths import DATA_DIR_ENV
-from scripts.gui_acceptance import GEOMETRIES, PAGES, RANGES, SCALES, _isolated_data_root
+from scripts.gui_acceptance import (
+    GEOMETRIES,
+    PAGES,
+    RANGES,
+    SCALES,
+    SCENARIOS,
+    _apply_scenario,
+    _isolated_data_root,
+    build_scenario,
+)
+
+
+NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
 
 
 class GuiAcceptanceLauncherTests(unittest.TestCase):
-    def test_required_geometry_and_scale_matrix_is_explicit(self):
+    def _scenario(self, name: str):
+        temporary = tempfile.TemporaryDirectory(
+            prefix="CodexTokenMonitor-GuiAcceptance-Test-",
+        )
+        self.addCleanup(temporary.cleanup)
+        return build_scenario(name, Path(temporary.name), now=NOW)
+
+    def test_required_geometry_scale_and_scenario_matrix_is_explicit(self):
         self.assertEqual(GEOMETRIES, ("980x660", "1440x900"))
         self.assertEqual(SCALES, (1.0, 1.25, 1.5))
         self.assertEqual(PAGES, ("overview", "usage_trends", "recommendations"))
         self.assertEqual(RANGES, (7, 30, 90))
+        self.assertEqual(SCENARIOS, (
+            "token_quota_independence",
+            "quota_heartbeat",
+            "advisor_quota_sufficient",
+            "advisor_quota_insufficient",
+            "mini_dashboard_dedup",
+        ))
 
     def test_launcher_requires_an_isolated_system_temp_directory(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -29,6 +58,137 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         with patch.dict(os.environ, {DATA_DIR_ENV: str(Path.cwd())}, clear=False):
             with self.assertRaisesRegex(RuntimeError, "system temp"):
                 _isolated_data_root()
+
+        with self.assertRaisesRegex(RuntimeError, "system temp"):
+            build_scenario("quota_heartbeat", Path.cwd(), now=NOW)
+
+    def test_quota_only_change_does_not_add_or_refresh_token_observation(self):
+        scenario = self._scenario("token_quota_independence")
+
+        self.assertEqual(scenario.record_results, (True, True))
+        self.assertEqual(scenario.before.sample_count, scenario.after.sample_count)
+        self.assertEqual(scenario.after.sample_count, 1)
+        self.assertEqual(scenario.before.token_end_at, scenario.after.token_end_at)
+        self.assertEqual((scenario.before.status, scenario.after.status), ("stale", "stale"))
+        self.assertEqual(
+            len(metric_samples(trend_view_from_query(scenario.before), "total")),
+            len(metric_samples(scenario.trend_view, "total")),
+        )
+        self.assertEqual(
+            len(metric_samples(trend_view_from_query(scenario.before), "five_hour")),
+            1,
+        )
+        self.assertEqual(len(metric_samples(scenario.trend_view, "five_hour")), 2)
+
+    def test_same_value_quota_heartbeat_only_updates_last_seen(self):
+        scenario = self._scenario("quota_heartbeat")
+        before_view = trend_view_from_query(scenario.before)
+
+        self.assertEqual(scenario.record_results, (True, False))
+        self.assertEqual(scenario.before.sample_count, scenario.after.sample_count)
+        self.assertEqual(scenario.before.token_end_at, scenario.after.token_end_at)
+        self.assertEqual(
+            len(metric_samples(before_view, "five_hour")),
+            len(metric_samples(scenario.trend_view, "five_hour")),
+        )
+        self.assertEqual(len(metric_samples(scenario.trend_view, "five_hour")), 1)
+        self.assertLess(
+            scenario.before.five_hour_last_seen_at,
+            scenario.after.five_hour_last_seen_at,
+        )
+        self.assertEqual(scenario.after.five_hour_last_seen_at, NOW)
+        self.assertEqual(
+            scenario.before.quota_samples[-1].five_hour_observed_at,
+            scenario.after.quota_samples[-1].five_hour_observed_at,
+        )
+        self.assertFalse(scenario.after.five_hour_stale)
+        self.assertEqual(scenario.after.status, "stale")
+
+    def test_advisor_quota_sufficient_uses_five_prior_global_samples(self):
+        scenario = self._scenario("advisor_quota_sufficient")
+        quota_risk = next(
+            item for item in scenario.advisor_result.recommendations
+            if item.code == "quota_risk"
+        )
+        history = quota_risk.history_evidence
+
+        self.assertIsNotNone(history)
+        self.assertEqual(history.source, "global_quota_history")
+        self.assertEqual(history.sample_count, 5)
+        self.assertGreaterEqual(history.distinct_observation_count, 3)
+        self.assertLess(history.range_ended_at, scenario.current_observed_at)
+        self.assertEqual(len(scenario.before.quota_samples), 5)
+        self.assertEqual(len(scenario.after.quota_samples), 6)
+
+    def test_advisor_quota_insufficient_exposes_no_trend_conclusion(self):
+        scenario = self._scenario("advisor_quota_insufficient")
+        quota_risk = next(
+            item for item in scenario.advisor_result.recommendations
+            if item.code == "quota_risk"
+        )
+
+        self.assertIsNone(quota_risk.history_evidence)
+        self.assertEqual(len(scenario.before.quota_samples), 4)
+        self.assertEqual(len(scenario.after.quota_samples), 5)
+
+    def test_mini_and_dashboard_same_observation_keep_one_complete_dashboard_point(self):
+        scenario = self._scenario("mini_dashboard_dedup")
+
+        self.assertEqual(scenario.record_results, (True, True))
+        self.assertEqual((scenario.before.sample_count, scenario.after.sample_count), (1, 1))
+        self.assertEqual(len(metric_samples(scenario.trend_view, "total")), 1)
+        sample = scenario.after.samples[0]
+        self.assertEqual(sample.source_type, "dashboard")
+        self.assertEqual(
+            (
+                sample.input_tokens,
+                sample.output_tokens,
+                sample.cached_tokens,
+                sample.reasoning_tokens,
+            ),
+            (1_200, 300, 600, 100),
+        )
+
+    def test_scenario_is_applied_to_real_dashboard_contract_with_its_range_and_page(self):
+        scenario = self._scenario("token_quota_independence")
+        dashboard = SimpleNamespace(
+            language="en",
+            trend_group_labels={"Token Trends": "tokens"},
+            trend_group_menu=Mock(),
+            trend_range_menu=Mock(),
+            _configure_trend_metric_menu=Mock(),
+            _render_trends=Mock(),
+            _render_advisor=Mock(),
+            _render_recommendations=Mock(),
+            show_page=Mock(),
+        )
+
+        _apply_scenario(dashboard, scenario, scenario.default_page)
+
+        self.assertEqual(dashboard.trend_range_days, 7)
+        self.assertIs(dashboard.trend_view, scenario.trend_view)
+        self.assertIs(dashboard.advisor_result, scenario.advisor_result)
+        self.assertEqual((dashboard.trend_group, dashboard.trend_metric), ("tokens", "total"))
+        dashboard.trend_group_menu.set.assert_called_once_with("Token Trends")
+        dashboard.trend_range_menu.set.assert_called_once_with("Last 7 days")
+        dashboard._render_trends.assert_called_once_with()
+        dashboard._render_advisor.assert_called_once_with()
+        dashboard._render_recommendations.assert_called_once_with()
+        dashboard.show_page.assert_called_once_with("usage_trends")
+
+    def test_scenarios_store_only_production_safe_numeric_fields(self):
+        forbidden = {
+            "prompt", "response", "preview", "message", "tool_output",
+            "reasoning_text", "thread_title", "local_path",
+        }
+        for name in SCENARIOS:
+            with self.subTest(scenario=name):
+                scenario = self._scenario(name)
+                samples = (*scenario.after.samples, *scenario.after.quota_samples)
+                self.assertTrue(samples)
+                for sample in samples:
+                    self.assertTrue(forbidden.isdisjoint(vars(sample)))
+                self.assertIn(Path(tempfile.gettempdir()).resolve(), scenario.store.path.parents)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
-"""Launch the real dashboard at an exact QA geometry and CTk scale.
+"""Launch deterministic safe-number scenarios in the real Dashboard UI.
 
-This helper is intentionally separate from the production entry point.  It
-requires an isolated temporary data directory so GUI acceptance never writes
-fictional QA observations into the user's normal application data.
+The launcher requires an isolated directory below the system Temp directory.
+Every scenario uses the production history store, projection, trend DTOs, and
+Advisor rules, but never reads or stores prompt, response, title, path, or
+other content fields.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ import argparse
 import os
 import sys
 import tempfile
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import customtkinter as ctk
@@ -20,8 +23,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.paths import DATA_DIR_ENV, ui_settings_path  # noqa: E402
+from app.advisor import AdvisorInput, AdvisorResult, evaluate_advice  # noqa: E402
+from app.analytics_ui import TrendView, trend_view_from_query  # noqa: E402
+from app.history import (  # noqa: E402
+    HistoryObservation,
+    HistoryQueryResult,
+    UsageHistoryStore,
+)
 from app.i18n import translate  # noqa: E402
+from app.paths import DATA_DIR_ENV, ui_settings_path  # noqa: E402
 from app.ui_settings import save_language  # noqa: E402
 
 
@@ -29,17 +39,326 @@ GEOMETRIES = ("980x660", "1440x900")
 SCALES = (1.0, 1.25, 1.5)
 PAGES = ("overview", "usage_trends", "recommendations")
 RANGES = (7, 30, 90)
+SCENARIOS = (
+    "token_quota_independence",
+    "quota_heartbeat",
+    "advisor_quota_sufficient",
+    "advisor_quota_insufficient",
+    "mini_dashboard_dedup",
+)
+QA_THREAD_ID = "qa-thread-001"
+
+
+@dataclass(frozen=True)
+class ScenarioResult:
+    """Deterministic production-DTO output ready for real Dashboard rendering."""
+
+    name: str
+    store: UsageHistoryStore
+    before: HistoryQueryResult
+    after: HistoryQueryResult
+    trend_view: TrendView
+    advisor_result: AdvisorResult
+    trend_group: str
+    trend_metric: str
+    default_page: str
+    record_results: tuple[bool, ...]
+    current_observed_at: datetime
+
+
+def _validated_temp_root(root: Path) -> Path:
+    resolved = Path(root).expanduser().resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    if resolved == temp_root or temp_root not in resolved.parents:
+        raise RuntimeError("GUI acceptance data directory must be under the system temp directory")
+    return resolved
 
 
 def _isolated_data_root() -> Path:
     raw = os.environ.get(DATA_DIR_ENV)
     if not raw:
         raise RuntimeError(f"{DATA_DIR_ENV} is required for GUI acceptance")
-    root = Path(raw).expanduser().resolve()
-    temp_root = Path(tempfile.gettempdir()).resolve()
-    if root == temp_root or temp_root not in root.parents:
-        raise RuntimeError("GUI acceptance data directory must be under the system temp directory")
-    return root
+    return _validated_temp_root(Path(raw))
+
+
+def _token_observation(
+    *,
+    sampled_at: datetime,
+    source_observed_at: datetime,
+    source_type: str = "dashboard",
+    stale: bool = False,
+    input_tokens: int | None = 1_200,
+    output_tokens: int | None = 300,
+    total_tokens: int | None = 1_500,
+    cached_tokens: int | None = 600,
+    reasoning_tokens: int | None = 100,
+    session_total_tokens: int | None = 8_000,
+    turn_count: int | None = 12,
+    five_hour_remaining: float | None = None,
+    five_hour_observed_at: datetime | None = None,
+    five_hour_last_seen_at: datetime | None = None,
+) -> HistoryObservation:
+    quota_available = five_hour_remaining is not None
+    return HistoryObservation(
+        sampled_at=sampled_at,
+        source_observed_at=source_observed_at,
+        quota_observed_at=five_hour_last_seen_at,
+        thread_safe_id=QA_THREAD_ID,
+        model_safe_id="qa-model-001",
+        source_type=source_type,
+        source_status="stale" if stale else "exact",
+        source_available=True,
+        token_stale=stale,
+        token_stale_reason="source_stale" if stale else None,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cached_tokens=cached_tokens,
+        reasoning_tokens=reasoning_tokens,
+        session_total_tokens=session_total_tokens,
+        turn_count=turn_count,
+        quota_source_status="normal" if quota_available else "unavailable",
+        five_hour_observed_at=five_hour_observed_at,
+        five_hour_last_seen_at=five_hour_last_seen_at,
+        five_hour_used_percent=(
+            None if five_hour_remaining is None else 100.0 - five_hour_remaining
+        ),
+        five_hour_remaining_percent=five_hour_remaining,
+        five_hour_reset_at=(
+            None if five_hour_remaining is None else sampled_at + timedelta(hours=5)
+        ),
+        five_hour_source="codex_app_server" if quota_available else "unknown",
+        five_hour_available=quota_available,
+        five_hour_stale=False,
+    )
+
+
+def _quota_observation(
+    *,
+    observed_at: datetime,
+    remaining_percent: float,
+    reset_at: datetime,
+    last_seen_at: datetime | None = None,
+) -> HistoryObservation:
+    last_seen = last_seen_at or observed_at
+    return HistoryObservation(
+        sampled_at=last_seen,
+        quota_observed_at=last_seen,
+        source_type="dashboard",
+        source_status="unavailable",
+        source_available=False,
+        quota_source_status="normal",
+        five_hour_observed_at=observed_at,
+        five_hour_last_seen_at=last_seen,
+        five_hour_used_percent=100.0 - remaining_percent,
+        five_hour_remaining_percent=remaining_percent,
+        five_hour_reset_at=reset_at,
+        five_hour_source="codex_app_server",
+        five_hour_available=True,
+        five_hour_stale=False,
+    )
+
+
+def _advisor_result(
+    query: HistoryQueryResult,
+    *,
+    now: datetime,
+    five_hour_remaining: float,
+) -> AdvisorResult:
+    return evaluate_advice(AdvisorInput(
+        data_available=True,
+        data_age_seconds=0,
+        source_status="normal",
+        five_hour_remaining_percent=five_hour_remaining,
+        weekly_remaining_percent=60.0,
+        turn_count=12,
+        instruction_input_tokens=1_200,
+        instruction_total_tokens=1_500,
+        cached_input_tokens=600,
+        session_total_tokens=8_000,
+        session_status="exact",
+        observed_at=now,
+        thread_safe_id=QA_THREAD_ID,
+        history_samples=query.samples,
+        source_observed_at=now,
+        five_hour_observed_at=now,
+        weekly_observed_at=now,
+        quota_history_samples=query.quota_samples,
+    ))
+
+
+def build_scenario(
+    name: str,
+    data_root: Path,
+    *,
+    range_days: int = 7,
+    now: datetime | None = None,
+) -> ScenarioResult:
+    """Build one deterministic scenario in an app-owned DB below system Temp."""
+
+    if name not in SCENARIOS:
+        raise ValueError("unsupported_gui_acceptance_scenario")
+    if range_days not in RANGES:
+        raise ValueError("unsupported_gui_acceptance_range")
+    current = now or datetime.now(timezone.utc).replace(microsecond=0)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("gui_acceptance_now_timezone_required")
+    current = current.astimezone(timezone.utc)
+    root = _validated_temp_root(data_root)
+    scenarios_root = root / "qa-scenarios"
+    scenarios_root.mkdir(parents=True, exist_ok=True)
+    scenario_dir = Path(tempfile.mkdtemp(prefix=f"{name}-", dir=scenarios_root))
+    store = UsageHistoryStore(
+        scenario_dir / "usage-history.sqlite3",
+        clock=lambda: current,
+    )
+    if not store.initialize():
+        raise RuntimeError(store.last_error or "gui_acceptance_history_initialize_failed")
+
+    if name == "token_quota_independence":
+        token_at = current - timedelta(minutes=10)
+        reset_at = current + timedelta(hours=4)
+        first = _token_observation(
+            sampled_at=current - timedelta(minutes=2),
+            source_observed_at=token_at,
+            stale=True,
+            five_hour_remaining=40.0,
+            five_hour_observed_at=current - timedelta(minutes=2),
+            five_hour_last_seen_at=current - timedelta(minutes=2),
+        )
+        first = replace(first, five_hour_reset_at=reset_at)
+        inserted_first = store.record(first)
+        before = store.query(range_days, QA_THREAD_ID, now=current)
+        second = replace(
+            first,
+            sampled_at=current - timedelta(minutes=1),
+            quota_observed_at=current - timedelta(minutes=1),
+            five_hour_observed_at=current - timedelta(minutes=1),
+            five_hour_last_seen_at=current - timedelta(minutes=1),
+            five_hour_used_percent=65.0,
+            five_hour_remaining_percent=35.0,
+        )
+        inserted_second = store.record(second)
+        after = store.query(range_days, QA_THREAD_ID, now=current)
+        advisor = _advisor_result(after, now=current, five_hour_remaining=35.0)
+        group, metric, page = "tokens", "total", "usage_trends"
+        outcomes = (inserted_first, inserted_second)
+
+    elif name == "quota_heartbeat":
+        token_at = current - timedelta(minutes=10)
+        quota_value_at = current - timedelta(minutes=8)
+        reset_at = current + timedelta(hours=4)
+        first = _token_observation(
+            sampled_at=quota_value_at,
+            source_observed_at=token_at,
+            stale=True,
+            five_hour_remaining=40.0,
+            five_hour_observed_at=quota_value_at,
+            five_hour_last_seen_at=quota_value_at,
+        )
+        first = replace(first, five_hour_reset_at=reset_at)
+        inserted_first = store.record(first)
+        before = store.query(range_days, QA_THREAD_ID, now=current)
+        heartbeat = replace(
+            first,
+            sampled_at=current,
+            quota_observed_at=current,
+            five_hour_observed_at=current,
+            five_hour_last_seen_at=current,
+        )
+        inserted_heartbeat = store.record(heartbeat)
+        after = store.query(range_days, QA_THREAD_ID, now=current)
+        advisor = _advisor_result(after, now=current, five_hour_remaining=40.0)
+        group, metric, page = "quota", "five_hour", "usage_trends"
+        outcomes = (inserted_first, inserted_heartbeat)
+
+    elif name in {"advisor_quota_sufficient", "advisor_quota_insufficient"}:
+        prior_count = 5 if name == "advisor_quota_sufficient" else 4
+        reset_at = current + timedelta(hours=4)
+        outcomes_list: list[bool] = []
+        for index in range(prior_count):
+            observed = current - timedelta(minutes=prior_count - index)
+            outcomes_list.append(store.record(_quota_observation(
+                observed_at=observed,
+                remaining_percent=40.0 - index * 5.0,
+                reset_at=reset_at,
+            )))
+        before = store.query(range_days, QA_THREAD_ID, now=current)
+        outcomes_list.append(store.record(_quota_observation(
+            observed_at=current,
+            remaining_percent=10.0,
+            reset_at=reset_at,
+        )))
+        after = store.query(range_days, QA_THREAD_ID, now=current)
+        advisor = _advisor_result(after, now=current, five_hour_remaining=10.0)
+        group, metric, page = "quota", "five_hour", "recommendations"
+        outcomes = tuple(outcomes_list)
+
+    else:  # mini_dashboard_dedup
+        observed = current - timedelta(minutes=1)
+        mini = _token_observation(
+            sampled_at=current - timedelta(seconds=30),
+            source_observed_at=observed,
+            source_type="mini",
+            input_tokens=None,
+            output_tokens=None,
+            cached_tokens=None,
+            reasoning_tokens=None,
+            total_tokens=1_500,
+            session_total_tokens=8_000,
+            turn_count=12,
+        )
+        inserted_mini = store.record(mini)
+        before = store.query(range_days, QA_THREAD_ID, now=current)
+        dashboard = _token_observation(
+            sampled_at=current,
+            source_observed_at=observed,
+            source_type="dashboard",
+        )
+        inserted_dashboard = store.record(dashboard)
+        after = store.query(range_days, QA_THREAD_ID, now=current)
+        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
+        group, metric, page = "tokens", "total", "usage_trends"
+        outcomes = (inserted_mini, inserted_dashboard)
+
+    return ScenarioResult(
+        name=name,
+        store=store,
+        before=before,
+        after=after,
+        trend_view=trend_view_from_query(after),
+        advisor_result=advisor,
+        trend_group=group,
+        trend_metric=metric,
+        default_page=page,
+        record_results=outcomes,
+        current_observed_at=current,
+    )
+
+
+def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> None:
+    """Apply production DTOs to already-built real Dashboard widgets."""
+
+    dashboard.trend_range_days = scenario.after.range_days
+    dashboard.trend_view = scenario.trend_view
+    dashboard.history_error = scenario.after.error_code
+    dashboard.trend_group = scenario.trend_group
+    dashboard.trend_metric = scenario.trend_metric
+    group_label = next(
+        label
+        for label, value in dashboard.trend_group_labels.items()
+        if value == scenario.trend_group
+    )
+    dashboard.trend_group_menu.set(group_label)
+    dashboard._configure_trend_metric_menu()  # noqa: SLF001 - QA launcher
+    dashboard.trend_range_menu.set(
+        translate(f"last_{scenario.after.range_days}_days", dashboard.language)
+    )
+    dashboard.advisor_result = scenario.advisor_result
+    dashboard._render_trends()  # noqa: SLF001 - QA launcher
+    dashboard._render_advisor()  # noqa: SLF001 - QA launcher
+    dashboard._render_recommendations()  # noqa: SLF001 - QA launcher
+    dashboard.show_page(page)
 
 
 def main() -> None:
@@ -47,7 +366,8 @@ def main() -> None:
     parser.add_argument("--geometry", choices=GEOMETRIES, required=True)
     parser.add_argument("--scale", choices=SCALES, type=float, required=True)
     parser.add_argument("--language", choices=("zh-CN", "en"), required=True)
-    parser.add_argument("--page", choices=PAGES, default="usage_trends")
+    parser.add_argument("--scenario", choices=SCENARIOS, required=True)
+    parser.add_argument("--page", choices=PAGES)
     parser.add_argument("--range", choices=RANGES, type=int, default=7)
     parser.add_argument("--auto-close-ms", type=int, default=0)
     args = parser.parse_args()
@@ -56,6 +376,7 @@ def main() -> None:
     data_root.mkdir(parents=True, exist_ok=True)
     if not save_language(args.language, ui_settings_path()):
         raise RuntimeError("Unable to save isolated GUI acceptance language")
+    scenario = build_scenario(args.scenario, data_root, range_days=args.range)
 
     ctk.set_widget_scaling(args.scale)
     ctk.set_window_scaling(args.scale)
@@ -63,19 +384,16 @@ def main() -> None:
     from app.main import Dashboard
 
     root = ctk.CTk()
-    dashboard = Dashboard(root)
+    dashboard = Dashboard(root, history_store=scenario.store)
     percent = round(args.scale * 100)
     root.title(
-        f"Codex Token Monitor QA - {percent}% - {args.geometry} - {args.language}"
+        "Codex Token Monitor QA - "
+        f"{scenario.name} - {percent}% - {args.geometry} - {args.language}"
     )
 
     def apply_case() -> None:
         root.geometry(args.geometry)
-        if args.page == "usage_trends":
-            range_label = translate(f"last_{args.range}_days", dashboard.language)
-            dashboard.trend_range_menu.set(range_label)
-            dashboard._change_trend_range(range_label)  # noqa: SLF001 - QA launcher
-        dashboard.show_page(args.page)
+        _apply_scenario(dashboard, scenario, args.page or scenario.default_page)
         if args.auto_close_ms > 0:
             root.after(args.auto_close_ms, dashboard.close)
 

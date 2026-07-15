@@ -66,7 +66,7 @@ EvidenceValue = int | float | bool | str | None
 
 @dataclass(frozen=True)
 class AdvisorHistoryEvidence:
-    """Derived comparison over safe, same-Thread numeric history only."""
+    """Derived comparison over one explicit safe numeric history scope."""
 
     metric: str
     direction: str
@@ -101,6 +101,7 @@ class AdvisorInput:
     source_observed_at: datetime | None = None
     five_hour_observed_at: datetime | None = None
     weekly_observed_at: datetime | None = None
+    quota_history_samples: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,7 @@ def build_advisor_input(
     *,
     now: datetime | None = None,
     history_samples: Iterable[object] = (),
+    quota_history_samples: Iterable[object] = (),
 ) -> AdvisorInput:
     now = now or datetime.now(timezone.utc)
     selected = snapshot.selected_session if snapshot is not None else None
@@ -185,6 +187,7 @@ def build_advisor_input(
         source_observed_at=(getattr(selected, "observed_at", None) if selected is not None else refreshed_at),
         five_hour_observed_at=five_hour.observed_at,
         weekly_observed_at=weekly.observed_at,
+        quota_history_samples=tuple(quota_history_samples),
     )
 
 
@@ -304,6 +307,10 @@ _HISTORY_FIELDS = {
         "weekly_remaining_percent", "weekly_quota_value",
     ),
 }
+_QUOTA_HISTORY_METRICS = {
+    "five_hour_remaining_percent",
+    "weekly_remaining_percent",
+}
 
 
 def build_history_evidence(
@@ -312,21 +319,54 @@ def build_history_evidence(
     thread_safe_id: str | None,
     metric: str,
     current_value: int | float | None,
+    current_observed_at: datetime | None = None,
 ) -> AdvisorHistoryEvidence | None:
     """Return a deterministic comparison or ``None`` when evidence is unsafe/weak."""
 
     current = _finite_number(current_value)
-    if not thread_safe_id or metric not in _HISTORY_FIELDS or current is None:
+    current_time = _history_datetime(current_observed_at)
+    quota_scope = metric in _QUOTA_HISTORY_METRICS
+    if (
+        metric not in _HISTORY_FIELDS
+        or current is None
+        or current_time is None
+        or (not quota_scope and not thread_safe_id)
+    ):
         return None
     valid: list[tuple[datetime, float]] = []
+    quota_candidates: dict[
+        tuple[object, ...], tuple[datetime, float, datetime]
+    ] = {}
     try:
         for sample in samples:
-            if _sample_thread_id(sample) != thread_safe_id or not _sample_is_usable(sample, metric):
+            if quota_scope:
+                if not _sample_is_global_quota(sample):
+                    continue
+            elif (
+                _sample_is_global_quota(sample)
+                or _sample_thread_id(sample) != thread_safe_id
+            ):
+                continue
+            if not _sample_is_usable(sample, metric):
                 continue
             observed_at = _sample_observed_at(sample, metric)
+            identity_at = _sample_identity_at(sample, metric) or observed_at
             value = _sample_metric(sample, metric)
-            if observed_at is not None and value is not None:
+            if observed_at is None or identity_at is None or value is None:
+                continue
+            if quota_scope:
+                identity = _quota_metric_identity(sample, metric, observed_at, value)
+                previous = quota_candidates.get(identity)
+                if previous is None or identity_at > previous[2]:
+                    quota_candidates[identity] = (observed_at, value, identity_at)
+            elif observed_at < current_time and identity_at < current_time:
                 valid.append((observed_at, value))
+        if quota_scope:
+            valid.extend(
+                (observed_at, value)
+                for observed_at, value, identity_at in quota_candidates.values()
+                if observed_at < current_time and identity_at < current_time
+            )
     except Exception:
         return None
     valid.sort(key=lambda item: item[0])
@@ -359,31 +399,40 @@ def build_history_evidence(
         distinct_observation_count=len(distinct),
         range_started_at=valid[0][0],
         range_ended_at=valid[-1][0],
+        source="global_quota_history" if quota_scope else "token_monitor_history",
     )
 
 
 def _history_for_recommendation(
     recommendation: Recommendation, data: AdvisorInput,
 ) -> AdvisorHistoryEvidence | None:
-    if (
-        not data.data_available
-        or (
-            data.data_age_seconds is not None
-            and data.data_age_seconds > DATA_STALE_AFTER.total_seconds()
-        )
-        or recommendation.code in {"data_unavailable", "data_stale"}
-    ):
+    if recommendation.code in {"data_unavailable", "data_stale"}:
         return None
     metric: str | None = None
     current: int | float | None = None
+    current_observed_at: datetime | None = None
+    samples = data.history_samples
+    thread_safe_id = data.thread_safe_id
     if recommendation.code == "quota_risk":
         quota_values = (
-            ("five_hour_remaining_percent", data.five_hour_remaining_percent),
-            ("weekly_remaining_percent", data.weekly_remaining_percent),
+            (
+                "five_hour_remaining_percent",
+                data.five_hour_remaining_percent,
+                data.five_hour_observed_at,
+            ),
+            (
+                "weekly_remaining_percent",
+                data.weekly_remaining_percent,
+                data.weekly_observed_at,
+            ),
         )
-        available = [(name, value) for name, value in quota_values if value is not None]
+        available = [item for item in quota_values if item[1] is not None]
         if available:
-            metric, current = min(available, key=lambda item: float(item[1]))
+            metric, current, current_observed_at = min(
+                available, key=lambda item: float(item[1])
+            )
+            samples = data.quota_history_samples
+            thread_safe_id = None
     elif recommendation.code == "new_thread":
         metric, current = "turn_count", data.turn_count
     elif recommendation.code == "optimize_cache_reuse":
@@ -393,11 +442,22 @@ def _history_for_recommendation(
         metric, current = "instruction_total_tokens", data.instruction_total_tokens
     if metric is None:
         return None
+    if metric not in _QUOTA_HISTORY_METRICS:
+        if (
+            not data.data_available
+            or (
+                data.data_age_seconds is not None
+                and data.data_age_seconds > DATA_STALE_AFTER.total_seconds()
+            )
+        ):
+            return None
+        current_observed_at = data.source_observed_at
     return build_history_evidence(
-        data.history_samples,
-        thread_safe_id=data.thread_safe_id,
+        samples,
+        thread_safe_id=thread_safe_id,
         metric=metric,
         current_value=current,
+        current_observed_at=current_observed_at,
     )
 
 
@@ -427,6 +487,10 @@ def _sample_thread_id(sample: object) -> str | None:
     return None
 
 
+def _sample_is_global_quota(sample: object) -> bool:
+    return getattr(sample, "source_type", None) == "global_quota"
+
+
 def _sample_is_usable(sample: object, metric: str) -> bool:
     if getattr(sample, "legacy_unknown_time", False):
         return False
@@ -439,10 +503,8 @@ def _sample_is_usable(sample: object, metric: str) -> bool:
     else:
         available_names = ("source_available", "available", "is_available")
         stale_names = ("token_stale", "stale", "is_stale")
-    for name in available_names:
-        value = getattr(sample, name, None)
-        if value is False:
-            return False
+    if not any(getattr(sample, name, None) is True for name in available_names):
+        return False
     for name in stale_names:
         if getattr(sample, name, False) is True:
             return False
@@ -465,22 +527,57 @@ def _sample_is_usable(sample: object, metric: str) -> bool:
 
 
 def _sample_observed_at(sample: object, metric: str) -> datetime | None:
-    names = (
-        ("quota_observed_at", "observed_at", "sampled_at")
-        if metric in {"five_hour_remaining_percent", "weekly_remaining_percent"}
-        else ("source_event_time", "source_observed_at", "observed_at", "sampled_at")
-    )
+    if metric == "five_hour_remaining_percent":
+        names = ("five_hour_observed_at",)
+    elif metric == "weekly_remaining_percent":
+        names = ("weekly_observed_at",)
+    else:
+        names = ("source_observed_at",)
     for name in names:
-        value = getattr(sample, name, None)
-        if isinstance(value, datetime) and value.tzinfo is not None:
-            return value.astimezone(timezone.utc)
-        if isinstance(value, str):
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if parsed.tzinfo is not None:
-                return parsed.astimezone(timezone.utc)
+        parsed = _history_datetime(getattr(sample, name, None))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _sample_identity_at(sample: object, metric: str) -> datetime | None:
+    if metric == "five_hour_remaining_percent":
+        return _history_datetime(getattr(sample, "five_hour_last_seen_at", None))
+    if metric == "weekly_remaining_percent":
+        return _history_datetime(getattr(sample, "weekly_last_seen_at", None))
+    return _sample_observed_at(sample, metric)
+
+
+def _quota_metric_identity(
+    sample: object,
+    metric: str,
+    observed_at: datetime,
+    value: float,
+) -> tuple[object, ...]:
+    prefix = "five_hour" if metric == "five_hour_remaining_percent" else "weekly"
+    return (
+        prefix,
+        observed_at,
+        value,
+        _finite_number(getattr(sample, f"{prefix}_used_percent", None)),
+        _history_datetime(getattr(sample, f"{prefix}_reset_at", None)),
+        getattr(sample, f"{prefix}_source", None),
+        getattr(sample, f"{prefix}_available", None),
+        getattr(sample, f"{prefix}_stale", None),
+        getattr(sample, f"{prefix}_error_code", None),
+    )
+
+
+def _history_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc)
     return None
 
 
