@@ -2746,11 +2746,18 @@ class Dashboard:
             else "trend_scope_thread"
         )
 
-    @staticmethod
-    def _format_trend_value(metric: str, value: float | None, *, signed: bool = False) -> str:
+    def _format_trend_value(
+        self, metric: str, value: float | None, *, signed: bool = False,
+    ) -> str:
         if value is None:
             return "—"
         sign = "+" if signed and value > 0 else ""
+        if signed and metric in {"five_hour", "weekly"}:
+            return translate(
+                "trend_change_percentage_points",
+                self.language,
+                value=f"{sign}{value:.1f}",
+            )
         if metric in {"cache_reuse", "five_hour", "weekly"}:
             return f"{sign}{value:.1f}%"
         if metric == "turn_count":

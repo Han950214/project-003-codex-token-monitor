@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from app.quota import CodexQuotaSnapshot, QuotaWindow
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 RETENTION_DAYS = 90
 MAX_HISTORY_ROWS = 200_000
 HISTORY_STALE_AFTER = timedelta(minutes=3)
@@ -60,6 +60,7 @@ class HistoryObservation:
     quota_source_status: str = "unavailable"
     five_hour_observed_at: datetime | None = None
     five_hour_last_seen_at: datetime | None = None
+    five_hour_event_seq: int = 0
     five_hour_used_percent: float | None = None
     five_hour_remaining_percent: float | None = None
     five_hour_reset_at: datetime | None = None
@@ -69,6 +70,7 @@ class HistoryObservation:
     five_hour_error_code: str | None = None
     weekly_observed_at: datetime | None = None
     weekly_last_seen_at: datetime | None = None
+    weekly_event_seq: int = 0
     weekly_used_percent: float | None = None
     weekly_remaining_percent: float | None = None
     weekly_reset_at: datetime | None = None
@@ -102,6 +104,7 @@ class HistoryObservation:
         for name in (
             "input_tokens", "output_tokens", "total_tokens", "cached_tokens",
             "reasoning_tokens", "session_total_tokens", "turn_count",
+            "five_hour_event_seq", "weekly_event_seq",
         ):
             _validate_nonnegative(getattr(self, name), name)
         if (
@@ -323,6 +326,7 @@ _COLUMN_DEFINITIONS = {
     "quota_source_status": "TEXT NOT NULL DEFAULT 'unavailable'",
     "five_hour_observed_at_utc": "TEXT",
     "five_hour_last_seen_at_utc": "TEXT",
+    "five_hour_event_seq": "INTEGER NOT NULL DEFAULT 0",
     "five_hour_used_percent": "REAL",
     "five_hour_remaining_percent": "REAL",
     "five_hour_reset_at_utc": "TEXT",
@@ -332,6 +336,7 @@ _COLUMN_DEFINITIONS = {
     "five_hour_error_code": "TEXT",
     "weekly_observed_at_utc": "TEXT",
     "weekly_last_seen_at_utc": "TEXT",
+    "weekly_event_seq": "INTEGER NOT NULL DEFAULT 0",
     "weekly_used_percent": "REAL",
     "weekly_remaining_percent": "REAL",
     "weekly_reset_at_utc": "TEXT",
@@ -391,20 +396,39 @@ class UsageHistoryStore:
             try:
                 with closing(self._connect()) as connection:
                     connection.execute("BEGIN IMMEDIATE")
-                    values = _observation_row(observation)
-                    placeholders = ", ".join("?" for _ in _INSERT_COLUMNS)
-                    columns = ", ".join(_INSERT_COLUMNS)
-                    cursor = connection.execute(
-                        f"INSERT OR IGNORE INTO {_TABLE} ({columns}) VALUES ({placeholders})",
-                        values,
-                    )
-                    inserted = cursor.rowcount == 1
-                    if not inserted:
-                        self._refresh_duplicate_quota_last_seen(connection, observation)
-                    if inserted:
-                        self._prune_capacity(connection)
-                        self._prune_if_due(connection, self.clock(), in_transaction=True)
-                    connection.commit()
+                    try:
+                        event_sequences = self._allocate_quota_event_sequences(
+                            connection, observation,
+                        )
+                        storage_fingerprint = _storage_fingerprint(
+                            observation, event_sequences,
+                        )
+                        values = _observation_row(
+                            observation,
+                            event_sequences=event_sequences,
+                            storage_fingerprint=storage_fingerprint,
+                        )
+                        placeholders = ", ".join("?" for _ in _INSERT_COLUMNS)
+                        columns = ", ".join(_INSERT_COLUMNS)
+                        cursor = connection.execute(
+                            f"INSERT INTO {_TABLE} ({columns}) VALUES ({placeholders}) "
+                            "ON CONFLICT(sample_fingerprint) DO NOTHING",
+                            values,
+                        )
+                        inserted = cursor.rowcount == 1
+                        if not inserted:
+                            self._refresh_duplicate_quota_last_seen(
+                                connection, observation, storage_fingerprint,
+                            )
+                        if inserted:
+                            self._prune_capacity(connection)
+                            self._prune_if_due(
+                                connection, self.clock(), in_transaction=True,
+                            )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
                 self.last_error = None
                 return inserted
             except (OSError, sqlite3.Error, ValueError) as exc:
@@ -485,6 +509,7 @@ class UsageHistoryStore:
     def _refresh_duplicate_quota_last_seen(
         connection: sqlite3.Connection,
         observation: HistoryObservation,
+        storage_fingerprint: str,
     ) -> None:
         updates: dict[str, str] = {}
         parameters: list[object] = []
@@ -498,8 +523,6 @@ class UsageHistoryStore:
             )
             value = _iso_utc(last_seen)
             parameters.extend((value, value))
-        if not updates:
-            return
         if observation.quota_observed_at is not None:
             updates["quota_observed_at_utc"] = (
                 "CASE WHEN quota_observed_at_utc IS NULL OR quota_observed_at_utc < ? "
@@ -507,13 +530,35 @@ class UsageHistoryStore:
             )
             value = _iso_utc(observation.quota_observed_at)
             parameters.extend((value, value))
-        parameters.append(observation.sample_fingerprint)
+        if not updates:
+            return
+        parameters.append(storage_fingerprint)
         connection.execute(
             f"UPDATE {_TABLE} SET "
             + ", ".join(f"{column} = {expression}" for column, expression in updates.items())
             + " WHERE sample_fingerprint = ?",
             tuple(parameters),
         )
+
+    def _allocate_quota_event_sequences(
+        self,
+        connection: sqlite3.Connection,
+        observation: HistoryObservation,
+    ) -> dict[str, int]:
+        sequences: dict[str, int] = {}
+        for prefix in ("five_hour", "weekly"):
+            active_identity, active_seq = _load_or_recover_active_quota_event(
+                connection, prefix,
+            )
+            identity = _quota_window_identity_key(observation, prefix)
+            if identity is not None and identity != active_identity:
+                active_seq += 1
+                active_identity = identity
+                _set_active_quota_event(
+                    connection, prefix, active_identity, active_seq,
+                )
+            sequences[prefix] = active_seq
+        return sequences
 
     def _migrate(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
@@ -577,6 +622,8 @@ class UsageHistoryStore:
                     f"AND {prefix}_available = 1 AND {prefix}_stale = 0 "
                     f"AND {observed_column} IS NOT NULL"
                 )
+            if version < 3:
+                _backfill_quota_event_sequences(connection)
             connection.execute(
                 f"UPDATE {_TABLE} SET sample_fingerprint = "
                 "'legacy-' || printf('%016x', id) "
@@ -682,7 +729,16 @@ def _window_values(prefix: str, window: "QuotaWindow") -> dict[str, object]:
     }
 
 
-def _observation_row(observation: HistoryObservation) -> tuple[object, ...]:
+def _observation_row(
+    observation: HistoryObservation,
+    *,
+    event_sequences: dict[str, int] | None = None,
+    storage_fingerprint: str | None = None,
+) -> tuple[object, ...]:
+    event_sequences = event_sequences or {
+        "five_hour": observation.five_hour_event_seq,
+        "weekly": observation.weekly_event_seq,
+    }
     values = {
         "schema_version": SCHEMA_VERSION,
         "sampled_at_utc": _iso_utc(observation.sampled_at),
@@ -705,6 +761,7 @@ def _observation_row(observation: HistoryObservation) -> tuple[object, ...]:
         "quota_source_status": observation.quota_source_status,
         "five_hour_observed_at_utc": _iso_utc(observation.five_hour_observed_at),
         "five_hour_last_seen_at_utc": _iso_utc(observation.five_hour_last_seen_at),
+        "five_hour_event_seq": event_sequences["five_hour"],
         "five_hour_used_percent": observation.five_hour_used_percent,
         "five_hour_remaining_percent": observation.five_hour_remaining_percent,
         "five_hour_reset_at_utc": _iso_utc(observation.five_hour_reset_at),
@@ -714,6 +771,7 @@ def _observation_row(observation: HistoryObservation) -> tuple[object, ...]:
         "five_hour_error_code": observation.five_hour_error_code,
         "weekly_observed_at_utc": _iso_utc(observation.weekly_observed_at),
         "weekly_last_seen_at_utc": _iso_utc(observation.weekly_last_seen_at),
+        "weekly_event_seq": event_sequences["weekly"],
         "weekly_used_percent": observation.weekly_used_percent,
         "weekly_remaining_percent": observation.weekly_remaining_percent,
         "weekly_reset_at_utc": _iso_utc(observation.weekly_reset_at),
@@ -723,7 +781,7 @@ def _observation_row(observation: HistoryObservation) -> tuple[object, ...]:
         "weekly_error_code": observation.weekly_error_code,
         "is_derived": int(observation.is_derived),
         "legacy_unknown_time": int(observation.legacy_unknown_time),
-        "sample_fingerprint": observation.sample_fingerprint,
+        "sample_fingerprint": storage_fingerprint or observation.sample_fingerprint,
     }
     return tuple(values[column] for column in _INSERT_COLUMNS)
 
@@ -750,6 +808,7 @@ def _sample_from_row(row: sqlite3.Row) -> HistorySample:
         quota_source_status=row["quota_source_status"],
         five_hour_observed_at=_parse_utc(row["five_hour_observed_at_utc"]),
         five_hour_last_seen_at=_parse_utc(row["five_hour_last_seen_at_utc"]),
+        five_hour_event_seq=int(row["five_hour_event_seq"]),
         five_hour_used_percent=row["five_hour_used_percent"],
         five_hour_remaining_percent=row["five_hour_remaining_percent"],
         five_hour_reset_at=_parse_utc(row["five_hour_reset_at_utc"]),
@@ -759,6 +818,7 @@ def _sample_from_row(row: sqlite3.Row) -> HistorySample:
         five_hour_error_code=row["five_hour_error_code"],
         weekly_observed_at=_parse_utc(row["weekly_observed_at_utc"]),
         weekly_last_seen_at=_parse_utc(row["weekly_last_seen_at_utc"]),
+        weekly_event_seq=int(row["weekly_event_seq"]),
         weekly_used_percent=row["weekly_used_percent"],
         weekly_remaining_percent=row["weekly_remaining_percent"],
         weekly_reset_at=_parse_utc(row["weekly_reset_at_utc"]),
@@ -820,6 +880,7 @@ def _token_only(sample: HistorySample) -> HistorySample:
         quota_source_status="unavailable",
         five_hour_observed_at=None,
         five_hour_last_seen_at=None,
+        five_hour_event_seq=0,
         five_hour_used_percent=None,
         five_hour_remaining_percent=None,
         five_hour_reset_at=None,
@@ -829,6 +890,7 @@ def _token_only(sample: HistorySample) -> HistorySample:
         five_hour_error_code=None,
         weekly_observed_at=None,
         weekly_last_seen_at=None,
+        weekly_event_seq=0,
         weekly_used_percent=None,
         weekly_remaining_percent=None,
         weekly_reset_at=None,
@@ -984,7 +1046,9 @@ def _quota_window_events(
         if _quota_window_identity(sample, prefix) is not None:
             candidates.append(sample)
     candidates.sort(key=lambda sample: (
-        getattr(sample, f"{prefix}_observed_at"), sample.sample_id,
+        getattr(sample, f"{prefix}_event_seq"),
+        getattr(sample, f"{prefix}_observed_at"),
+        sample.sample_id,
     ))
 
     events: list[HistorySample] = []
@@ -994,7 +1058,11 @@ def _quota_window_events(
     last_seen_at: datetime | None = None
     for sample in candidates:
         sample_identity = _quota_window_identity(sample, prefix)
-        if sample_identity != identity:
+        sample_seq = getattr(sample, f"{prefix}_event_seq")
+        current_seq = (
+            None if not events else getattr(events[-1], f"{prefix}_event_seq")
+        )
+        if sample_identity != identity or sample_seq != current_seq:
             identity = sample_identity
             prototype = sample
             observed_at = getattr(sample, f"{prefix}_observed_at")
@@ -1018,6 +1086,16 @@ def _quota_window_events(
         status_sample is not None
         and getattr(status_sample, f"{prefix}_stale")
     )
+    if events and status_sample is not None and stale:
+        events[-1] = replace(events[-1], **{
+            f"{prefix}_available": bool(
+                getattr(status_sample, f"{prefix}_available")
+            ),
+            f"{prefix}_stale": True,
+            f"{prefix}_error_code": getattr(
+                status_sample, f"{prefix}_error_code",
+            ),
+        })
     return tuple(events), available, stale
 
 
@@ -1036,6 +1114,7 @@ def _quota_window_event(
     }
     values[f"{prefix}_observed_at"] = observed_at
     values[f"{prefix}_last_seen_at"] = last_seen_at
+    values[f"{prefix}_event_seq"] = getattr(prototype, f"{prefix}_event_seq")
     return replace(event, **values)
 
 
@@ -1061,15 +1140,176 @@ def _quota_only(sample: HistorySample) -> HistorySample:
 
 
 def _quota_window_identity(
-    sample: HistorySample, prefix: str,
+    sample: HistoryObservation, prefix: str,
 ) -> tuple[object, ...] | None:
     observed_at = getattr(sample, f"{prefix}_observed_at")
     used = getattr(sample, f"{prefix}_used_percent")
     remaining = getattr(sample, f"{prefix}_remaining_percent")
     reset_at = getattr(sample, f"{prefix}_reset_at")
-    if observed_at is None or (used is None and remaining is None and reset_at is None):
+    if (
+        observed_at is None
+        or not getattr(sample, f"{prefix}_available")
+        or getattr(sample, f"{prefix}_stale")
+        or (used is None and remaining is None and reset_at is None)
+    ):
         return None
     return used, remaining, reset_at, getattr(sample, f"{prefix}_source")
+
+
+def _quota_window_identity_key(
+    sample: HistoryObservation, prefix: str,
+) -> str | None:
+    identity = _quota_window_identity(sample, prefix)
+    if identity is None:
+        return None
+    normalized = [
+        _iso_utc(value) if isinstance(value, datetime) else value
+        for value in identity
+    ]
+    encoded = json.dumps(
+        normalized, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _storage_fingerprint(
+    observation: HistoryObservation,
+    event_sequences: dict[str, int],
+) -> str:
+    payload = {
+        "base": observation.sample_fingerprint,
+        "five_hour_event_seq": event_sequences["five_hour"],
+        "weekly_event_seq": event_sequences["weekly"],
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _active_meta_key(prefix: str, suffix: str) -> str:
+    return f"quota_{prefix}_active_{suffix}_v3"
+
+
+def _meta_value(connection: sqlite3.Connection, key: str) -> str | None:
+    row = connection.execute(
+        f"SELECT value FROM {_META_TABLE} WHERE key = ?", (key,),
+    ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def _set_meta_value(connection: sqlite3.Connection, key: str, value: str) -> None:
+    connection.execute(
+        f"INSERT INTO {_META_TABLE}(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+
+
+def _set_active_quota_event(
+    connection: sqlite3.Connection,
+    prefix: str,
+    identity: str | None,
+    sequence: int,
+) -> None:
+    _set_meta_value(
+        connection, _active_meta_key(prefix, "identity"), identity or "none",
+    )
+    _set_meta_value(
+        connection, _active_meta_key(prefix, "seq"), str(max(0, sequence)),
+    )
+
+
+def _load_or_recover_active_quota_event(
+    connection: sqlite3.Connection, prefix: str,
+) -> tuple[str | None, int]:
+    identity_text = _meta_value(connection, _active_meta_key(prefix, "identity"))
+    sequence_text = _meta_value(connection, _active_meta_key(prefix, "seq"))
+    try:
+        sequence = int(sequence_text) if sequence_text is not None else -1
+    except ValueError:
+        sequence = -1
+    identity_valid = bool(
+        identity_text == "none"
+        or (
+            identity_text is not None
+            and re.fullmatch(r"[0-9a-f]{64}", identity_text)
+        )
+    )
+    if identity_valid and sequence >= 0:
+        return (None if identity_text == "none" else identity_text), sequence
+    return _recover_active_quota_event(connection, prefix)
+
+
+def _recover_active_quota_event(
+    connection: sqlite3.Connection, prefix: str,
+) -> tuple[str | None, int]:
+    rows = connection.execute(f"SELECT * FROM {_TABLE}").fetchall()
+    samples = [
+        _sample_from_row(row) for row in rows if not bool(row["legacy_unknown_time"])
+    ]
+    candidates = [
+        sample for sample in samples
+        if _quota_window_identity(sample, prefix) is not None
+    ]
+    max_sequence = max(
+        (getattr(sample, f"{prefix}_event_seq") for sample in candidates),
+        default=0,
+    )
+    if not candidates:
+        _set_active_quota_event(connection, prefix, None, max_sequence)
+        return None, max_sequence
+    latest = max(candidates, key=lambda sample: (
+        _window_status_time(sample, prefix) or sample.sampled_at, sample.sample_id,
+    ))
+    last_event = max(candidates, key=lambda sample: (
+        getattr(sample, f"{prefix}_event_seq"),
+        getattr(sample, f"{prefix}_observed_at"),
+        sample.sample_id,
+    ))
+    identity = _quota_window_identity_key(latest, prefix)
+    last_identity = _quota_window_identity_key(last_event, prefix)
+    sequence = max_sequence + int(identity != last_identity)
+    _set_active_quota_event(connection, prefix, identity, sequence)
+    return identity, sequence
+
+
+def _backfill_quota_event_sequences(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(f"SELECT * FROM {_TABLE}").fetchall()
+    samples = [
+        _sample_from_row(row) for row in rows if not bool(row["legacy_unknown_time"])
+    ]
+    for prefix in ("five_hour", "weekly"):
+        candidates = [
+            sample for sample in samples
+            if _quota_window_identity(sample, prefix) is not None
+        ]
+        candidates.sort(key=lambda sample: (
+            getattr(sample, f"{prefix}_observed_at"), sample.sample_id,
+        ))
+        sequence = 0
+        previous: str | None = None
+        for sample in candidates:
+            identity = _quota_window_identity_key(sample, prefix)
+            if identity != previous:
+                sequence += 1
+                previous = identity
+            connection.execute(
+                f"UPDATE {_TABLE} SET {prefix}_event_seq = ? WHERE id = ?",
+                (sequence, sample.sample_id),
+            )
+        if not candidates:
+            _set_active_quota_event(connection, prefix, None, 0)
+            continue
+        latest = max(candidates, key=lambda sample: (
+            _window_status_time(sample, prefix) or sample.sampled_at,
+            sample.sample_id,
+        ))
+        active_identity = _quota_window_identity_key(latest, prefix)
+        active_sequence = sequence + int(active_identity != previous)
+        _set_active_quota_event(
+            connection, prefix, active_identity, active_sequence,
+        )
 
 
 def _window_status_time(sample: HistorySample, prefix: str) -> datetime | None:
@@ -1092,7 +1332,7 @@ def _compose_quota_state(
             continue
         for suffix in (
             "used_percent", "remaining_percent", "reset_at", "source",
-            "available", "stale", "error_code",
+            "available", "stale", "error_code", "event_seq",
         ):
             values[f"{prefix}_{suffix}"] = getattr(prototype, f"{prefix}_{suffix}")
         values[f"{prefix}_observed_at"] = state_observed[prefix]
@@ -1104,6 +1344,7 @@ def _mask_quota_window(sample: HistorySample, prefix: str) -> HistorySample:
     return replace(sample, **{
         f"{prefix}_observed_at": None,
         f"{prefix}_last_seen_at": None,
+        f"{prefix}_event_seq": 0,
         f"{prefix}_used_percent": None,
         f"{prefix}_remaining_percent": None,
         f"{prefix}_reset_at": None,

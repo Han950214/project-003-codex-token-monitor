@@ -261,6 +261,26 @@ class AdvisorHistoryTests(unittest.TestCase):
         self.assertEqual(quota_risk.history_evidence.sample_count, 5)
         self.assertEqual(quota_risk.history_evidence.source, "global_quota_history")
 
+    def test_quota_round_trip_events_all_reach_the_prior_baseline(self):
+        history = tuple(
+            quota_sample(index, value)
+            for index, value in enumerate((80.0, 70.0, 80.0, 60.0, 50.0))
+        )
+
+        result = evaluate_advice(advisor_input(
+            five_hour_remaining_percent=4.0,
+            quota_history_samples=history,
+        ))
+
+        quota_risk = next(
+            item for item in result.recommendations if item.code == "quota_risk"
+        )
+        evidence = quota_risk.history_evidence
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence.sample_count, 5)
+        self.assertEqual(evidence.distinct_observation_count, 5)
+        self.assertEqual((evidence.minimum_value, evidence.maximum_value), (50.0, 80.0))
+
     def test_weekly_quota_history_uses_its_own_reliable_observation_time(self):
         history = tuple(
             quota_sample(

@@ -42,6 +42,7 @@ RANGES = (7, 30, 90)
 SCENARIOS = (
     "token_quota_independence",
     "quota_heartbeat",
+    "quota_round_trip",
     "advisor_quota_sufficient",
     "advisor_quota_insufficient",
     "mini_dashboard_dedup",
@@ -139,6 +140,8 @@ def _quota_observation(
     remaining_percent: float,
     reset_at: datetime,
     last_seen_at: datetime | None = None,
+    weekly_remaining_percent: float | None = None,
+    weekly_reset_at: datetime | None = None,
 ) -> HistoryObservation:
     last_seen = last_seen_at or observed_at
     return HistoryObservation(
@@ -156,6 +159,19 @@ def _quota_observation(
         five_hour_source="codex_app_server",
         five_hour_available=True,
         five_hour_stale=False,
+        weekly_observed_at=(observed_at if weekly_remaining_percent is not None else None),
+        weekly_last_seen_at=(last_seen if weekly_remaining_percent is not None else None),
+        weekly_used_percent=(
+            None if weekly_remaining_percent is None
+            else 100.0 - weekly_remaining_percent
+        ),
+        weekly_remaining_percent=weekly_remaining_percent,
+        weekly_reset_at=weekly_reset_at,
+        weekly_source=(
+            "codex_app_server" if weekly_remaining_percent is not None else "unknown"
+        ),
+        weekly_available=weekly_remaining_percent is not None,
+        weekly_stale=False,
     )
 
 
@@ -272,6 +288,28 @@ def build_scenario(
         group, metric, page = "quota", "five_hour", "usage_trends"
         outcomes = (inserted_first, inserted_heartbeat)
 
+    elif name == "quota_round_trip":
+        reset_at = current + timedelta(hours=4)
+        weekly_reset_at = current + timedelta(days=5)
+        observations = tuple(
+            _quota_observation(
+                observed_at=current - timedelta(minutes=2 - index),
+                remaining_percent=remaining,
+                reset_at=reset_at,
+                weekly_remaining_percent=60.0,
+                weekly_reset_at=weekly_reset_at,
+            )
+            for index, remaining in enumerate((80.0, 70.0, 80.0))
+        )
+        inserted_first = store.record(observations[0])
+        inserted_second = store.record(observations[1])
+        before = store.query(range_days, QA_THREAD_ID, now=current)
+        inserted_third = store.record(observations[2])
+        after = store.query(range_days, QA_THREAD_ID, now=current)
+        advisor = _advisor_result(after, now=current, five_hour_remaining=80.0)
+        group, metric, page = "quota", "five_hour", "usage_trends"
+        outcomes = (inserted_first, inserted_second, inserted_third)
+
     elif name in {"advisor_quota_sufficient", "advisor_quota_insufficient"}:
         prior_count = 5 if name == "advisor_quota_sufficient" else 4
         reset_at = current + timedelta(hours=4)
@@ -361,6 +399,34 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
     dashboard.show_page(page)
 
 
+def _show_trend_tooltip(dashboard: object, point_index: int) -> None:
+    """Open one real chart tooltip without taking over the user's mouse."""
+    chart = dashboard.trend_chart
+    chart.update_idletasks()
+    chart._redraw()  # noqa: SLF001 - deterministic QA-only rendering hook
+    rendered = chart._rendered_points  # noqa: SLF001 - deterministic QA-only inspection
+    if not 0 <= point_index < len(rendered):
+        raise RuntimeError(
+            f"Tooltip point {point_index} is unavailable; rendered points={len(rendered)}"
+        )
+    x, y, _point = rendered[point_index]
+    chart.event_generate("<Motion>", x=round(x), y=round(y))
+    tooltip = chart._tooltip  # noqa: SLF001 - deterministic QA-only inspection
+    if tooltip is not None:
+        tooltip.lift()
+        tooltip.update_idletasks()
+
+
+def _scroll_trends_to_end(dashboard: object) -> None:
+    """Expose the final summary row in the real 980x660 trends page."""
+    page = dashboard.trend_chart
+    while page is not None and not hasattr(page, "_parent_canvas"):
+        page = getattr(page, "master", None)
+    if page is None:
+        raise RuntimeError("Usage trends scroll container is unavailable")
+    page._parent_canvas.yview_moveto(1.0)  # noqa: SLF001 - QA-only scroll hook
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--geometry", choices=GEOMETRIES, required=True)
@@ -369,6 +435,9 @@ def main() -> None:
     parser.add_argument("--scenario", choices=SCENARIOS, required=True)
     parser.add_argument("--page", choices=PAGES)
     parser.add_argument("--range", choices=RANGES, type=int, default=7)
+    parser.add_argument("--metric", choices=("five_hour", "weekly"))
+    parser.add_argument("--tooltip-index", choices=(0, 1, 2), type=int)
+    parser.add_argument("--scroll-end", action="store_true")
     parser.add_argument("--auto-close-ms", type=int, default=0)
     args = parser.parse_args()
 
@@ -377,6 +446,8 @@ def main() -> None:
     if not save_language(args.language, ui_settings_path()):
         raise RuntimeError("Unable to save isolated GUI acceptance language")
     scenario = build_scenario(args.scenario, data_root, range_days=args.range)
+    if args.metric is not None:
+        scenario = replace(scenario, trend_metric=args.metric)
 
     ctk.set_widget_scaling(args.scale)
     ctk.set_window_scaling(args.scale)
@@ -385,6 +456,8 @@ def main() -> None:
 
     root = ctk.CTk()
     dashboard = Dashboard(root, history_store=scenario.store)
+    dashboard.auto_refresh.set_enabled(False)
+    dashboard.auto_refresh_var.set(False)
     percent = round(args.scale * 100)
     root.title(
         "Codex Token Monitor QA - "
@@ -394,6 +467,15 @@ def main() -> None:
     def apply_case() -> None:
         root.geometry(args.geometry)
         _apply_scenario(dashboard, scenario, args.page or scenario.default_page)
+
+        def stabilize_case() -> None:
+            _apply_scenario(dashboard, scenario, args.page or scenario.default_page)
+            if args.tooltip_index is not None:
+                root.after(250, lambda: _show_trend_tooltip(dashboard, args.tooltip_index))
+            if args.scroll_end:
+                root.after(250, lambda: _scroll_trends_to_end(dashboard))
+
+        root.after(1200, stabilize_case)
         if args.auto_close_ms > 0:
             root.after(args.auto_close_ms, dashboard.close)
 

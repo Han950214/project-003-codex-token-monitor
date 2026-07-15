@@ -215,6 +215,22 @@ class HistoryIntegrationContractTests(unittest.TestCase):
             Dashboard._history_scope_key("token_monitor_history"), "trend_scope_thread",
         )
 
+    def test_quota_recent_change_is_labeled_as_percentage_points(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.language = "zh-CN"
+        self.assertEqual(
+            dashboard._format_trend_value("five_hour", 10.0, signed=True),
+            "+10.0 个百分点",
+        )
+        dashboard.language = "en"
+        self.assertEqual(
+            dashboard._format_trend_value("weekly", -5.0, signed=True),
+            "-5.0 percentage points",
+        )
+        self.assertEqual(
+            dashboard._format_trend_value("five_hour", 80.0), "80.0%",
+        )
+
     def test_smoke_initializes_the_history_database(self):
         source = inspect.getsource(smoke)
         self.assertIn("UsageHistoryStore", source)

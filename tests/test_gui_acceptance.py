@@ -3,12 +3,13 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app.analytics_ui import metric_samples, trend_view_from_query
+from app.analytics_ui import metric_samples, summarize_metric, trend_view_from_query
+from app.main import Dashboard
 from app.paths import DATA_DIR_ENV
 from scripts.gui_acceptance import (
     GEOMETRIES,
@@ -18,6 +19,8 @@ from scripts.gui_acceptance import (
     SCENARIOS,
     _apply_scenario,
     _isolated_data_root,
+    _scroll_trends_to_end,
+    _show_trend_tooltip,
     build_scenario,
 )
 
@@ -41,6 +44,7 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         self.assertEqual(SCENARIOS, (
             "token_quota_independence",
             "quota_heartbeat",
+            "quota_round_trip",
             "advisor_quota_sufficient",
             "advisor_quota_insufficient",
             "mini_dashboard_dedup",
@@ -61,6 +65,33 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "system temp"):
             build_scenario("quota_heartbeat", Path.cwd(), now=NOW)
+
+    def test_tooltip_hook_targets_a_rendered_chart_point_without_mouse_control(self):
+        tooltip = SimpleNamespace(lift=Mock(), update_idletasks=Mock())
+        chart = SimpleNamespace(
+            _rendered_points=[(12.4, 34.6, object()), (56.2, 78.8, object())],
+            _redraw=Mock(),
+            _tooltip=tooltip,
+            update_idletasks=Mock(),
+            event_generate=Mock(),
+        )
+
+        _show_trend_tooltip(SimpleNamespace(trend_chart=chart), 1)
+
+        chart.update_idletasks.assert_called_once_with()
+        chart._redraw.assert_called_once_with()
+        chart.event_generate.assert_called_once_with("<Motion>", x=56, y=79)
+        tooltip.lift.assert_called_once_with()
+        tooltip.update_idletasks.assert_called_once_with()
+
+    def test_scroll_hook_exposes_the_final_trend_summary_row(self):
+        canvas = SimpleNamespace(yview_moveto=Mock())
+        page = SimpleNamespace(_parent_canvas=canvas)
+        chart = SimpleNamespace(master=SimpleNamespace(master=page))
+
+        _scroll_trends_to_end(SimpleNamespace(trend_chart=chart))
+
+        canvas.yview_moveto.assert_called_once_with(1.0)
 
     def test_quota_only_change_does_not_add_or_refresh_token_observation(self):
         scenario = self._scenario("token_quota_independence")
@@ -103,6 +134,47 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         )
         self.assertFalse(scenario.after.five_hour_stale)
         self.assertEqual(scenario.after.status, "stale")
+
+    def test_quota_round_trip_preserves_three_events_and_independent_weekly_heartbeat(self):
+        scenario = self._scenario("quota_round_trip")
+        five = metric_samples(scenario.trend_view, "five_hour")
+        weekly = metric_samples(scenario.trend_view, "weekly")
+        summary = summarize_metric(scenario.trend_view, "five_hour")
+        expected_times = tuple(
+            NOW - timedelta(minutes=2 - index) for index in range(3)
+        )
+
+        self.assertEqual(scenario.record_results, (True, True, True))
+        self.assertEqual(scenario.after.sample_count, 0)
+        self.assertEqual([value for _, value in five], [80.0, 70.0, 80.0])
+        self.assertEqual(
+            tuple(sample.five_hour_observed_at for sample, _ in five),
+            expected_times,
+        )
+        self.assertEqual(len(set(expected_times)), 3)
+        self.assertEqual(
+            (
+                summary.current,
+                summary.minimum,
+                summary.maximum,
+                summary.change,
+                summary.sample_count,
+                summary.end_at,
+                summary.scope,
+            ),
+            (80.0, 70.0, 80.0, 10.0, 3, NOW, "global"),
+        )
+        self.assertEqual([value for _, value in weekly], [60.0])
+        self.assertIsNone(summarize_metric(scenario.trend_view, "weekly").change)
+        self.assertEqual(scenario.after.five_hour_last_seen_at, NOW)
+        self.assertEqual(scenario.after.weekly_last_seen_at, NOW)
+        points = object.__new__(Dashboard)._trend_points(
+            scenario.trend_view, "five_hour",
+        )
+        self.assertEqual(
+            tuple((point.value, point.observed_at) for point in points),
+            tuple(zip((80.0, 70.0, 80.0), expected_times, strict=True)),
+        )
 
     def test_advisor_quota_sufficient_uses_five_prior_global_samples(self):
         scenario = self._scenario("advisor_quota_sufficient")
@@ -174,6 +246,28 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         dashboard._render_trends.assert_called_once_with()
         dashboard._render_advisor.assert_called_once_with()
         dashboard._render_recommendations.assert_called_once_with()
+        dashboard.show_page.assert_called_once_with("usage_trends")
+
+    def test_round_trip_scenario_applies_global_quota_metric(self):
+        scenario = self._scenario("quota_round_trip")
+        dashboard = SimpleNamespace(
+            language="en",
+            trend_group_labels={"Quota (Global)": "quota"},
+            trend_group_menu=Mock(),
+            trend_range_menu=Mock(),
+            _configure_trend_metric_menu=Mock(),
+            _render_trends=Mock(),
+            _render_advisor=Mock(),
+            _render_recommendations=Mock(),
+            show_page=Mock(),
+        )
+
+        _apply_scenario(dashboard, scenario, scenario.default_page)
+
+        self.assertEqual((dashboard.trend_group, dashboard.trend_metric), (
+            "quota", "five_hour",
+        ))
+        dashboard.trend_group_menu.set.assert_called_once_with("Quota (Global)")
         dashboard.show_page.assert_called_once_with("usage_trends")
 
     def test_scenarios_store_only_production_safe_numeric_fields(self):

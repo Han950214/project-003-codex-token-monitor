@@ -108,7 +108,7 @@ def observation(
 
 class HistorySchemaTests(unittest.TestCase):
     def test_constants_match_phase_contract(self):
-        self.assertEqual((SCHEMA_VERSION, RETENTION_DAYS, MAX_HISTORY_ROWS), (2, 90, 200_000))
+        self.assertEqual((SCHEMA_VERSION, RETENTION_DAYS, MAX_HISTORY_ROWS), (3, 90, 200_000))
 
     def test_new_database_initializes_versioned_schema_and_unique_index(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -116,7 +116,7 @@ class HistorySchemaTests(unittest.TestCase):
             store = UsageHistoryStore(path, clock=lambda: NOW)
             self.assertTrue(store.initialize())
             with closing(sqlite3.connect(path)) as connection, connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
                 columns = {
                     row[1] for row in connection.execute(
                         "PRAGMA table_info(usage_history_samples)"
@@ -130,6 +130,8 @@ class HistorySchemaTests(unittest.TestCase):
             self.assertIn("sample_fingerprint", columns)
             self.assertIn("five_hour_last_seen_at_utc", columns)
             self.assertIn("weekly_last_seen_at_utc", columns)
+            self.assertIn("five_hour_event_seq", columns)
+            self.assertIn("weekly_event_seq", columns)
             self.assertIn("ux_usage_history_samples_fingerprint", indexes)
 
     def test_existing_database_and_unrelated_data_are_preserved(self):
@@ -197,7 +199,7 @@ class HistorySchemaTests(unittest.TestCase):
                     "five_hour_last_seen_at_utc, weekly_observed_at_utc, "
                     "weekly_last_seen_at_utc FROM usage_history_samples WHERE id=1"
                 ).fetchone()
-            self.assertEqual(version, 2)
+            self.assertEqual(version, 3)
             self.assertEqual(row, (321, observed_text, observed_text, observed_text, observed_text))
 
     def test_v1_stale_quota_row_is_preserved_without_invented_window_time(self):
@@ -232,6 +234,76 @@ class HistorySchemaTests(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(row, (None, 50.0))
             self.assertEqual(result.quota_samples, ())
+
+    def test_v2_reliable_quota_rows_backfill_independent_event_sequences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            first = NOW - timedelta(minutes=2)
+            second = NOW - timedelta(minutes=1)
+            iso = lambda value: value.isoformat(timespec="microseconds").replace(
+                "+00:00", "Z",
+            )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE usage_history_samples("
+                    "id INTEGER PRIMARY KEY, sampled_at_utc TEXT, "
+                    "quota_observed_at_utc TEXT, five_hour_observed_at_utc TEXT, "
+                    "five_hour_last_seen_at_utc TEXT, five_hour_used_percent REAL, "
+                    "five_hour_remaining_percent REAL, five_hour_reset_at_utc TEXT, "
+                    "five_hour_source TEXT, five_hour_available INTEGER, "
+                    "five_hour_stale INTEGER, weekly_observed_at_utc TEXT, "
+                    "weekly_last_seen_at_utc TEXT, weekly_used_percent REAL, "
+                    "weekly_remaining_percent REAL, weekly_reset_at_utc TEXT, "
+                    "weekly_source TEXT, weekly_available INTEGER, weekly_stale INTEGER, "
+                    "sample_fingerprint TEXT)"
+                )
+                reset = iso(NOW + timedelta(hours=4))
+                for row_id, observed, last_seen, remaining in (
+                    (1, first, NOW, 80.0),
+                    (2, second, second, 60.0),
+                ):
+                    connection.execute(
+                        "INSERT INTO usage_history_samples VALUES("
+                        "?, ?, ?, ?, ?, ?, ?, ?, 'codex_app_server', 1, 0, "
+                        "?, ?, 30.0, 70.0, ?, 'codex_app_server', 1, 0, ?)",
+                        (
+                            row_id, iso(observed), iso(observed), iso(observed),
+                            iso(last_seen), 100.0 - remaining, remaining, reset,
+                            iso(observed), iso(observed),
+                            iso(NOW + timedelta(days=5)), f"v2-{row_id}",
+                        ),
+                    )
+                connection.execute("PRAGMA user_version=2")
+
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            self.assertTrue(store.initialize())
+
+            with closing(sqlite3.connect(path)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                rows = connection.execute(
+                    "SELECT five_hour_event_seq, weekly_event_seq "
+                    "FROM usage_history_samples ORDER BY id"
+                ).fetchall()
+                meta = dict(connection.execute(
+                    "SELECT key, value FROM usage_history_meta "
+                    "WHERE key LIKE 'quota_%_active_%_v3'"
+                ))
+            self.assertEqual(version, 3)
+            self.assertEqual(rows, [(1, 1), (2, 1)])
+            self.assertEqual(meta["quota_five_hour_active_seq_v3"], "3")
+            self.assertEqual(meta["quota_weekly_active_seq_v3"], "1")
+
+            returned = observation(quota_observed_at=NOW)
+            self.assertTrue(store.record(returned))
+            points = metric_samples(
+                trend_view_from_query(store.query(7, "thread-1", now=NOW)),
+                "five_hour",
+            )
+            self.assertEqual([value for _, value in points], [80.0, 60.0, 80.0])
+            self.assertEqual(
+                [sample.five_hour_event_seq for sample, _ in points], [1, 2, 3],
+            )
 
     def test_partial_schema_rows_survive_migration_and_first_retention_pass(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -532,6 +604,446 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(result.five_hour_last_seen_at, later_seen)
             self.assertEqual(restarted.five_hour_last_seen_at, later_seen)
             self.assertEqual(result.end_at, first.source_observed_at)
+
+    def test_five_hour_a_b_a_is_three_events_but_weekly_is_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            first_at = NOW - timedelta(minutes=2)
+            middle_at = NOW - timedelta(minutes=1)
+            first = observation(quota_observed_at=first_at)
+            first = replace(
+                first,
+                five_hour_observed_at=first_at,
+                five_hour_last_seen_at=first_at,
+                weekly_observed_at=first_at,
+                weekly_last_seen_at=first_at,
+            )
+            middle = replace(
+                first,
+                sampled_at=middle_at,
+                quota_observed_at=middle_at,
+                five_hour_observed_at=middle_at,
+                five_hour_last_seen_at=middle_at,
+                weekly_observed_at=middle_at,
+                weekly_last_seen_at=middle_at,
+                five_hour_used_percent=40.0,
+                five_hour_remaining_percent=60.0,
+            )
+            returned = replace(
+                first,
+                sampled_at=NOW,
+                quota_observed_at=NOW,
+                five_hour_observed_at=NOW,
+                five_hour_last_seen_at=NOW,
+                weekly_observed_at=NOW,
+                weekly_last_seen_at=NOW,
+            )
+
+            self.assertEqual(
+                [store.record(item) for item in (first, middle, returned)],
+                [True, True, True],
+            )
+            restarted = self.make_store(directory)
+            heartbeat_at = NOW + timedelta(seconds=1)
+            heartbeat = replace(
+                returned,
+                sampled_at=heartbeat_at,
+                quota_observed_at=heartbeat_at,
+                five_hour_observed_at=heartbeat_at,
+                five_hour_last_seen_at=heartbeat_at,
+                weekly_observed_at=heartbeat_at,
+                weekly_last_seen_at=heartbeat_at,
+            )
+            self.assertFalse(restarted.record(heartbeat))
+            result = restarted.query(7, "thread-1", now=heartbeat_at)
+            view = trend_view_from_query(result)
+
+            self.assertEqual(
+                [value for _, value in metric_samples(view, "five_hour")],
+                [80.0, 60.0, 80.0],
+            )
+            self.assertEqual(
+                [value for _, value in metric_samples(view, "weekly")], [70.0],
+            )
+            with closing(sqlite3.connect(store.path)) as connection:
+                rows = connection.execute(
+                    "SELECT five_hour_event_seq, weekly_event_seq, "
+                    "five_hour_last_seen_at_utc "
+                    "FROM usage_history_samples ORDER BY id"
+                ).fetchall()
+            self.assertEqual(
+                [(five_seq, weekly_seq) for five_seq, weekly_seq, _ in rows],
+                [(1, 1), (2, 1), (3, 1)],
+            )
+            self.assertEqual(
+                datetime.fromisoformat(rows[0][2].replace("Z", "+00:00")),
+                first_at,
+            )
+            self.assertEqual(
+                datetime.fromisoformat(rows[2][2].replace("Z", "+00:00")),
+                heartbeat_at,
+            )
+            self.assertEqual(result.five_hour_last_seen_at, heartbeat_at)
+
+    def test_weekly_a_b_a_is_independent_from_five_hour(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            first_at = NOW - timedelta(minutes=2)
+            middle_at = NOW - timedelta(minutes=1)
+            first = observation(quota_observed_at=first_at)
+            first = replace(
+                first,
+                five_hour_observed_at=first_at,
+                five_hour_last_seen_at=first_at,
+                weekly_observed_at=first_at,
+                weekly_last_seen_at=first_at,
+            )
+            middle = replace(
+                first,
+                sampled_at=middle_at,
+                quota_observed_at=middle_at,
+                five_hour_observed_at=middle_at,
+                five_hour_last_seen_at=middle_at,
+                weekly_observed_at=middle_at,
+                weekly_last_seen_at=middle_at,
+                weekly_used_percent=50.0,
+                weekly_remaining_percent=50.0,
+            )
+            returned = replace(
+                first,
+                sampled_at=NOW,
+                quota_observed_at=NOW,
+                five_hour_observed_at=NOW,
+                five_hour_last_seen_at=NOW,
+                weekly_observed_at=NOW,
+                weekly_last_seen_at=NOW,
+            )
+            for item in (first, middle, returned):
+                self.assertTrue(store.record(item))
+
+            view = trend_view_from_query(store.query(7, "thread-1", now=NOW))
+
+            self.assertEqual(
+                [value for _, value in metric_samples(view, "weekly")],
+                [70.0, 50.0, 70.0],
+            )
+            self.assertEqual(
+                [value for _, value in metric_samples(view, "five_hour")], [80.0],
+            )
+
+    def test_both_windows_change_together_with_stable_independent_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            times = (
+                NOW - timedelta(minutes=2),
+                NOW - timedelta(minutes=1),
+                NOW,
+            )
+            first = observation(quota_observed_at=times[0])
+            first = replace(
+                first,
+                five_hour_observed_at=times[0],
+                five_hour_last_seen_at=times[0],
+                weekly_observed_at=times[0],
+                weekly_last_seen_at=times[0],
+            )
+            middle = replace(
+                first,
+                sampled_at=times[1],
+                quota_observed_at=times[1],
+                five_hour_observed_at=times[1],
+                five_hour_last_seen_at=times[1],
+                five_hour_used_percent=40.0,
+                five_hour_remaining_percent=60.0,
+                weekly_observed_at=times[1],
+                weekly_last_seen_at=times[1],
+                weekly_used_percent=50.0,
+                weekly_remaining_percent=50.0,
+            )
+            returned = replace(
+                first,
+                sampled_at=times[2],
+                quota_observed_at=times[2],
+                five_hour_observed_at=times[2],
+                five_hour_last_seen_at=times[2],
+                weekly_observed_at=times[2],
+                weekly_last_seen_at=times[2],
+            )
+            for item in (first, middle, returned):
+                self.assertTrue(store.record(item))
+
+            view = trend_view_from_query(store.query(7, "thread-1", now=NOW))
+            five = metric_samples(view, "five_hour")
+            weekly = metric_samples(view, "weekly")
+
+            self.assertEqual([value for _, value in five], [80.0, 60.0, 80.0])
+            self.assertEqual([value for _, value in weekly], [70.0, 50.0, 70.0])
+            self.assertEqual(
+                [sample.five_hour_event_seq for sample, _ in five], [1, 2, 3],
+            )
+            self.assertEqual(
+                [sample.weekly_event_seq for sample, _ in weekly], [1, 2, 3],
+            )
+            self.assertEqual(
+                [sample.five_hour_observed_at for sample, _ in five], list(times),
+            )
+            self.assertEqual(
+                [sample.weekly_observed_at for sample, _ in weekly], list(times),
+            )
+
+    def test_reset_and_source_changes_allocate_new_window_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            first = observation(quota_observed_at=NOW - timedelta(minutes=2))
+            first = replace(
+                first,
+                five_hour_observed_at=NOW - timedelta(minutes=2),
+                five_hour_last_seen_at=NOW - timedelta(minutes=2),
+            )
+            reset_change = replace(
+                first,
+                sampled_at=NOW - timedelta(minutes=1),
+                quota_observed_at=NOW - timedelta(minutes=1),
+                five_hour_observed_at=NOW - timedelta(minutes=1),
+                five_hour_last_seen_at=NOW - timedelta(minutes=1),
+                five_hour_reset_at=NOW + timedelta(hours=5),
+            )
+            source_change = replace(
+                reset_change,
+                sampled_at=NOW,
+                quota_observed_at=NOW,
+                five_hour_observed_at=NOW,
+                five_hour_last_seen_at=NOW,
+                five_hour_source="other_safe_source",
+            )
+            for item in (first, reset_change, source_change):
+                self.assertTrue(store.record(item))
+
+            points = metric_samples(
+                trend_view_from_query(store.query(7, "thread-1", now=NOW)),
+                "five_hour",
+            )
+
+            self.assertEqual([value for _, value in points], [80.0, 80.0, 80.0])
+            self.assertEqual(
+                [sample.five_hour_event_seq for sample, _ in points], [1, 2, 3],
+            )
+
+    def test_stale_status_does_not_become_value_event_and_fresh_recovery_heartbeats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            first_at = NOW - timedelta(minutes=2)
+            stale_at = NOW - timedelta(minutes=1)
+            first = observation(quota_observed_at=first_at)
+            first = replace(
+                first,
+                five_hour_observed_at=first_at,
+                five_hour_last_seen_at=first_at,
+                weekly_observed_at=first_at,
+                weekly_last_seen_at=first_at,
+            )
+            stale = replace(
+                first,
+                sampled_at=stale_at,
+                quota_observed_at=stale_at,
+                quota_source_status="stale",
+                five_hour_stale=True,
+                five_hour_error_code="quota_refresh_failed",
+                weekly_stale=True,
+                weekly_error_code="quota_refresh_failed",
+            )
+            recovered = replace(
+                first,
+                sampled_at=NOW,
+                quota_observed_at=NOW,
+                five_hour_observed_at=NOW,
+                five_hour_last_seen_at=NOW,
+                weekly_observed_at=NOW,
+                weekly_last_seen_at=NOW,
+            )
+
+            self.assertTrue(store.record(first))
+            self.assertTrue(store.record(stale))
+            self.assertFalse(store.record(recovered))
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(
+                [value for _, value in metric_samples(
+                    trend_view_from_query(result), "five_hour",
+                )],
+                [80.0],
+            )
+            self.assertEqual(result.five_hour_last_seen_at, NOW)
+            self.assertFalse(result.five_hour_stale)
+
+    def test_meta_missing_recovers_active_loop_event_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            first_at = NOW - timedelta(minutes=3)
+            middle_at = NOW - timedelta(minutes=2)
+            returned_at = NOW - timedelta(minutes=1)
+            first = observation(quota_observed_at=first_at)
+            first = replace(
+                first,
+                five_hour_observed_at=first_at,
+                five_hour_last_seen_at=first_at,
+                weekly_observed_at=first_at,
+                weekly_last_seen_at=first_at,
+            )
+            middle = replace(
+                first,
+                sampled_at=middle_at,
+                quota_observed_at=middle_at,
+                five_hour_observed_at=middle_at,
+                five_hour_last_seen_at=middle_at,
+                weekly_observed_at=middle_at,
+                weekly_last_seen_at=middle_at,
+                five_hour_used_percent=40.0,
+                five_hour_remaining_percent=60.0,
+            )
+            returned = replace(
+                first,
+                sampled_at=returned_at,
+                quota_observed_at=returned_at,
+                five_hour_observed_at=returned_at,
+                five_hour_last_seen_at=returned_at,
+                weekly_observed_at=returned_at,
+                weekly_last_seen_at=returned_at,
+            )
+            for item in (first, middle, returned):
+                self.assertTrue(store.record(item))
+            with closing(sqlite3.connect(store.path)) as connection, connection:
+                connection.execute(
+                    "DELETE FROM usage_history_meta "
+                    "WHERE key LIKE 'quota_%_active_%_v3'"
+                )
+            heartbeat = replace(
+                returned,
+                sampled_at=NOW,
+                quota_observed_at=NOW,
+                five_hour_observed_at=NOW,
+                five_hour_last_seen_at=NOW,
+                weekly_observed_at=NOW,
+                weekly_last_seen_at=NOW,
+            )
+
+            restarted = self.make_store(directory)
+            self.assertFalse(restarted.record(heartbeat))
+            result = restarted.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(
+                [value for _, value in metric_samples(
+                    trend_view_from_query(result), "five_hour",
+                )],
+                [80.0, 60.0, 80.0],
+            )
+            self.assertEqual(result.five_hour_last_seen_at, NOW)
+            with closing(sqlite3.connect(store.path)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM usage_history_samples"
+                    ).fetchone()[0],
+                    3,
+                )
+
+    def test_concurrent_same_transition_allocates_one_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_store = self.make_store(directory)
+            second_store = self.make_store(directory)
+            first = observation(quota_observed_at=NOW - timedelta(minutes=1))
+            first = replace(
+                first,
+                five_hour_observed_at=NOW - timedelta(minutes=1),
+                five_hour_last_seen_at=NOW - timedelta(minutes=1),
+                weekly_observed_at=NOW - timedelta(minutes=1),
+                weekly_last_seen_at=NOW - timedelta(minutes=1),
+            )
+            self.assertTrue(first_store.record(first))
+            self.assertTrue(second_store.initialize())
+            changed = replace(
+                first,
+                sampled_at=NOW,
+                quota_observed_at=NOW,
+                five_hour_observed_at=NOW,
+                five_hour_last_seen_at=NOW,
+                weekly_observed_at=NOW,
+                weekly_last_seen_at=NOW,
+                five_hour_used_percent=40.0,
+                five_hour_remaining_percent=60.0,
+            )
+            barrier = threading.Barrier(2)
+            results: list[bool] = []
+
+            def write(store: UsageHistoryStore) -> None:
+                barrier.wait()
+                results.append(store.record(changed))
+
+            threads = [
+                threading.Thread(target=write, args=(store,))
+                for store in (first_store, second_store)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(sorted(results), [False, True])
+            with closing(sqlite3.connect(first_store.path)) as connection:
+                rows = connection.execute(
+                    "SELECT five_hour_event_seq FROM usage_history_samples ORDER BY id"
+                ).fetchall()
+            self.assertEqual(rows, [(1,), (2,)])
+
+    def test_failed_insert_rolls_back_active_meta_and_sequence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            first = observation(quota_observed_at=NOW - timedelta(minutes=1))
+            first = replace(
+                first,
+                five_hour_observed_at=NOW - timedelta(minutes=1),
+                five_hour_last_seen_at=NOW - timedelta(minutes=1),
+                weekly_observed_at=NOW - timedelta(minutes=1),
+                weekly_last_seen_at=NOW - timedelta(minutes=1),
+            )
+            self.assertTrue(store.record(first))
+            changed = replace(
+                first,
+                sampled_at=NOW,
+                quota_observed_at=NOW,
+                five_hour_observed_at=NOW,
+                five_hour_last_seen_at=NOW,
+                weekly_observed_at=NOW,
+                weekly_last_seen_at=NOW,
+                five_hour_used_percent=40.0,
+                five_hour_remaining_percent=60.0,
+            )
+            with closing(sqlite3.connect(store.path)) as connection, connection:
+                connection.execute(
+                    "CREATE TRIGGER reject_history_insert BEFORE INSERT ON "
+                    "usage_history_samples BEGIN SELECT RAISE(ABORT, 'reject'); END"
+                )
+            self.assertFalse(store.record(changed))
+            with closing(sqlite3.connect(store.path)) as connection:
+                failed_seq = connection.execute(
+                    "SELECT value FROM usage_history_meta "
+                    "WHERE key='quota_five_hour_active_seq_v3'"
+                ).fetchone()[0]
+            self.assertEqual(failed_seq, "1")
+            with closing(sqlite3.connect(store.path)) as connection, connection:
+                connection.execute("DROP TRIGGER reject_history_insert")
+
+            self.assertTrue(store.record(changed))
+            with closing(sqlite3.connect(store.path)) as connection:
+                rows = connection.execute(
+                    "SELECT five_hour_event_seq FROM usage_history_samples ORDER BY id"
+                ).fetchall()
+                active_seq = connection.execute(
+                    "SELECT value FROM usage_history_meta "
+                    "WHERE key='quota_five_hour_active_seq_v3'"
+                ).fetchone()[0]
+            self.assertEqual(rows, [(1,), (2,)])
+            self.assertEqual(active_seq, "2")
 
     def test_quota_windows_project_independently_when_reliable_times_cross(self):
         with tempfile.TemporaryDirectory() as directory:
