@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import queue
 import sys
+import threading
 import tkinter as tk
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -15,7 +18,10 @@ if __package__ in {None, ""}:
 
 from app.auto_refresh import AutoRefreshController, DEFAULT_AUTO_REFRESH_SECONDS
 from app.advisor import AdvisorResult, Recommendation, build_advisor_input, evaluate_advice
-from app.analytics_ui import TrendView, build_trend_view
+from app.analytics_ui import (
+    TREND_STALE_AFTER, TrendView, metric_samples, summarize_metric,
+    trend_view_from_query,
+)
 from app.app_actions import open_codex, open_data_directory
 from app.codex_rollout import configured_sessions_dir
 from app.codex_state import configured_state_path
@@ -32,6 +38,7 @@ from app.i18n import (
     LANGUAGE_LABELS, language_from_label, localize_auto_refresh,
     localize_presenter_text, localize_status, translate,
 )
+from app.history import HistoryObservation, UsageHistoryStore
 from app.paths import ui_settings_path
 from app.quota import CodexQuotaSnapshot
 from app.quota_provider import CodexAppServerQuotaProvider, QuotaProvider, find_codex_executable
@@ -47,6 +54,7 @@ from app.ui_format import (
     dashboard_layout_for_width, ellipsize_title, format_compact_token_count,
     format_full_token_count, metric_columns_for_width,
 )
+from app.trend_chart import TrendCanvas, TrendPoint, TrendTooltipLabels
 from app.ui_icons import CircularProgress, Sparkline, create_icon
 from app.ui_settings import (
     LanguageController, load_auto_refresh_enabled,
@@ -74,6 +82,27 @@ CORE_METRICS = (
     "current_turn", "session_total", "cache_reuse", "reasoning",
     "five_hour_quota", "weekly_quota",
 )
+TREND_GROUP_METRICS = {
+    "tokens": ("input", "output", "total"),
+    "cache": ("cached", "cache_reuse", "reasoning"),
+    "workflow": ("session_total", "turn_count"),
+    "quota": ("five_hour", "weekly"),
+}
+TREND_GROUP_LABEL_KEYS = {
+    key: f"trend_group_{key}" for key in TREND_GROUP_METRICS
+}
+TREND_METRIC_LABEL_KEYS = {
+    "input": "metric_input",
+    "output": "metric_output",
+    "total": "metric_total",
+    "cached": "metric_cached",
+    "cache_reuse": "trend_metric_cache_reuse",
+    "reasoning": "metric_reasoning",
+    "session_total": "trend_metric_session_total",
+    "turn_count": "trend_metric_turn_count",
+    "five_hour": "trend_metric_five_hour",
+    "weekly": "trend_metric_weekly",
+}
 
 
 def pagination_bounds(item_count: int, current_page: int, page_size: int = 10) -> tuple[int, int, int, int]:
@@ -84,12 +113,20 @@ def pagination_bounds(item_count: int, current_page: int, page_size: int = 10) -
 
 
 class Dashboard:
-    def __init__(self, root: ctk.CTk, quota_provider: QuotaProvider | None = None) -> None:
+    def __init__(
+        self,
+        root: ctk.CTk,
+        quota_provider: QuotaProvider | None = None,
+        history_store: UsageHistoryStore | None = None,
+    ) -> None:
         self.root = root
         configure_view(root)
         self.quota_provider = quota_provider or CodexAppServerQuotaProvider()
         title_loader = getattr(self.quota_provider, "refresh_thread_titles", lambda: {})
         self.view_model = DashboardViewModel(title_batch_loader=title_loader)
+        self.history_store = history_store or UsageHistoryStore()
+        self.history_store.initialize()
+        self.history_error = self.history_store.last_error
         self.language_controller = LanguageController(self._apply_language, UI_SETTINGS_PATH)
         self.language = self.language_controller.language
         self.widget_display_mode = load_widget_mode(UI_SETTINGS_PATH)
@@ -104,7 +141,9 @@ class Dashboard:
         self.diagnostic_report: DiagnosticReport | None = None
         self.lookback_days = 7
         self.trend_range_days = 7
-        self.trend_view = TrendView(7, "unavailable", (), None)
+        self.trend_view = TrendView(7, "empty", (), None)
+        self.trend_group = "tokens"
+        self.trend_metric = "total"
         self.status_filter = "all"
         self.label_to_thread: dict[str, str] = {}
         self.selectable_thread_ids: set[str] = set()
@@ -116,6 +155,17 @@ class Dashboard:
         self._tray_mode = False
         self.window_mode = "dashboard"
         self._closing = False
+        self._trend_query_generation = 0
+        self._trend_query_requests: queue.Queue[tuple[int, int, str]] = queue.Queue(maxsize=1)
+        self._trend_query_results: queue.Queue[tuple[int, TrendView, str | None]] = queue.Queue()
+        self._trend_query_stop = threading.Event()
+        self._trend_query_poll_scheduled = False
+        self._trend_query_worker = threading.Thread(
+            target=self._trend_query_worker_loop,
+            name="trend-query-worker",
+            daemon=True,
+        )
+        self._trend_query_worker.start()
         self._taskbar_iconify_scheduled = False
         self._layout_job: str | None = None
         self._sidebar_collapsed = False
@@ -1175,6 +1225,32 @@ class Dashboard:
             width=148, height=34,
         )
         self.trend_range_menu.grid(row=0, column=1, padx=SPACE_4, pady=SPACE_3)
+        selectors = ctk.CTkFrame(controls, fg_color="transparent")
+        selectors.grid(
+            row=1, column=0, columnspan=2, sticky="ew",
+            padx=SPACE_4, pady=(0, SPACE_3),
+        )
+        selectors.grid_columnconfigure((1, 3), weight=1)
+        self.trend_group_label = ctk.CTkLabel(
+            selectors, text="", font=CAPTION, text_color=COLORS.secondary_text,
+        )
+        self.trend_group_label.grid(row=0, column=0, padx=(0, SPACE_2))
+        self.trend_group_menu = ctk.CTkOptionMenu(
+            selectors, values=["—"], command=self._change_trend_group,
+            width=190, height=34,
+        )
+        self.trend_group_menu.grid(row=0, column=1, sticky="w", padx=(0, SPACE_4))
+        self.trend_metric_label = ctk.CTkLabel(
+            selectors, text="", font=CAPTION, text_color=COLORS.secondary_text,
+        )
+        self.trend_metric_label.grid(row=0, column=2, padx=(0, SPACE_2))
+        self.trend_metric_menu = ctk.CTkOptionMenu(
+            selectors, values=["—"], command=self._change_trend_metric,
+            width=190, height=34,
+        )
+        self.trend_metric_menu.grid(row=0, column=3, sticky="w")
+        self.trend_group_labels: dict[str, str] = {}
+        self.trend_metric_labels: dict[str, str] = {}
 
         summary = self._section_card(page)
         summary.grid(row=1, column=0, sticky="ew", pady=(0, SPACE_3))
@@ -1218,9 +1294,22 @@ class Dashboard:
             text_color=COLORS.secondary_text, anchor="w", justify="left",
             wraplength=760,
         ).grid(row=1, column=0, sticky="ew", padx=SPACE_4, pady=(0, SPACE_3))
-        self.trend_chart = Sparkline(
-            quality, width=760, height=150,
-            background=COLORS.surface, color=COLORS.accent,
+        self.trend_chart = TrendCanvas(
+            quality, width=760, height=190,
+            background=COLORS.surface,
+            foreground=COLORS.primary_text,
+            grid_color=COLORS.border,
+            series_colors={
+                key: color for key, color in zip(
+                    TREND_METRIC_LABEL_KEYS,
+                    (
+                        COLORS.accent, COLORS.real, COLORS.purple, COLORS.orange,
+                        COLORS.teal, COLORS.purple, COLORS.accent, COLORS.orange,
+                        COLORS.teal, COLORS.purple,
+                    ),
+                )
+            },
+            value_formatter=self._format_trend_tooltip_value,
         )
         self.trend_chart.grid(
             row=2, column=0, sticky="ew", padx=SPACE_4, pady=(0, SPACE_4),
@@ -1229,30 +1318,30 @@ class Dashboard:
 
         metrics = self._section_card(page)
         metrics.grid(row=3, column=0, sticky="ew")
-        metrics.grid_columnconfigure((0, 1, 2, 3, 4), weight=1, uniform="trend_metric")
+        metrics.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="trend_metric")
         self.trend_metric_vars = {
             key: tk.StringVar(master=self.root, value="—")
-            for key in ("input", "output", "total", "cached", "reasoning")
+            for key in ("current", "minimum", "maximum", "change")
         }
-        self.trend_metric_labels = {}
+        self.trend_summary_metric_labels = {}
         self.trend_metric_cells = []
-        for column, key in enumerate(("input", "output", "total", "cached", "reasoning")):
+        for column, key in enumerate(("current", "minimum", "maximum", "change")):
             cell = ctk.CTkFrame(metrics, fg_color=COLORS.raised_surface, corner_radius=CONTROL_RADIUS)
             cell.grid(row=0, column=column, sticky="nsew", padx=SPACE_1, pady=SPACE_2)
             label = ctk.CTkLabel(cell, text="", font=CAPTION, text_color=COLORS.secondary_text)
             label.grid(row=0, column=0, padx=SPACE_2, pady=(SPACE_2, 0))
-            self.trend_metric_labels[key] = label
+            self.trend_summary_metric_labels[key] = label
             self.trend_metric_cells.append(cell)
             ctk.CTkLabel(
                 cell, textvariable=self.trend_metric_vars[key], font=METRIC,
-                text_color=COLORS.purple if key == "reasoning" else COLORS.primary_text,
+                text_color=COLORS.primary_text,
             ).grid(row=1, column=0, padx=SPACE_2, pady=(0, SPACE_2))
         self.trend_metrics_host = metrics
         self._layout_trend_metrics(1000)
 
     def _layout_trend_metrics(self, content_width: int) -> None:
-        columns = 5 if content_width >= 1_100 else (3 if content_width >= 900 else 2)
-        for column in range(5):
+        columns = 4 if content_width >= 1_000 else 2
+        for column in range(4):
             self.trend_metrics_host.grid_columnconfigure(
                 column, weight=1 if column < columns else 0,
                 uniform="trend_metric" if column < columns else "",
@@ -1280,6 +1369,8 @@ class Dashboard:
             severity_var = tk.StringVar(master=self.root, value="")
             body_var = tk.StringVar(master=self.root, value="")
             evidence_var = tk.StringVar(master=self.root, value="")
+            metadata_var = tk.StringVar(master=self.root, value="")
+            history_var = tk.StringVar(master=self.root, value="")
             observed_var = tk.StringVar(master=self.root, value="")
             ctk.CTkLabel(
                 card, textvariable=title_var,
@@ -1303,18 +1394,29 @@ class Dashboard:
                 wraplength=760,
             ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=SPACE_4, pady=SPACE_1)
             ctk.CTkLabel(
+                card, textvariable=metadata_var, font=CAPTION,
+                text_color=COLORS.secondary_text, anchor="w", justify="left",
+                wraplength=760,
+            ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=SPACE_4, pady=SPACE_1)
+            ctk.CTkLabel(
+                card, textvariable=history_var, font=BODY,
+                text_color=COLORS.secondary_text, anchor="w", justify="left",
+                wraplength=760,
+            ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=SPACE_4, pady=SPACE_1)
+            ctk.CTkLabel(
                 card, textvariable=observed_var, font=CAPTION,
                 text_color=COLORS.muted_text, anchor="w",
-            ).grid(row=3, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_1, SPACE_3))
+            ).grid(row=5, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_1, SPACE_3))
             action = ctk.CTkButton(
                 card, text="", command=lambda item=index: self._execute_recommendation(item),
                 width=138, height=32,
             )
-            action.grid(row=3, column=1, padx=SPACE_4, pady=(SPACE_1, SPACE_3))
+            action.grid(row=5, column=1, padx=SPACE_4, pady=(SPACE_1, SPACE_3))
             self.recommendation_cards.append({
                 "card": card, "title": title_var, "severity": severity_var,
                 "severity_label": severity, "body": body_var,
-                "evidence": evidence_var, "observed": observed_var,
+                "evidence": evidence_var, "metadata": metadata_var,
+                "history": history_var, "observed": observed_var,
                 "action": action, "recommendation": None,
             })
         self.recommendations_rules_button = ctk.CTkButton(
@@ -1655,17 +1757,53 @@ class Dashboard:
         trend_ranges = [translate(f"last_{days}_days", language) for days in (7, 30, 90)]
         self.trend_range_menu.configure(values=trend_ranges)
         self.trend_range_menu.set(translate(f"last_{self.trend_range_days}_days", language))
+        self.trend_group_label.configure(text=translate("trend_group_label", language))
+        self.trend_metric_label.configure(text=translate("trend_metric_label", language))
+        self.trend_group_labels = {
+            translate(label_key, language): key
+            for key, label_key in TREND_GROUP_LABEL_KEYS.items()
+        }
+        self.trend_group_menu.configure(values=list(self.trend_group_labels))
+        self.trend_group_menu.set(translate(TREND_GROUP_LABEL_KEYS[self.trend_group], language))
+        self._configure_trend_metric_menu()
         for key, label_key in {
             "range": "trend_summary_range", "samples": "trend_summary_samples",
             "updated": "trend_summary_updated",
         }.items():
             self.trend_summary_labels[key].configure(text=translate(label_key, language))
         for key, label_key in {
-            "input": "metric_input", "output": "metric_output",
-            "total": "metric_total", "cached": "metric_cached",
-            "reasoning": "metric_reasoning",
+            "current": "trend_summary_current",
+            "minimum": "trend_summary_minimum",
+            "maximum": "trend_summary_maximum",
+            "change": "trend_summary_change",
         }.items():
-            self.trend_metric_labels[key].configure(text=translate(label_key, language))
+            self.trend_summary_metric_labels[key].configure(text=translate(label_key, language))
+        self.trend_chart.set_labels(
+            metric_labels={
+                key: translate(label_key, language)
+                for key, label_key in TREND_METRIC_LABEL_KEYS.items()
+            },
+            source_labels={
+                "dashboard": translate("trend_source_local_history", language),
+                "mini": translate("trend_source_local_history", language),
+                "token_monitor_history": translate("trend_source_local_history", language),
+                "global_quota": translate("trend_source_global_quota", language),
+                "codex_app_server": translate("trend_source_global_quota", language),
+                "unknown": translate("trend_source_unknown", language),
+            },
+            tooltip_labels=TrendTooltipLabels(
+                time=translate("trend_tooltip_time", language),
+                metric=translate("trend_tooltip_metric", language),
+                value=translate("trend_tooltip_value", language),
+                source=translate("trend_tooltip_source", language),
+                freshness=translate("trend_tooltip_freshness", language),
+                stale=translate("trend_tooltip_stale", language),
+                fresh=translate("trend_tooltip_fresh", language),
+                derived=translate("trend_tooltip_derived", language),
+                derived_yes=translate("recommendation_derived_yes", language),
+                derived_no=translate("recommendation_derived_no", language),
+            ),
+        )
         self.recommendations_description.configure(text=translate("recommendations_description", language))
         self.recommendations_rules_button.configure(text=translate("recommendation_rules", language))
 
@@ -1931,6 +2069,9 @@ class Dashboard:
         if self._closing:
             return
         self._closing = True
+        self._trend_query_generation += 1
+        self._trend_query_poll_scheduled = False
+        self._trend_query_stop.set()
         self.auto_refresh.close()
         self.quota_provider.close()
         self.tray.stop()
@@ -1971,6 +2112,16 @@ class Dashboard:
             if refresh_quota:
                 self.quota_snapshot = self.quota_provider.refresh()
             self._mini_thread_snapshot = self.view_model.refresh_thread(self._widget_thread_id)
+            try:
+                observation = HistoryObservation.from_mini(
+                    self._mini_thread_snapshot,
+                    self.quota_snapshot,
+                    self._widget_thread_id,
+                )
+            except (TypeError, ValueError):
+                self.history_error = "history_observation_invalid"
+            else:
+                self._record_history(observation)
             self.mini_widget.update(
                 self.quota_snapshot,
                 self._mini_thread_snapshot,
@@ -1987,13 +2138,134 @@ class Dashboard:
         self.lookback_days = self.snapshot.lookback_days
         if refresh_quota:
             self.quota_snapshot = self.quota_provider.refresh()
-        self.advisor_result = evaluate_advice(build_advisor_input(self.snapshot, self.quota_snapshot))
+        try:
+            observation = HistoryObservation.from_dashboard(
+                self.snapshot, self.quota_snapshot,
+            )
+        except (TypeError, ValueError):
+            self.history_error = "history_observation_invalid"
+        else:
+            self._record_history(observation)
+        self._refresh_trend_query()
+        self.advisor_result = self._evaluate_advisor()
         self.presentation = present_dashboard(self.snapshot, bool(self.auto_refresh_var.get()))
         self._apply_presentation(self.presentation, render_session_rows=render_session_rows)
 
+    def _record_history(self, observation: HistoryObservation) -> None:
+        """Persist one normalized observation without blocking current UI data."""
+
+        try:
+            self.history_store.record(observation)
+            self.history_error = self.history_store.last_error
+        except (OSError, RuntimeError, TypeError, ValueError):
+            self.history_error = "history_write_failed"
+
+    def _refresh_trend_query(self) -> None:
+        """Read only the app-owned store; never refresh a Codex source here."""
+
+        self._invalidate_pending_trend_queries()
+        selected_id = self.snapshot.selected_thread_id if self.snapshot is not None else None
+        thread_filter = selected_id or "no_selection"
+        self.trend_view, self.history_error = self._query_trend_view(
+            self.trend_range_days, thread_filter,
+        )
+
+    def _query_trend_view(
+        self, range_days: int, thread_filter: str,
+    ) -> tuple[TrendView, str | None]:
+        try:
+            result = self.history_store.query(range_days, thread_filter)
+            return trend_view_from_query(result), result.error_code
+        except (OSError, RuntimeError, ValueError):
+            return TrendView(
+                range_days,
+                "unavailable",
+                (),
+                None,
+                error_code="history_query_failed",
+            ), "history_query_failed"
+
+    def _schedule_trend_query(self) -> None:
+        """Coalesce local-history requests off Tk and discard stale results."""
+
+        self._trend_query_generation += 1
+        generation = self._trend_query_generation
+        range_days = self.trend_range_days
+        selected_id = self.snapshot.selected_thread_id if self.snapshot is not None else None
+        thread_filter = selected_id or "no_selection"
+        self.trend_view = TrendView(range_days, "unavailable", (), None)
+        self.history_error = None
+        request = (generation, range_days, thread_filter)
+        try:
+            self._trend_query_requests.put_nowait(request)
+        except queue.Full:
+            try:
+                self._trend_query_requests.get_nowait()
+            except queue.Empty:
+                pass
+            self._trend_query_requests.put_nowait(request)
+        if not self._trend_query_poll_scheduled:
+            self._trend_query_poll_scheduled = True
+            self.root.after(25, self._poll_trend_query_results)
+
+    def _trend_query_worker_loop(self) -> None:
+        while not self._trend_query_stop.is_set():
+            try:
+                request = self._trend_query_requests.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            while True:
+                try:
+                    request = self._trend_query_requests.get_nowait()
+                except queue.Empty:
+                    break
+            generation, range_days, thread_filter = request
+            view, error = self._query_trend_view(range_days, thread_filter)
+            self._trend_query_results.put((generation, view, error))
+
+    def _poll_trend_query_results(self) -> None:
+        if self._closing or not self._trend_query_poll_scheduled:
+            return
+        candidate: tuple[TrendView, str | None] | None = None
+        while True:
+            try:
+                generation, view, error = self._trend_query_results.get_nowait()
+            except queue.Empty:
+                break
+            if generation == self._trend_query_generation:
+                candidate = (view, error)
+        if candidate is None:
+            self.root.after(25, self._poll_trend_query_results)
+            return
+        self._trend_query_poll_scheduled = False
+        self.trend_view, self.history_error = candidate
+        if self.snapshot is not None:
+            self.advisor_result = self._evaluate_advisor()
+        self._render_trends()
+        self._render_advisor()
+        self._render_recommendations()
+
+    def _invalidate_pending_trend_queries(self) -> None:
+        self._trend_query_generation += 1
+        self._trend_query_poll_scheduled = False
+        for pending in (self._trend_query_requests, self._trend_query_results):
+            while True:
+                try:
+                    pending.get_nowait()
+                except queue.Empty:
+                    break
+
+    def _evaluate_advisor(self) -> AdvisorResult:
+        return evaluate_advice(build_advisor_input(
+            self.snapshot,
+            self.quota_snapshot,
+            history_samples=(*self.trend_view.samples, *self.trend_view.quota_samples),
+        ))
+
     def _apply_cached_snapshot(self, snapshot) -> None:
         self.snapshot = snapshot
-        self.advisor_result = evaluate_advice(build_advisor_input(self.snapshot, self.quota_snapshot))
+        self._schedule_trend_query()
+        self.advisor_result = self._evaluate_advisor()
         self.presentation = present_dashboard(snapshot, bool(self.auto_refresh_var.get()))
         self._apply_presentation(self.presentation)
 
@@ -2263,6 +2535,35 @@ class Dashboard:
             "connection_normal" if connected else "connection_abnormal", self.language
         ))
 
+    def _configure_trend_metric_menu(self) -> None:
+        metrics = TREND_GROUP_METRICS[self.trend_group]
+        if self.trend_metric not in metrics:
+            self.trend_metric = metrics[0]
+        self.trend_metric_labels = {
+            translate(TREND_METRIC_LABEL_KEYS[key], self.language): key
+            for key in metrics
+        }
+        self.trend_metric_menu.configure(values=list(self.trend_metric_labels))
+        self.trend_metric_menu.set(
+            translate(TREND_METRIC_LABEL_KEYS[self.trend_metric], self.language)
+        )
+
+    def _change_trend_group(self, label: str) -> None:
+        group = self.trend_group_labels.get(label)
+        if group is None or group == self.trend_group:
+            return
+        self.trend_group = group
+        self.trend_metric = TREND_GROUP_METRICS[group][0]
+        self._configure_trend_metric_menu()
+        self._render_trends()
+
+    def _change_trend_metric(self, label: str) -> None:
+        metric = self.trend_metric_labels.get(label)
+        if metric is None or metric == self.trend_metric:
+            return
+        self.trend_metric = metric
+        self._render_trends()
+
     def _change_trend_range(self, label: str) -> None:
         labels = {
             translate(f"last_{days}_days", self.language): days
@@ -2272,15 +2573,21 @@ class Dashboard:
         if days is None:
             return
         self.trend_range_days = days
+        self._schedule_trend_query()
+        if self.snapshot is not None:
+            self.advisor_result = self._evaluate_advisor()
         self._render_trends()
+        self._render_advisor()
+        self._render_recommendations()
 
     def _render_trends(self) -> None:
         if not hasattr(self, "trend_quality_var"):
             return
-        self.trend_view = build_trend_view(self.snapshot, self.trend_range_days)
         view = self.trend_view
-        quality = view.quality
+        summary = summarize_metric(view, self.trend_metric)
+        quality = self._trend_metric_quality(view, self.trend_metric, summary.sample_count)
         tone, soft = {
+            "empty": (COLORS.unknown, COLORS.unknown_soft),
             "available": (COLORS.real, COLORS.real_soft),
             "insufficient": (COLORS.orange, COLORS.orange_soft),
             "unavailable": (COLORS.unknown, COLORS.unknown_soft),
@@ -2289,44 +2596,177 @@ class Dashboard:
         title = translate(f"trend_quality_{quality}_title", self.language)
         message = translate(
             f"trend_quality_{quality}_message", self.language,
-            count=len(view.samples),
+            count=summary.sample_count,
         )
         self.trend_quality_var.set(title)
         self.trend_quality_message_var.set(message)
         self.trend_quality_label.configure(text_color=tone, fg_color=soft)
-        self.trend_summary_vars["range"].set(
-            translate("trend_range_value", self.language, days=view.range_days)
+        actual_start = (
+            summary.start_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            if summary.start_at is not None else "—"
         )
+        actual_end = (
+            summary.end_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            if summary.end_at is not None else "—"
+        )
+        self.trend_summary_vars["range"].set(translate(
+            "trend_actual_range_value", self.language,
+            days=view.range_days, start=actual_start, end=actual_end,
+        ))
         self.trend_summary_vars["samples"].set(
-            translate("trend_sample_count", self.language, count=len(view.samples))
+            translate("trend_sample_count", self.language, count=summary.sample_count)
         )
         self.trend_summary_vars["updated"].set(
-            view.refreshed_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-            if view.refreshed_at is not None else "—"
+            summary.end_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            if summary.end_at is not None else "—"
         )
-        latest = view.samples[-1] if view.samples else None
         for key, value in {
-            "input": latest.input_tokens if latest else None,
-            "output": latest.output_tokens if latest else None,
-            "total": latest.total_tokens if latest else None,
-            "cached": latest.cached_input_tokens if latest else None,
-            "reasoning": latest.reasoning_tokens if latest else None,
+            "current": summary.current,
+            "minimum": summary.minimum,
+            "maximum": summary.maximum,
+            "change": summary.change,
         }.items():
-            self.trend_metric_vars[key].set(format_compact_token_count(value))
-        values = tuple(sample.total_tokens for sample in view.samples)
-        show_chart = quality in {"available", "stale"} and self.trend_chart.set_samples(values)
+            self.trend_metric_vars[key].set(
+                self._format_trend_value(self.trend_metric, value, signed=key == "change")
+            )
+        points = self._trend_points(view, self.trend_metric)
+        self.trend_chart.set_points(points)
+        show_chart = quality in {"available", "stale"} and len(points) >= 2
         if show_chart:
             self.trend_chart.grid()
         else:
             self.trend_chart.grid_remove()
-        self.trend_preview_state_var.set(title)
-        self.trend_preview_state.configure(text_color=tone)
-        self.trend_preview_message_var.set(message)
-        preview_visible = quality in {"available", "stale"} and self.trend_preview_plot.set_samples(values)
+
+        preview = summarize_metric(view, "total")
+        preview_quality = self._trend_metric_quality(view, "total", preview.sample_count)
+        preview_tone = {
+            "empty": COLORS.unknown,
+            "available": COLORS.real,
+            "insufficient": COLORS.orange,
+            "unavailable": COLORS.unknown,
+            "stale": COLORS.stale,
+        }[preview_quality]
+        preview_title = translate(f"trend_quality_{preview_quality}_title", self.language)
+        preview_message = translate(
+            f"trend_quality_{preview_quality}_message",
+            self.language,
+            count=preview.sample_count,
+        )
+        self.trend_preview_state_var.set(preview_title)
+        self.trend_preview_state.configure(text_color=preview_tone)
+        preview_start = (
+            preview.start_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            if preview.start_at is not None else "—"
+        )
+        preview_end = (
+            preview.end_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            if preview.end_at is not None else "—"
+        )
+        preview_details = translate(
+            "trend_preview_details", self.language,
+            current=self._format_trend_value("total", preview.current),
+            start=preview_start,
+            end=preview_end,
+            updated=preview_end,
+        )
+        self.trend_preview_message_var.set(f"{preview_message}\n{preview_details}")
+        preview_values = tuple(value for _, value in metric_samples(view, "total"))
+        preview_visible = (
+            preview_quality in {"available", "stale"}
+            and self.trend_preview_plot.set_samples(preview_values)
+        )
         if preview_visible:
             self.trend_preview_plot.grid()
         else:
             self.trend_preview_plot.grid_remove()
+
+    @staticmethod
+    def _trend_metric_quality(view: TrendView, metric: str, sample_count: int) -> str:
+        if view.error_code:
+            return "unavailable"
+        if metric in {"five_hour", "weekly"}:
+            relevant_samples = view.quota_samples
+            latest = view.quota_samples[-1] if view.quota_samples else None
+            prefix = "five_hour" if metric == "five_hour" else "weekly"
+            if latest is not None and not getattr(latest, f"{prefix}_available", False):
+                return "unavailable"
+            if latest is not None and getattr(latest, f"{prefix}_stale", False):
+                return "stale"
+            latest_at = getattr(latest, "sampled_at", None)
+            if (
+                latest_at is not None
+                and datetime.now(timezone.utc) - latest_at > TREND_STALE_AFTER
+            ):
+                return "stale"
+        elif view.quality in {"unavailable", "stale"}:
+            return view.quality
+        else:
+            relevant_samples = view.samples
+        if sample_count == 0:
+            return "unavailable" if relevant_samples else "empty"
+        if sample_count < 2:
+            return "insufficient"
+        return "available"
+
+    @staticmethod
+    def _format_trend_value(metric: str, value: float | None, *, signed: bool = False) -> str:
+        if value is None:
+            return "—"
+        sign = "+" if signed and value > 0 else ""
+        if metric in {"cache_reuse", "five_hour", "weekly"}:
+            return f"{sign}{value:.1f}%"
+        if metric == "turn_count":
+            return f"{sign}{round(value):,}"
+        compact = format_compact_token_count(round(value))
+        return f"{sign}{compact}"
+
+    def _trend_points(self, view: TrendView, metric: str) -> tuple[TrendPoint, ...]:
+        points: list[TrendPoint] = []
+        for sample, value in metric_samples(view, metric):
+            observed_at = getattr(sample, "sampled_at", getattr(sample, "observed_at", None))
+            if observed_at is None:
+                continue
+            if metric == "five_hour":
+                source = getattr(sample, "five_hour_source", "global_quota")
+                stale = bool(getattr(sample, "five_hour_stale", False))
+            elif metric == "weekly":
+                source = getattr(sample, "weekly_source", "global_quota")
+                stale = bool(getattr(sample, "weekly_stale", False))
+            else:
+                source = getattr(sample, "source_type", "token_monitor_history")
+                stale = bool(getattr(sample, "token_stale", False))
+            unit = "percent" if metric in {"cache_reuse", "five_hour", "weekly"} else (
+                "turn" if metric == "turn_count" else "token"
+            )
+            try:
+                points.append(TrendPoint(
+                    observed_at=observed_at,
+                    metric=metric,
+                    value=value,
+                    source=source,
+                    stale=stale,
+                    unit=unit,
+                    derived=metric == "cache_reuse",
+                ))
+            except ValueError:
+                continue
+        return tuple(points)
+
+    def _format_trend_tooltip_value(self, point: TrendPoint) -> str:
+        if point.value is None:
+            return "—"
+        number = float(point.value)
+        value = (
+            f"{int(number):,}"
+            if number.is_integer()
+            else f"{number:,.2f}".rstrip("0").rstrip(".")
+        )
+        unit_key = {
+            "percent": "trend_unit_percent",
+            "turn": "trend_unit_turn",
+            "token": "trend_unit_token",
+        }.get(point.unit)
+        return value if unit_key is None else f"{value} {translate(unit_key, self.language)}"
 
     def _render_recommendations(self) -> None:
         if not hasattr(self, "recommendation_cards"):
@@ -2363,9 +2803,34 @@ class Dashboard:
             widget["evidence"].set(
                 translate("recommendation_evidence", self.language, value=evidence)
             )
+            source = translate("recommendation_source_safe_numeric", self.language)
+            widget["metadata"].set(
+                f"{translate('recommendation_source', self.language, value=source)} · "
+                f"{translate('recommendation_derived', self.language, value=translate('recommendation_derived_yes' if recommendation.derived else 'recommendation_derived_no', self.language))}"
+            )
+            history = recommendation.history_evidence
+            if history is None:
+                history_text = translate("recommendation_history_insufficient", self.language)
+            else:
+                direction_key = {
+                    "up": "history_direction_up",
+                    "down": "history_direction_down",
+                    "flat": "history_direction_stable",
+                }[history.direction]
+                history_text = translate(
+                    "advisor_history_summary",
+                    self.language,
+                    metric=translate(f"evidence_{history.metric}", self.language),
+                    direction=translate(direction_key, self.language),
+                    count=history.sample_count,
+                )
+            widget["history"].set(
+                translate("recommendation_history", self.language, value=history_text)
+            )
+            observed_at = recommendation.source_observed_at or recommendation.observed_at
             widget["observed"].set(translate(
                 "recommendation_observed", self.language,
-                value=recommendation.observed_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                value=observed_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
             ))
             widget["action"].configure(
                 text=translate(
@@ -3003,6 +3468,9 @@ def build_dashboard() -> ctk.CTk:
 
 
 def smoke() -> None:
+    history = UsageHistoryStore()
+    if not history.initialize():
+        raise RuntimeError(history.last_error or "history_initialize_failed")
     snapshot = DashboardViewModel().refresh()
     presentation = present_dashboard(snapshot, False)
     _safe_print("Codex Token Monitor smoke OK")

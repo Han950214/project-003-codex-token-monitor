@@ -6,6 +6,15 @@ Current boundary: the status center discovers multiple recent Codex Threads from
 
 关键边界：本项目不替代 AOS，不创建知识库、项目记忆或项目上下文，不扫描项目文件，也不读取或保存 Prompt、Response、消息、工具输出或 Reasoning 正文。“准备新线程”只解释数字风险、打开 Codex，并复制不含项目内容的通用手工交接模板。状态中心从 Rollout JSONL 读取安全数字元数据；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。
 
+## Phase 3.1-B2 真实趋势与优化建议
+
+- 手动刷新和 60 秒自动刷新复用同一个安全数字归一化与历史写入入口；迷你组件模式也复用该入口。
+- 真实历史保存在 Token Monitor 自有用户数据目录的 `data/usage-history.sqlite3`，不写 Codex SQLite、Rollout、`.codex` 或项目仓库。
+- SQLite v1 迁移可重复执行；稳定 SHA-256 指纹与数据库唯一约束防止同一观测重复写入。额度值或可靠重置身份可独立触发新样本，本地刷新时间不参与指纹。
+- 历史默认保留 90 天且最多 200,000 行；自动清理只作用于趋势样本表，不提供手动清理按钮。
+- 概览与完整趋势页共用本地查询层，支持 7/30/90 天、当前 Thread 数字与明确标记的全局额度。主图使用响应式 Tk Canvas、峰谷保留降采样和完整数值 Tooltip，不生成假曲线。
+- Advisor v1 阈值、优先级和 severity 不变；仅在同一 Thread 至少 5 个有效样本、3 个可靠观测时间时显示上升、下降或大致持平的辅助证据。
+
 ## Phase 3.1-B1 产品体验
 
 - 左侧一级导航固定为六项：概览、会话、用量趋势、建议、工具、设置；会话详情作为二级页面或宽屏侧栏呈现。
@@ -93,7 +102,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
 
 ## Current Status
 
-Phase 3.1-B1 已完成 Analytics UI shell：六项导航、六项概览 KPI、会话搜索与分页、真实趋势质量状态、Advisor 建议页、工具与设置分组、会话详情和诊断弹窗均保持 CustomTkinter 本地桌面实现。导航、页面切换、会话内存切换、语言切换和组件收起/展开只重绘当前内存 snapshot；只有初始加载、手动刷新、自动刷新和重新运行诊断会访问真实数据。应用版本仍为 `0.1.0`。
+Phase 3.1-B2 已在 B1 Analytics UI shell 上接通 Token Monitor 自有历史层：完整刷新与迷你组件刷新会记录去重后的安全数字；概览、趋势页和 Advisor 只消费本地历史查询 DTO。页面切换和语言切换只重绘缓存结果，7/30/90 天切换只查询本地趋势库，不重新读取 Codex 源。应用版本仍为 `0.1.0`。
 
 Phase 2.8-A-S 保留多 Thread 分离、500 条近期候选、已知路径回读和 Rollout 进程内缓存规则。近期列表每页 10 条，可在内存中翻页；点击近期行或下拉任务时直接切换完整刷新留下的快照，不重新读取 Rollout、SQLite、标题或额度。默认选择仍可自动跟随最近活动；主窗口最小化时会把当时实际选中的 Thread 解析为固定选择。近期范围默认 7 天，可切换 30 或 90 天。
 

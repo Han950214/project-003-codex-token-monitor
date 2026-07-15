@@ -26,6 +26,18 @@ class RuntimePathsTests(unittest.TestCase):
             root = paths.writable_root(frozen=True, environ={}, local_appdata=directory)
             self.assertEqual(root, Path(directory).resolve() / "CodexTokenMonitor")
 
+    def test_history_defaults_to_user_data_even_in_source_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = paths.history_db_path(
+                frozen=False, environ={}, local_appdata=directory,
+            )
+            expected = (
+                Path(directory).resolve()
+                / "CodexTokenMonitor" / "data" / "usage-history.sqlite3"
+            )
+            self.assertEqual(path, expected)
+            self.assertFalse(path.is_relative_to(paths.repository_root()))
+
     def test_data_directory_override_controls_only_writable_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             env = {paths.DATA_DIR_ENV: directory}
@@ -33,6 +45,7 @@ class RuntimePathsTests(unittest.TestCase):
             self.assertEqual(paths.writable_root(frozen=True, environ=env), root)
             self.assertEqual(paths.runs_path(frozen=True, environ=env), root / "data" / "runs.json")
             self.assertEqual(paths.ui_settings_path(frozen=True, environ=env), root / "data" / "ui-settings.json")
+            self.assertEqual(paths.history_db_path(frozen=False, environ=env), root / "data" / "usage-history.sqlite3")
             self.assertEqual(paths.reports_dir(frozen=True, environ=env), root / "reports")
             self.assertNotEqual(paths.pricing_path(frozen=False).parent, root)
 

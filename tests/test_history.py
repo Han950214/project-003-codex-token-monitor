@@ -1,0 +1,614 @@
+import sqlite3
+import tempfile
+import threading
+import unittest
+from contextlib import closing
+from dataclasses import fields, replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+from app.codex_rollout import InstructionUsage, TokenUsage
+from app.analytics_ui import metric_samples, trend_view_from_query
+from app.dashboard import MiniThreadSnapshot
+from app.history import (
+    MAX_HISTORY_ROWS,
+    RETENTION_DAYS,
+    SCHEMA_VERSION,
+    HistoryObservation,
+    UsageHistoryStore,
+)
+from app.quota import CodexQuotaSnapshot, QuotaKind, QuotaWindow
+
+
+NOW = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
+
+
+def quota(
+    *,
+    five_remaining: float = 80.0,
+    weekly_remaining: float = 70.0,
+    observed_at: datetime = NOW,
+    source_status: str = "normal",
+) -> CodexQuotaSnapshot:
+    five = QuotaWindow(
+        QuotaKind.FIVE_HOUR,
+        100.0 - five_remaining,
+        five_remaining,
+        NOW + timedelta(hours=4),
+        observed_at,
+        "codex_app_server",
+        True,
+        source_status == "stale",
+        "quota_refresh_failed" if source_status == "stale" else None,
+    )
+    weekly = QuotaWindow(
+        QuotaKind.WEEKLY,
+        100.0 - weekly_remaining,
+        weekly_remaining,
+        NOW + timedelta(days=5),
+        observed_at,
+        "codex_app_server",
+        True,
+        source_status == "stale",
+        "quota_refresh_failed" if source_status == "stale" else None,
+    )
+    return CodexQuotaSnapshot(five, weekly, observed_at, source_status)
+
+
+def observation(
+    *,
+    sampled_at: datetime = NOW,
+    source_observed_at: datetime = NOW - timedelta(seconds=10),
+    thread: str = "thread-1",
+    total: int = 120,
+    session_total: int = 999,
+    turns: int = 3,
+    five_remaining: float = 80.0,
+    weekly_remaining: float = 70.0,
+    quota_observed_at: datetime = NOW,
+    source_status: str = "exact",
+    source_available: bool = True,
+    token_stale: bool = False,
+) -> HistoryObservation:
+    return HistoryObservation(
+        sampled_at=sampled_at,
+        source_observed_at=source_observed_at,
+        quota_observed_at=quota_observed_at,
+        thread_safe_id=thread,
+        model_safe_id="gpt-5",
+        source_status=source_status,
+        source_available=source_available,
+        token_stale=token_stale,
+        token_stale_reason="source_stale" if token_stale else None,
+        input_tokens=100,
+        output_tokens=20,
+        total_tokens=total,
+        cached_tokens=40,
+        reasoning_tokens=5,
+        session_total_tokens=session_total,
+        turn_count=turns,
+        quota_source_status="normal",
+        five_hour_used_percent=100.0 - five_remaining,
+        five_hour_remaining_percent=five_remaining,
+        five_hour_reset_at=NOW + timedelta(hours=4),
+        five_hour_source="codex_app_server",
+        five_hour_available=True,
+        weekly_used_percent=100.0 - weekly_remaining,
+        weekly_remaining_percent=weekly_remaining,
+        weekly_reset_at=NOW + timedelta(days=5),
+        weekly_source="codex_app_server",
+        weekly_available=True,
+    )
+
+
+class HistorySchemaTests(unittest.TestCase):
+    def test_constants_match_phase_contract(self):
+        self.assertEqual((SCHEMA_VERSION, RETENTION_DAYS, MAX_HISTORY_ROWS), (1, 90, 200_000))
+
+    def test_new_database_initializes_versioned_schema_and_unique_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            with closing(sqlite3.connect(path)) as connection, connection:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+                columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(usage_history_samples)"
+                    )
+                }
+                indexes = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA index_list(usage_history_samples)"
+                    )
+                }
+            self.assertIn("sample_fingerprint", columns)
+            self.assertIn("ux_usage_history_samples_fingerprint", indexes)
+
+    def test_existing_database_and_unrelated_data_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("CREATE TABLE existing_data(value TEXT)")
+                connection.execute("INSERT INTO existing_data VALUES('keep')")
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            self.assertTrue(store.initialize())
+            with closing(sqlite3.connect(path)) as connection, connection:
+                value = connection.execute("SELECT value FROM existing_data").fetchone()[0]
+            self.assertEqual(value, "keep")
+
+    def test_partial_empty_schema_is_completed_idempotently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE usage_history_samples(id INTEGER PRIMARY KEY)"
+                )
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            self.assertTrue(store.initialize())
+            with closing(sqlite3.connect(path)) as connection, connection:
+                columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(usage_history_samples)"
+                    )
+                }
+            self.assertIn("weekly_remaining_percent", columns)
+            self.assertIn("sample_fingerprint", columns)
+
+    def test_partial_schema_rows_survive_migration_and_first_retention_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE usage_history_samples("
+                    "id INTEGER PRIMARY KEY, total_tokens INTEGER)"
+                )
+                connection.execute(
+                    "INSERT INTO usage_history_samples(id, total_tokens) VALUES(1, 321)"
+                )
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+
+            self.assertTrue(store.initialize())
+            self.assertTrue(store.initialize())
+
+            with closing(sqlite3.connect(path)) as connection, connection:
+                row = connection.execute(
+                    "SELECT total_tokens, sampled_at_utc, source_available, "
+                    "sample_fingerprint, legacy_unknown_time "
+                    "FROM usage_history_samples WHERE id=1"
+                ).fetchone()
+            self.assertEqual(row, (321, NOW.isoformat(timespec="microseconds").replace(
+                "+00:00", "Z",
+            ), 0, "legacy-0000000000000001", 1))
+
+    def test_unknown_time_migration_rows_never_become_trend_points(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE usage_history_samples("
+                    "id INTEGER PRIMARY KEY, sampled_at_utc TEXT, "
+                    "thread_safe_id TEXT, "
+                    "source_available INTEGER, source_status TEXT, "
+                    "total_tokens INTEGER)"
+                )
+                connection.executemany(
+                    "INSERT INTO usage_history_samples "
+                    "VALUES(?, NULL, 'thread-1', 1, 'exact', ?)",
+                    ((1, 100), (2, 200)),
+                )
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            self.assertTrue(store.record(observation(
+                sampled_at=NOW + timedelta(seconds=1),
+                source_observed_at=NOW + timedelta(seconds=1),
+                total=300,
+            )))
+
+            result = store.query(7, "thread-1", now=NOW + timedelta(seconds=1))
+            values = [
+                value for _, value in metric_samples(
+                    trend_view_from_query(result), "total",
+                )
+            ]
+
+            self.assertEqual(values, [300.0])
+            self.assertEqual(
+                [sample.total_tokens for sample in result.samples], [100, 200, 300],
+            )
+            self.assertEqual(
+                sum(sample.legacy_unknown_time for sample in result.samples), 2,
+            )
+
+    def test_initialize_enables_wal_for_nonblocking_readers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+
+            self.assertTrue(store.initialize())
+
+            with closing(sqlite3.connect(path)) as connection:
+                mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            self.assertEqual(mode, "wal")
+
+    def test_query_does_not_wait_for_python_mutation_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = UsageHistoryStore(Path(directory) / "history.sqlite3", clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            result: list[object] = []
+            worker = threading.Thread(target=lambda: result.append(store.query(7, now=NOW)))
+
+            store._lock.acquire()
+            try:
+                worker.start()
+                worker.join(timeout=1.0)
+                self.assertFalse(worker.is_alive())
+            finally:
+                store._lock.release()
+                worker.join(timeout=1.0)
+            self.assertEqual(len(result), 1)
+
+    def test_failed_unique_index_migration_rolls_back_partial_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE usage_history_samples("
+                    "id INTEGER PRIMARY KEY, sample_fingerprint TEXT)"
+                )
+                connection.executemany(
+                    "INSERT INTO usage_history_samples(sample_fingerprint) VALUES(?)",
+                    [("duplicate",), ("duplicate",)],
+                )
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertFalse(store.initialize())
+            self.assertEqual(store.last_error, "history_migration_failed")
+            with closing(sqlite3.connect(path)) as connection, connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(usage_history_samples)"
+                    )
+                }
+            self.assertEqual(version, 0)
+            self.assertEqual(columns, {"id", "sample_fingerprint"})
+
+
+class HistoryObservationTests(unittest.TestCase):
+    def test_from_dashboard_uses_only_normalized_safe_numbers(self):
+        usage = TokenUsage(100, 40, 20, 5, 120)
+        instruction = InstructionUsage(
+            "turn-1", "exact", usage, 1, 1000, 0, 0, 0, True, False,
+        )
+        selected = SimpleNamespace(
+            thread_id="thread-1",
+            instruction=instruction,
+            thread_cumulative_usage=TokenUsage(900, 300, 99, 10, 999),
+            observed_at=NOW - timedelta(seconds=5),
+            status="exact",
+            turn_count=4,
+        )
+        snapshot = SimpleNamespace(
+            selected_session=selected,
+            rollout=SimpleNamespace(
+                instruction=instruction,
+                thread_cumulative_usage=selected.thread_cumulative_usage,
+                thread_id="thread-1",
+                observed_at=selected.observed_at,
+                turn_count=4,
+            ),
+            selected_thread_id="thread-1",
+            state_metadata={"thread-1": SimpleNamespace(model="gpt-5")},
+            state_total=None,
+        )
+        item = HistoryObservation.from_dashboard(snapshot, quota(), sampled_at=NOW)
+        self.assertEqual(
+            (item.input_tokens, item.cached_tokens, item.reasoning_tokens),
+            (100, 40, 5),
+        )
+        self.assertEqual((item.session_total_tokens, item.turn_count), (999, 4))
+        self.assertEqual(item.thread_safe_id, "thread-1")
+
+    def test_from_mini_preserves_only_available_mini_numbers(self):
+        mini = MiniThreadSnapshot(
+            "content title is ignored", 120, 999, "exact", NOW, 4,
+        )
+        item = HistoryObservation.from_mini(
+            mini, quota(), "thread-1", sampled_at=NOW,
+        )
+        self.assertEqual((item.total_tokens, item.session_total_tokens), (120, 999))
+        self.assertIsNone(item.input_tokens)
+        self.assertNotIn("content title", repr(item))
+
+    def test_unsafe_identifiers_are_irreversibly_normalized(self):
+        item = observation(thread=r"C:\Users\name\secret project")
+        self.assertTrue(item.thread_safe_id.startswith("sha256:"))
+        self.assertNotIn("secret", item.thread_safe_id)
+
+    def test_dto_and_database_contract_exclude_content_fields(self):
+        names = {field.name.lower() for field in fields(HistoryObservation)}
+        forbidden = {
+            "prompt", "response", "preview", "message", "tool_output",
+            "reasoning_text", "cookie", "authorization", "session_secret",
+            "rollout_path", "title", "project_content",
+        }
+        self.assertTrue(names.isdisjoint(forbidden))
+        self.assertIn("reasoning_tokens", names)
+
+
+class HistoryStoreTests(unittest.TestCase):
+    def make_store(self, directory: str, **kwargs) -> UsageHistoryStore:
+        return UsageHistoryStore(
+            Path(directory) / "history.sqlite3", clock=lambda: NOW, **kwargs,
+        )
+
+    def test_same_observation_is_deduplicated_atomically_and_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = self.make_store(directory)
+            item = observation()
+            self.assertTrue(first.record(item))
+            self.assertFalse(first.record(item))
+            restarted = self.make_store(directory)
+            self.assertFalse(restarted.record(item))
+            self.assertEqual(restarted.query(7, "thread-1", now=NOW).sample_count, 1)
+
+    def test_local_capture_and_quota_observation_times_do_not_change_fingerprint(self):
+        first = observation()
+        later = replace(
+            first,
+            sampled_at=NOW + timedelta(minutes=1),
+            quota_observed_at=NOW + timedelta(minutes=1),
+        )
+        self.assertEqual(first.sample_fingerprint, later.sample_fingerprint)
+
+    def test_token_and_quota_changes_each_create_a_new_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            first = observation()
+            token_change = replace(
+                first,
+                sampled_at=NOW + timedelta(seconds=1),
+                source_observed_at=NOW,
+                input_tokens=101,
+                total_tokens=121,
+            )
+            quota_change = replace(
+                token_change,
+                sampled_at=NOW + timedelta(seconds=2),
+                five_hour_used_percent=25.0,
+                five_hour_remaining_percent=75.0,
+            )
+            self.assertTrue(store.record(first))
+            self.assertTrue(store.record(token_change))
+            self.assertTrue(store.record(quota_change))
+            self.assertEqual(store.query(7, "thread-1", now=NOW).sample_count, 3)
+
+    def test_thread_filter_does_not_mix_tokens_and_quota_is_global(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            store.record(observation(thread="thread-1"))
+            store.record(replace(
+                observation(thread="thread-2"),
+                sampled_at=NOW + timedelta(seconds=1),
+                source_observed_at=NOW,
+                five_hour_used_percent=25.0,
+                five_hour_remaining_percent=75.0,
+            ))
+            result = store.query(7, "thread-1", now=NOW)
+            self.assertEqual({item.thread_safe_id for item in result.samples}, {"thread-1"})
+            self.assertEqual(len(result.quota_samples), 2)
+            self.assertTrue(all(item.thread_safe_id is None for item in result.quota_samples))
+
+    def test_range_boundaries_are_utc_and_supported_ranges_query(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            store.initialize()
+            at_boundary = observation(
+                sampled_at=NOW - timedelta(days=7),
+                source_observed_at=NOW - timedelta(days=7),
+            )
+            before_boundary = replace(
+                at_boundary,
+                sampled_at=at_boundary.sampled_at - timedelta(microseconds=1),
+                source_observed_at=at_boundary.source_observed_at - timedelta(microseconds=1),
+            )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                for item in (at_boundary, before_boundary):
+                    connection.execute(
+                        "INSERT INTO usage_history_samples("
+                        "schema_version, sampled_at_utc, source_observed_at_utc, "
+                        "source_type, source_status, source_available, token_stale, "
+                        "quota_source_status, five_hour_source, five_hour_available, "
+                        "five_hour_stale, weekly_source, weekly_available, weekly_stale, "
+                        "is_derived, sample_fingerprint) "
+                        "VALUES(?, ?, ?, 'dashboard', 'exact', 1, 0, 'normal', "
+                        "'unknown', 0, 0, 'unknown', 0, 0, 0, ?)",
+                        (
+                            1,
+                            item.sampled_at.isoformat(timespec="microseconds").replace(
+                                "+00:00", "Z"
+                            ),
+                            item.source_observed_at.isoformat(timespec="microseconds").replace(
+                                "+00:00", "Z"
+                            ),
+                            item.sample_fingerprint,
+                        ),
+                    )
+            self.assertEqual(store.query(7, now=NOW).sample_count, 1)
+            self.assertEqual(store.query(30, now=NOW).sample_count, 2)
+            self.assertEqual(store.query(90, now=NOW).sample_count, 2)
+            with self.assertRaisesRegex(ValueError, "unsupported_history_range"):
+                store.query(14, now=NOW)
+
+    def test_empty_insufficient_available_stale_and_unavailable_states(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            self.assertEqual(store.query(7, "thread-1", now=NOW).status, "empty")
+            store.record(observation())
+            self.assertEqual(store.query(7, "thread-1", now=NOW).status, "insufficient")
+            store.record(replace(
+                observation(), sampled_at=NOW + timedelta(seconds=1),
+                source_observed_at=NOW, total_tokens=121, input_tokens=101,
+            ))
+            self.assertEqual(store.query(7, "thread-1", now=NOW).status, "available")
+            store.record(replace(
+                observation(), sampled_at=NOW + timedelta(seconds=2),
+                source_observed_at=NOW + timedelta(seconds=1),
+                token_stale=True, token_stale_reason="source_stale",
+            ))
+            self.assertEqual(store.query(7, "thread-1", now=NOW).status, "stale")
+            store.record(replace(
+                observation(), sampled_at=NOW + timedelta(seconds=3),
+                source_observed_at=NOW + timedelta(seconds=2),
+                source_status="unavailable", source_available=False,
+            ))
+            self.assertEqual(store.query(7, "thread-1", now=NOW).status, "unavailable")
+
+    def test_missing_thread_has_an_explicit_empty_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            store.record(observation(thread="thread-1"))
+
+            result = store.query(7, "no_selection", now=NOW)
+
+            self.assertEqual((result.status, result.sample_count, result.samples), (
+                "empty", 0, (),
+            ))
+
+    def test_locked_database_fails_closed_without_raising(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            with closing(sqlite3.connect(path, timeout=0.1)) as blocker:
+                blocker.execute("BEGIN EXCLUSIVE")
+
+                self.assertFalse(store.record(observation()))
+
+            self.assertEqual(store.last_error, "history_storage_locked")
+
+    def test_query_open_failure_returns_unavailable(self):
+        class BrokenQueryStore(UsageHistoryStore):
+            def _connect(self):
+                raise sqlite3.OperationalError("unable to open database file")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = BrokenQueryStore(Path(directory) / "history.sqlite3", clock=lambda: NOW)
+            store._initialized = True
+
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual((result.status, result.error_code), (
+                "unavailable", "history_storage_open_failed",
+            ))
+
+    def test_invalid_stored_row_returns_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO usage_history_samples("
+                    "sampled_at_utc, sample_fingerprint) VALUES(?, ?)",
+                    ("not-a-time", "invalid-row"),
+                )
+
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual((result.status, result.error_code), (
+                "unavailable", "history_storage_invalid",
+            ))
+
+    def test_last_reliable_sample_age_marks_history_stale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            store.record(replace(
+                observation(),
+                sampled_at=NOW - timedelta(minutes=4),
+                source_observed_at=NOW - timedelta(minutes=4),
+            ))
+            store.record(replace(
+                observation(),
+                sampled_at=NOW - timedelta(minutes=3, seconds=30),
+                source_observed_at=NOW - timedelta(minutes=3, seconds=30),
+                total_tokens=121,
+                input_tokens=101,
+            ))
+
+            self.assertEqual(store.query(7, "thread-1", now=NOW).status, "stale")
+
+    def test_stale_quota_does_not_mark_fresh_thread_tokens_stale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            store.record(observation())
+            store.record(replace(
+                observation(),
+                sampled_at=NOW + timedelta(seconds=1),
+                source_observed_at=NOW,
+                total_tokens=121,
+                quota_source_status="stale",
+                five_hour_stale=True,
+                weekly_stale=True,
+            ))
+
+            result = store.query(7, "thread-1", now=NOW + timedelta(seconds=1))
+
+            self.assertEqual(result.status, "available")
+            self.assertTrue(result.quota_samples[-1].five_hour_stale)
+
+    def test_retention_and_capacity_delete_only_history_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            store = UsageHistoryStore(
+                path, retention_days=90, max_rows=3, clock=lambda: NOW,
+            )
+            store.initialize()
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("CREATE TABLE other_business_data(value TEXT)")
+                connection.execute("INSERT INTO other_business_data VALUES('keep')")
+            for index in range(5):
+                store.record(observation(
+                    sampled_at=NOW + timedelta(seconds=index),
+                    source_observed_at=NOW + timedelta(seconds=index),
+                    total=120 + index,
+                ))
+            old = observation(
+                sampled_at=NOW - timedelta(days=91),
+                source_observed_at=NOW - timedelta(days=91),
+                total=1,
+            )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO usage_history_samples("
+                    "schema_version, sampled_at_utc, source_type, source_status, "
+                    "source_available, token_stale, quota_source_status, "
+                    "five_hour_source, five_hour_available, five_hour_stale, "
+                    "weekly_source, weekly_available, weekly_stale, is_derived, "
+                    "sample_fingerprint) VALUES(1, ?, 'dashboard', 'exact', 1, 0, "
+                    "'normal', 'unknown', 0, 0, 'unknown', 0, 0, 0, ?)",
+                    (
+                        old.sampled_at.isoformat(timespec="microseconds").replace(
+                            "+00:00", "Z"
+                        ),
+                        old.sample_fingerprint,
+                    ),
+                )
+            self.assertGreaterEqual(store.prune(now=NOW), 1)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM usage_history_samples"
+                ).fetchone()[0]
+                other = connection.execute(
+                    "SELECT value FROM other_business_data"
+                ).fetchone()[0]
+            self.assertEqual(count, 3)
+            self.assertEqual(other, "keep")
+
+
+if __name__ == "__main__":
+    unittest.main()

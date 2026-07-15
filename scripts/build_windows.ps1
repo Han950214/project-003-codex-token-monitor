@@ -1,5 +1,57 @@
 $ErrorActionPreference = "Stop"
 
+function Invoke-IsolatedPortableSmoke {
+    param([Parameter(Mandatory = $true)][string]$PortableExe)
+
+    $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]"\/")
+    $smokePrefix = "$tempRoot$([System.IO.Path]::DirectorySeparatorChar)CodexTokenMonitor-Smoke-"
+    $smokeDataDir = [System.IO.Path]::GetFullPath(
+        (Join-Path $tempRoot ("CodexTokenMonitor-Smoke-" + [guid]::NewGuid().ToString("N")))
+    )
+    if (-not $smokeDataDir.StartsWith($smokePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unsafe portable smoke data directory: $smokeDataDir"
+    }
+
+    $hadOriginalDataDir = Test-Path Env:CODEX_TOKEN_MONITOR_DATA_DIR
+    $originalDataDir = $env:CODEX_TOKEN_MONITOR_DATA_DIR
+    try {
+        New-Item -ItemType Directory -Path $smokeDataDir | Out-Null
+        $env:CODEX_TOKEN_MONITOR_DATA_DIR = $smokeDataDir
+        # The executable uses the Windows GUI subsystem, so direct invocation
+        # may return before startup completes. Wait for the real process.
+        $smokeProcess = Start-Process -FilePath $PortableExe -ArgumentList "--smoke" `
+            -Wait -PassThru -WindowStyle Hidden
+        $smokeExitCode = $smokeProcess.ExitCode
+        if ($smokeExitCode -ne 0) {
+            throw "Portable smoke failed with exit code $smokeExitCode"
+        }
+
+        $trendDatabase = Join-Path $smokeDataDir "data\usage-history.sqlite3"
+        if (-not (Test-Path -LiteralPath $trendDatabase -PathType Leaf)) {
+            throw "Portable smoke did not initialize the trend database: $trendDatabase"
+        }
+        $databaseBytes = [System.IO.File]::ReadAllBytes($trendDatabase)
+        if (
+            $databaseBytes.Length -lt 16 -or
+            [System.Text.Encoding]::ASCII.GetString($databaseBytes, 0, 15) -ne "SQLite format 3" -or
+            $databaseBytes[15] -ne 0
+        ) {
+            throw "Portable smoke initialized an invalid trend database: $trendDatabase"
+        }
+        return $smokeExitCode
+    }
+    finally {
+        if ($hadOriginalDataDir) {
+            $env:CODEX_TOKEN_MONITOR_DATA_DIR = $originalDataDir
+        } else {
+            Remove-Item Env:CODEX_TOKEN_MONITOR_DATA_DIR -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $smokeDataDir) {
+            Remove-Item -LiteralPath $smokeDataDir -Recurse -Force
+        }
+    }
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ((Get-Location).Path -ne $repoRoot) {
     throw "Run from the repository root: powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1"
@@ -64,9 +116,8 @@ if (-not (Test-Path -LiteralPath $exePath)) {
     throw "Build completed but the executable was not found: $exePath"
 }
 
-& $exePath --smoke
-if ($LASTEXITCODE -ne 0) {
-    throw "Portable smoke failed with exit code $LASTEXITCODE"
-}
+$smokeExitCode = Invoke-IsolatedPortableSmoke -PortableExe $exePath
 
 Write-Output "Windows portable build succeeded: $exePath"
+Write-Output "portable_smoke_exit_code=$smokeExitCode"
+Write-Output "portable_smoke_database_initialized=yes"

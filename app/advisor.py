@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from math import isfinite
+from statistics import median
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -16,6 +19,10 @@ NEW_THREAD_TURN_COUNT = 30
 OPTIMIZE_INPUT_TOKENS = 60_000
 OPTIMIZE_CACHE_HIT_PERCENT = 20.0
 DATA_STALE_AFTER = timedelta(minutes=3)
+HISTORY_MIN_VALID_SAMPLES = 5
+HISTORY_MIN_DISTINCT_OBSERVATIONS = 3
+HISTORY_FLAT_RELATIVE_TOLERANCE = 0.05
+HISTORY_FLAT_ABSOLUTE_TOLERANCE = 1.0
 
 ADVISOR_RULE_CODES = (
     "data_unavailable",
@@ -58,6 +65,24 @@ EvidenceValue = int | float | bool | str | None
 
 
 @dataclass(frozen=True)
+class AdvisorHistoryEvidence:
+    """Derived comparison over safe, same-Thread numeric history only."""
+
+    metric: str
+    direction: str
+    current_value: float
+    baseline_value: float
+    minimum_value: float
+    maximum_value: float
+    sample_count: int
+    distinct_observation_count: int
+    range_started_at: datetime
+    range_ended_at: datetime
+    source: str = "token_monitor_history"
+    derived: bool = True
+
+
+@dataclass(frozen=True)
 class AdvisorInput:
     data_available: bool
     data_age_seconds: int | None
@@ -71,6 +96,11 @@ class AdvisorInput:
     session_total_tokens: int | None
     session_status: str
     observed_at: datetime
+    thread_safe_id: str | None = None
+    history_samples: tuple[object, ...] = ()
+    source_observed_at: datetime | None = None
+    five_hour_observed_at: datetime | None = None
+    weekly_observed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +112,10 @@ class Recommendation:
     primary_action: str
     evidence: tuple[tuple[str, EvidenceValue], ...]
     observed_at: datetime
+    source: str = "current_snapshot"
+    derived: bool = False
+    history_evidence: AdvisorHistoryEvidence | None = None
+    source_observed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for key, value in self.evidence:
@@ -117,6 +151,7 @@ def build_advisor_input(
     quota: "CodexQuotaSnapshot",
     *,
     now: datetime | None = None,
+    history_samples: Iterable[object] = (),
 ) -> AdvisorInput:
     now = now or datetime.now(timezone.utc)
     selected = snapshot.selected_session if snapshot is not None else None
@@ -145,6 +180,11 @@ def build_advisor_input(
         session_total_tokens=cumulative.total_tokens if cumulative is not None else None,
         session_status=("unavailable" if selected is None else selected.status),
         observed_at=now,
+        thread_safe_id=(getattr(selected, "thread_id", None) if selected is not None else None),
+        history_samples=tuple(history_samples),
+        source_observed_at=(getattr(selected, "observed_at", None) if selected is not None else refreshed_at),
+        five_hour_observed_at=five_hour.observed_at,
+        weekly_observed_at=weekly.observed_at,
     )
 
 
@@ -219,6 +259,15 @@ def evaluate_advice(data: AdvisorInput) -> AdvisorResult:
             data.observed_at,
         ))
     recommendations.sort(key=lambda item: (PRIORITY[item.status], ADVISOR_RULE_CODES.index(item.code)))
+    recommendations = [
+        replace(
+            item,
+            derived=item.code == "optimize_cache_reuse",
+            history_evidence=_history_for_recommendation(item, data),
+            source_observed_at=_recommendation_observed_at(item, data),
+        )
+        for item in recommendations
+    ]
     return AdvisorResult(tuple(recommendations))
 
 
@@ -238,3 +287,220 @@ def _cache_hit(input_tokens: int | None, cached_tokens: int | None) -> float | N
     if input_tokens is None or cached_tokens is None or input_tokens <= 0:
         return None
     return cached_tokens / input_tokens * 100.0
+
+
+_HISTORY_FIELDS = {
+    "instruction_input_tokens": ("instruction_input_tokens", "input_tokens"),
+    "instruction_total_tokens": ("instruction_total_tokens", "total_tokens"),
+    "cache_hit_percent_derived": (
+        "cache_hit_percent_derived", "cache_reuse_percent", "cache_reuse",
+    ),
+    "session_total_tokens": ("session_total_tokens",),
+    "turn_count": ("turn_count",),
+    "five_hour_remaining_percent": (
+        "five_hour_remaining_percent", "five_hour_quota_value",
+    ),
+    "weekly_remaining_percent": (
+        "weekly_remaining_percent", "weekly_quota_value",
+    ),
+}
+
+
+def build_history_evidence(
+    samples: Iterable[object],
+    *,
+    thread_safe_id: str | None,
+    metric: str,
+    current_value: int | float | None,
+) -> AdvisorHistoryEvidence | None:
+    """Return a deterministic comparison or ``None`` when evidence is unsafe/weak."""
+
+    current = _finite_number(current_value)
+    if not thread_safe_id or metric not in _HISTORY_FIELDS or current is None:
+        return None
+    valid: list[tuple[datetime, float]] = []
+    try:
+        for sample in samples:
+            if _sample_thread_id(sample) != thread_safe_id or not _sample_is_usable(sample, metric):
+                continue
+            observed_at = _sample_observed_at(sample, metric)
+            value = _sample_metric(sample, metric)
+            if observed_at is not None and value is not None:
+                valid.append((observed_at, value))
+    except Exception:
+        return None
+    valid.sort(key=lambda item: item[0])
+    distinct = {item[0].astimezone(timezone.utc) for item in valid}
+    if (
+        len(valid) < HISTORY_MIN_VALID_SAMPLES
+        or len(distinct) < HISTORY_MIN_DISTINCT_OBSERVATIONS
+    ):
+        return None
+    values = [value for _, value in valid]
+    baseline = float(median(values))
+    tolerance = max(
+        HISTORY_FLAT_ABSOLUTE_TOLERANCE,
+        abs(baseline) * HISTORY_FLAT_RELATIVE_TOLERANCE,
+    )
+    if current > baseline + tolerance:
+        direction = "up"
+    elif current < baseline - tolerance:
+        direction = "down"
+    else:
+        direction = "flat"
+    return AdvisorHistoryEvidence(
+        metric=metric,
+        direction=direction,
+        current_value=current,
+        baseline_value=baseline,
+        minimum_value=min(values),
+        maximum_value=max(values),
+        sample_count=len(valid),
+        distinct_observation_count=len(distinct),
+        range_started_at=valid[0][0],
+        range_ended_at=valid[-1][0],
+    )
+
+
+def _history_for_recommendation(
+    recommendation: Recommendation, data: AdvisorInput,
+) -> AdvisorHistoryEvidence | None:
+    if (
+        not data.data_available
+        or (
+            data.data_age_seconds is not None
+            and data.data_age_seconds > DATA_STALE_AFTER.total_seconds()
+        )
+        or recommendation.code in {"data_unavailable", "data_stale"}
+    ):
+        return None
+    metric: str | None = None
+    current: int | float | None = None
+    if recommendation.code == "quota_risk":
+        quota_values = (
+            ("five_hour_remaining_percent", data.five_hour_remaining_percent),
+            ("weekly_remaining_percent", data.weekly_remaining_percent),
+        )
+        available = [(name, value) for name, value in quota_values if value is not None]
+        if available:
+            metric, current = min(available, key=lambda item: float(item[1]))
+    elif recommendation.code == "new_thread":
+        metric, current = "turn_count", data.turn_count
+    elif recommendation.code == "optimize_cache_reuse":
+        metric = "cache_hit_percent_derived"
+        current = _cache_hit(data.instruction_input_tokens, data.cached_input_tokens)
+    elif recommendation.code == "normal":
+        metric, current = "instruction_total_tokens", data.instruction_total_tokens
+    if metric is None:
+        return None
+    return build_history_evidence(
+        data.history_samples,
+        thread_safe_id=data.thread_safe_id,
+        metric=metric,
+        current_value=current,
+    )
+
+
+def _recommendation_observed_at(
+    recommendation: Recommendation, data: AdvisorInput,
+) -> datetime:
+    if recommendation.code == "quota_risk":
+        candidates = (
+            (data.five_hour_remaining_percent, data.five_hour_observed_at),
+            (data.weekly_remaining_percent, data.weekly_observed_at),
+        )
+        available = [
+            (float(value), observed_at)
+            for value, observed_at in candidates
+            if value is not None and observed_at is not None
+        ]
+        if available:
+            return min(available, key=lambda item: item[0])[1]
+    return data.source_observed_at or data.observed_at
+
+
+def _sample_thread_id(sample: object) -> str | None:
+    for name in ("thread_safe_id", "thread_id"):
+        value = getattr(sample, name, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _sample_is_usable(sample: object, metric: str) -> bool:
+    if getattr(sample, "legacy_unknown_time", False):
+        return False
+    if metric == "five_hour_remaining_percent":
+        available_names = ("five_hour_available", "available", "is_available")
+        stale_names = ("five_hour_stale", "stale", "is_stale")
+    elif metric == "weekly_remaining_percent":
+        available_names = ("weekly_available", "available", "is_available")
+        stale_names = ("weekly_stale", "stale", "is_stale")
+    else:
+        available_names = ("source_available", "available", "is_available")
+        stale_names = ("token_stale", "stale", "is_stale")
+    for name in available_names:
+        value = getattr(sample, name, None)
+        if value is False:
+            return False
+    for name in stale_names:
+        if getattr(sample, name, False) is True:
+            return False
+    stale_status = getattr(sample, "stale_status", None)
+    if isinstance(stale_status, str) and stale_status.casefold() in {
+        "stale", "data_stale", "unavailable", "invalid",
+    }:
+        return False
+    status_name = (
+        "quota_source_status"
+        if metric in {"five_hour_remaining_percent", "weekly_remaining_percent"}
+        else "source_status"
+    )
+    source_status = getattr(sample, status_name, None)
+    if isinstance(source_status, str) and source_status.casefold() in {
+        "unavailable", "invalid", "error", "failed",
+    }:
+        return False
+    return True
+
+
+def _sample_observed_at(sample: object, metric: str) -> datetime | None:
+    names = (
+        ("quota_observed_at", "observed_at", "sampled_at")
+        if metric in {"five_hour_remaining_percent", "weekly_remaining_percent"}
+        else ("source_event_time", "source_observed_at", "observed_at", "sampled_at")
+    )
+    for name in names:
+        value = getattr(sample, name, None)
+        if isinstance(value, datetime) and value.tzinfo is not None:
+            return value.astimezone(timezone.utc)
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is not None:
+                return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _sample_metric(sample: object, metric: str) -> float | None:
+    for name in _HISTORY_FIELDS[metric]:
+        value = _finite_number(getattr(sample, name, None))
+        if value is not None:
+            return value
+    if metric == "cache_hit_percent_derived":
+        input_tokens = _finite_number(getattr(sample, "input_tokens", None))
+        cached_tokens = _finite_number(getattr(sample, "cached_input_tokens", None))
+        if cached_tokens is None:
+            cached_tokens = _finite_number(getattr(sample, "cached_tokens", None))
+        if input_tokens is not None and input_tokens > 0 and cached_tokens is not None:
+            return cached_tokens / input_tokens * 100.0
+    return None
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if isfinite(number) else None

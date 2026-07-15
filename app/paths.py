@@ -49,6 +49,27 @@ def writable_root(
     return Path(base).expanduser().resolve() / APP_DIR_NAME
 
 
+def user_data_root(
+    *,
+    frozen: bool | None = None,
+    environ: Mapping[str, str] | None = None,
+    local_appdata: str | Path | None = None,
+) -> Path:
+    """Return the per-user application data root in source and frozen builds."""
+
+    # ``frozen`` is accepted so callers can forward the same path-test kwargs
+    # used by the other helpers. History must never default to the repository.
+    _ = frozen
+    env = os.environ if environ is None else environ
+    override = env.get(DATA_DIR_ENV)
+    if override:
+        return Path(override).expanduser().resolve()
+    base = local_appdata if local_appdata is not None else env.get("LOCALAPPDATA")
+    if not base:
+        base = Path.home() / "AppData" / "Local"
+    return Path(base).expanduser().resolve() / APP_DIR_NAME
+
+
 def pricing_path(**kwargs: object) -> Path:
     return resource_root(**kwargs) / "resources" / "pricing-config.sample.json"
 
@@ -61,6 +82,10 @@ def runs_path(**kwargs: object) -> Path:
 
 def ui_settings_path(**kwargs: object) -> Path:
     return writable_root(**kwargs) / "data" / "ui-settings.json"
+
+
+def history_db_path(**kwargs: object) -> Path:
+    return user_data_root(**kwargs) / "data" / "usage-history.sqlite3"
 
 
 def reports_dir(**kwargs: object) -> Path:

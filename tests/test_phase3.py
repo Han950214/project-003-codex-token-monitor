@@ -469,9 +469,13 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
 
     def test_resize_changes_layout_without_querying_product_data(self):
         cases = (
+            (980, 1.0, True, 64),
             (980, 1.25, True, 64),
             (980, 1.5, True, 64),
             (1_180, 1.25, False, 184),
+            (1_440, 1.0, False, 184),
+            (1_440, 1.25, False, 184),
+            (1_440, 1.5, False, 184),
         )
         for logical_width, scaling, collapsed, sidebar_width in cases:
             with self.subTest(logical_width=logical_width, scaling=scaling):

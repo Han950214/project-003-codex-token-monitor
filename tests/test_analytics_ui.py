@@ -9,6 +9,8 @@ from app.analytics_ui import (
     TREND_STALE_AFTER,
     build_trend_view,
     classify_trend_quality,
+    summarize_metric,
+    trend_view_from_query,
 )
 
 
@@ -42,10 +44,10 @@ def snapshot(*sessions, refreshed_at: datetime = NOW, rollout_available: bool = 
 
 
 class TrendQualityTests(unittest.TestCase):
-    def test_all_four_quality_states_are_explicit(self):
+    def test_all_five_quality_states_are_explicit(self):
         self.assertEqual(
             TREND_QUALITY_STATES,
-            ("available", "insufficient", "unavailable", "stale"),
+            ("empty", "available", "insufficient", "unavailable", "stale"),
         )
         self.assertEqual(
             classify_trend_quality(
@@ -64,6 +66,12 @@ class TrendQualityTests(unittest.TestCase):
                 0, source_available=False, refreshed_at=NOW, now=NOW,
             ),
             "unavailable",
+        )
+        self.assertEqual(
+            classify_trend_quality(
+                0, source_available=True, refreshed_at=NOW, now=NOW,
+            ),
+            "empty",
         )
         self.assertEqual(
             classify_trend_quality(
@@ -105,6 +113,43 @@ class TrendQualityTests(unittest.TestCase):
         )
         self.assertEqual([item.total_tokens for item in view.samples], [100])
         self.assertEqual(view.quality, "insufficient")
+
+    def test_local_query_projection_and_summary_keep_thread_and_global_scope(self):
+        thread_samples = tuple(
+            SimpleNamespace(
+                sampled_at=NOW - timedelta(minutes=2 - index),
+                total_tokens=value,
+                cache_reuse_ratio=0.25,
+            )
+            for index, value in enumerate((100, 160))
+        )
+        quota_samples = (
+            SimpleNamespace(
+                sampled_at=NOW,
+                five_hour_remaining_percent=42.5,
+                weekly_remaining_percent=75.0,
+            ),
+        )
+        result = SimpleNamespace(
+            range_days=7,
+            status="available",
+            samples=thread_samples,
+            quota_samples=quota_samples,
+            metrics_available=("total_tokens", "five_hour_remaining_percent"),
+            start_at=thread_samples[0].sampled_at,
+            end_at=thread_samples[-1].sampled_at,
+            error_code=None,
+        )
+
+        view = trend_view_from_query(result)
+        total = summarize_metric(view, "total")
+        quota = summarize_metric(view, "five_hour")
+        reuse = summarize_metric(view, "cache_reuse")
+
+        self.assertEqual((total.current, total.minimum, total.maximum, total.change), (160, 100, 160, 60))
+        self.assertEqual(total.scope, "thread")
+        self.assertEqual((quota.current, quota.scope), (42.5, "global"))
+        self.assertEqual((reuse.current, reuse.derived), (25.0, True))
 
 
 if __name__ == "__main__":

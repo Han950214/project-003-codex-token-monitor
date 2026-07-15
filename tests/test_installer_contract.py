@@ -12,6 +12,7 @@ from app.version import __version__
 ROOT = Path(__file__).resolve().parents[1]
 ISS = (ROOT / "installer" / "CodexTokenMonitor.iss").read_text(encoding="utf-8")
 BUILD = (ROOT / "scripts" / "build_installer.ps1").read_text(encoding="utf-8")
+PORTABLE_BUILD = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
 HELPERS = (ROOT / "scripts" / "installer_helpers.ps1").read_text(encoding="utf-8")
 
 
@@ -68,7 +69,7 @@ class InstallerContractTests(unittest.TestCase):
     def test_build_script_is_offline_fail_fast_and_hashes_output(self):
         self.assertIn('$ErrorActionPreference = "Stop"', BUILD)
         self.assertIn('scripts\\build_windows.ps1', BUILD)
-        self.assertIn('& $portableExe --smoke', BUILD)
+        self.assertIn('Invoke-IsolatedPortableSmoke -PortableExe $portableExe', BUILD)
         self.assertIn('Get-FileHash -Algorithm SHA256', BUILD)
         self.assertIn('dist\\installer', BUILD)
         self.assertIn('issue=inno_setup_compiler_missing', HELPERS)
@@ -77,6 +78,24 @@ class InstallerContractTests(unittest.TestCase):
         combined = BUILD + HELPERS
         for forbidden in ("winget", "choco", "scoop", "Invoke-WebRequest", "git ", "[Environment]::SetEnvironmentVariable"):
             self.assertNotIn(forbidden, combined)
+
+    def test_portable_smokes_isolate_validate_and_cleanup_trend_data(self):
+        for script in (PORTABLE_BUILD, BUILD):
+            with self.subTest(script="portable" if script is PORTABLE_BUILD else "installer"):
+                self.assertIn("[guid]::NewGuid()", script)
+                self.assertIn("$hadOriginalDataDir = Test-Path Env:CODEX_TOKEN_MONITOR_DATA_DIR", script)
+                self.assertIn("$env:CODEX_TOKEN_MONITOR_DATA_DIR = $smokeDataDir", script)
+                self.assertIn("Start-Process -FilePath $PortableExe", script)
+                self.assertIn("-Wait -PassThru -WindowStyle Hidden", script)
+                self.assertIn("$smokeExitCode = $smokeProcess.ExitCode", script)
+                self.assertIn("if ($smokeExitCode -ne 0)", script)
+                self.assertIn('Join-Path $smokeDataDir "data\\usage-history.sqlite3"', script)
+                self.assertIn('"SQLite format 3"', script)
+                self.assertIn("$env:CODEX_TOKEN_MONITOR_DATA_DIR = $originalDataDir", script)
+                self.assertIn("Remove-Item Env:CODEX_TOKEN_MONITOR_DATA_DIR", script)
+                self.assertIn("Remove-Item -LiteralPath $smokeDataDir -Recurse -Force", script)
+                self.assertIn(".StartsWith($smokePrefix", script)
+                self.assertIn("finally {", script)
 
     def test_icon_contains_required_transparent_sizes(self):
         path = ROOT / "resources" / "app-icon.ico"
