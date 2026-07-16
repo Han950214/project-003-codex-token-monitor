@@ -6,6 +6,15 @@ Current boundary: the status center discovers multiple recent Codex Threads from
 
 关键边界：本项目不替代 AOS，不创建知识库、项目记忆或项目上下文，不扫描项目文件，也不读取或保存 Prompt、Response、消息、工具输出或 Reasoning 正文。“准备新线程”只解释数字风险、打开 Codex，并复制不含项目内容的通用手工交接模板。状态中心从 Rollout JSONL 读取安全数字元数据；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。
 
+## Phase 3.1-C 全局真实用量汇总与范围澄清
+
+- “当前指令 / Current response”继续使用最新可靠响应观测；“当前会话 / Current session”继续使用当前 Thread 权威累计数字，二者不从历史窗口反推。
+- “已观测用量 / Observed usage”按今日、最近 5 小时、最近 7 天和最近 30 天汇总本机历史库中的规范响应观测。今日使用系统本地日历边界；滚动窗口使用实际经过时间，边界两端均包含。
+- 汇总层只计算响应 Token 字段，不累计 `session_total_tokens`，不把 Quota 行加入 Token，不把缺失或无效字段当作零。Mini 与 Dashboard 的同一观测继续按现有规范投影去重。
+- 每项 Token 指标保留有效、缺失和无效记录计数；界面区分完整本地历史、有限历史、部分覆盖、无观测、未知和不可用，并单独显示 fresh、stale 或 unavailable。
+- 官方 5 小时与每周 Quota 保持独立区域和百分比语义；本地 Token 汇总不等同于 Codex 官方账单或额度，也不从 Quota 反推 Token。
+- Schema 仍为 v3；本阶段只增加全局来源时间索引和有界查询，不新增历史数据库、网络请求、遥测、导出或云能力。应用版本仍为 `0.1.0`。
+
 ## Phase 3.1-B2 真实趋势与优化建议
 
 - 手动刷新和 60 秒自动刷新复用同一个安全数字归一化与历史写入入口；迷你组件模式也复用该入口。
@@ -102,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
 
 ## Current Status
 
-Phase 3.1-B2 已在 B1 Analytics UI shell 上接通 Token Monitor 自有历史层：完整刷新与迷你组件刷新会记录去重后的安全数字；概览、趋势页和 Advisor 只消费本地历史查询 DTO。页面切换和语言切换只重绘缓存结果，7/30/90 天切换只查询本地趋势库，不重新读取 Codex 源。应用版本仍为 `0.1.0`。
+Phase 3.1-C 已在既有 v3 历史层上增加全局响应用量窗口汇总与覆盖说明；范围切换在后台只读查询本地历史，不刷新 Codex 来源、不写历史。Phase 3.1-B2 的趋势、Advisor、额度事件序列与 Mini/Dashboard 去重语义保持不变。应用版本仍为 `0.1.0`。
 
 Phase 2.8-A-S 保留多 Thread 分离、500 条近期候选、已知路径回读和 Rollout 进程内缓存规则。近期列表每页 10 条，可在内存中翻页；点击近期行或下拉任务时直接切换完整刷新留下的快照，不重新读取 Rollout、SQLite、标题或额度。默认选择仍可自动跟随最近活动；主窗口最小化时会把当时实际选中的 Thread 解析为固定选择。近期范围默认 7 天，可切换 30 或 90 天。
 

@@ -15,8 +15,10 @@ import tempfile
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import customtkinter as ctk
+from PIL import ImageGrab
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +34,13 @@ from app.history import (  # noqa: E402
 )
 from app.i18n import translate  # noqa: E402
 from app.paths import DATA_DIR_ENV, ui_settings_path  # noqa: E402
+from app.quota import CodexQuotaSnapshot, QuotaKind, QuotaWindow  # noqa: E402
 from app.ui_settings import save_language  # noqa: E402
+from app.usage_summary import (  # noqa: E402
+    ObservedUsageSummary,
+    UsageWindowKind,
+    unavailable_usage_summary,
+)
 
 
 GEOMETRIES = ("980x660", "1440x900")
@@ -46,6 +54,10 @@ SCENARIOS = (
     "advisor_quota_sufficient",
     "advisor_quota_insufficient",
     "mini_dashboard_dedup",
+    "observed_usage_complete",
+    "observed_usage_partial",
+    "observed_usage_empty",
+    "observed_usage_unavailable",
 )
 QA_THREAD_ID = "qa-thread-001"
 
@@ -65,6 +77,7 @@ class ScenarioResult:
     default_page: str
     record_results: tuple[bool, ...]
     current_observed_at: datetime
+    usage_summary: ObservedUsageSummary
 
 
 def _validated_temp_root(root: Path) -> Path:
@@ -80,6 +93,36 @@ def _isolated_data_root() -> Path:
     if not raw:
         raise RuntimeError(f"{DATA_DIR_ENV} is required for GUI acceptance")
     return _validated_temp_root(Path(raw))
+
+
+def _validated_screenshot_path(path: Path) -> Path:
+    resolved = Path(path).expanduser().resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    if temp_root not in resolved.parents or resolved.suffix.lower() != ".png":
+        raise RuntimeError("GUI acceptance screenshot must be a PNG below system Temp")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def _capture_window(root: ctk.CTk, target: Path) -> None:
+    root.attributes("-topmost", True)
+    root.lift()
+    root.update_idletasks()
+    left = root.winfo_rootx()
+    top = root.winfo_rooty()
+    right = left + root.winfo_width()
+    bottom = top + root.winfo_height()
+    if right <= left or bottom <= top:
+        raise RuntimeError("GUI acceptance window has invalid screenshot bounds")
+    image = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
+    image.save(target, format="PNG")
+    root.attributes("-topmost", False)
+
+
+def _geometry_for_scale(geometry: str, scale: float) -> str:
+    """Keep the requested logical viewport stable while CTk scales the window."""
+    width_text, height_text = geometry.split("x", maxsplit=1)
+    return f"{round(int(width_text) / scale)}x{round(int(height_text) / scale)}"
 
 
 def _token_observation(
@@ -332,7 +375,7 @@ def build_scenario(
         group, metric, page = "quota", "five_hour", "recommendations"
         outcomes = tuple(outcomes_list)
 
-    else:  # mini_dashboard_dedup
+    elif name == "mini_dashboard_dedup":
         observed = current - timedelta(minutes=1)
         mini = _token_observation(
             sampled_at=current - timedelta(seconds=30),
@@ -359,6 +402,58 @@ def build_scenario(
         group, metric, page = "tokens", "total", "usage_trends"
         outcomes = (inserted_mini, inserted_dashboard)
 
+    elif name == "observed_usage_complete":
+        outcomes = tuple(store.record(_token_observation(
+            sampled_at=observed,
+            source_observed_at=observed,
+            input_tokens=1_000 + index * 100,
+            output_tokens=200,
+            total_tokens=1_200 + index * 100,
+            cached_tokens=500,
+            reasoning_tokens=80,
+        )) for index, observed in enumerate((
+            current - timedelta(hours=6),
+            current - timedelta(hours=2),
+            current - timedelta(minutes=1),
+        )))
+        before = after = store.query(range_days, QA_THREAD_ID, now=current)
+        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
+        group, metric, page = "tokens", "total", "overview"
+
+    elif name == "observed_usage_partial":
+        partial = _token_observation(
+            sampled_at=current - timedelta(minutes=1),
+            source_observed_at=current - timedelta(minutes=1),
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=1_500,
+            cached_tokens=None,
+            reasoning_tokens=None,
+        )
+        outcomes = (store.record(partial),)
+        before = after = store.query(range_days, QA_THREAD_ID, now=current)
+        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
+        group, metric, page = "tokens", "total", "overview"
+
+    else:  # observed_usage_empty / observed_usage_unavailable
+        before = after = store.query(range_days, QA_THREAD_ID, now=current)
+        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
+        group, metric, page = "tokens", "total", "overview"
+        outcomes = ()
+
+    usage_summary = store.summarize_usage(
+        UsageWindowKind.ROLLING_5H,
+        as_of_utc=current,
+        local_timezone=timezone.utc,
+    )
+    if name == "observed_usage_unavailable":
+        usage_summary = unavailable_usage_summary(
+            UsageWindowKind.ROLLING_5H,
+            as_of_utc=current,
+            local_timezone=timezone.utc,
+            error_code="qa_history_unavailable",
+        )
+
     return ScenarioResult(
         name=name,
         store=store,
@@ -371,6 +466,7 @@ def build_scenario(
         default_page=page,
         record_results=outcomes,
         current_observed_at=current,
+        usage_summary=usage_summary,
     )
 
 
@@ -382,6 +478,8 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
     dashboard.history_error = scenario.after.error_code
     dashboard.trend_group = scenario.trend_group
     dashboard.trend_metric = scenario.trend_metric
+    dashboard.usage_window_kind = UsageWindowKind.ROLLING_5H
+    dashboard.observed_usage_summary = scenario.usage_summary
     group_label = next(
         label
         for label, value in dashboard.trend_group_labels.items()
@@ -393,9 +491,40 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
         translate(f"last_{scenario.after.range_days}_days", dashboard.language)
     )
     dashboard.advisor_result = scenario.advisor_result
+    if hasattr(dashboard, "observed_usage_window_menu"):
+        dashboard.observed_usage_window_menu.set(
+            translate("observed_usage_rolling_5h", dashboard.language)
+        )
+    dashboard._render_observed_usage()  # noqa: SLF001 - QA launcher
     dashboard._render_trends()  # noqa: SLF001 - QA launcher
     dashboard._render_advisor()  # noqa: SLF001 - QA launcher
     dashboard._render_recommendations()  # noqa: SLF001 - QA launcher
+    if hasattr(dashboard, "status_recent_rows"):
+        five = QuotaWindow.from_reset_duration(
+            QuotaKind.FIVE_HOUR,
+            used_percent=40.0,
+            remaining_percent=60.0,
+            reset_after=timedelta(hours=4),
+            observed_at=scenario.current_observed_at,
+            source="qa_safe_numbers",
+        )
+        weekly = QuotaWindow.from_reset_duration(
+            QuotaKind.WEEKLY,
+            used_percent=35.0,
+            remaining_percent=65.0,
+            reset_after=timedelta(days=5),
+            observed_at=scenario.current_observed_at,
+            source="qa_safe_numbers",
+        )
+        dashboard.snapshot = None
+        dashboard.quota_snapshot = CodexQuotaSnapshot(
+            five,
+            weekly,
+            scenario.current_observed_at,
+            "normal",
+        )
+        dashboard._render_safe_overview()  # noqa: SLF001 - QA launcher
+        dashboard._render_status_recent(SimpleNamespace(recent_sessions=()))  # noqa: SLF001
     dashboard.show_page(page)
 
 
@@ -427,6 +556,23 @@ def _scroll_trends_to_end(dashboard: object) -> None:
     page._parent_canvas.yview_moveto(1.0)  # noqa: SLF001 - QA-only scroll hook
 
 
+def _scroll_overview_to_usage(dashboard: object) -> None:
+    """Center the observed-usage card for deterministic overview screenshots."""
+    page = dashboard.status_page
+    if not hasattr(page, "_parent_canvas"):
+        raise RuntimeError("Overview scroll container is unavailable")
+    page._parent_canvas.yview_moveto(0.26)  # noqa: SLF001 - QA-only scroll hook
+
+
+def _change_observed_window(dashboard: object, value: str) -> None:
+    """Exercise the real overview range-change callback with a safe QA store."""
+    target = UsageWindowKind(value)
+    label = next(label for label, kind in dashboard.usage_window_labels.items()
+                 if kind == target)
+    dashboard.observed_usage_window_menu.set(label)
+    dashboard._change_usage_window(label)  # noqa: SLF001 - QA-only interaction hook
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--geometry", choices=GEOMETRIES, required=True)
@@ -438,6 +584,12 @@ def main() -> None:
     parser.add_argument("--metric", choices=("five_hour", "weekly"))
     parser.add_argument("--tooltip-index", choices=(0, 1, 2), type=int)
     parser.add_argument("--scroll-end", action="store_true")
+    parser.add_argument("--scroll-overview-usage", action="store_true")
+    parser.add_argument(
+        "--observed-window",
+        choices=tuple(kind.value for kind in UsageWindowKind),
+    )
+    parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--auto-close-ms", type=int, default=0)
     args = parser.parse_args()
 
@@ -446,6 +598,10 @@ def main() -> None:
     if not save_language(args.language, ui_settings_path()):
         raise RuntimeError("Unable to save isolated GUI acceptance language")
     scenario = build_scenario(args.scenario, data_root, range_days=args.range)
+    screenshot_path = (
+        _validated_screenshot_path(args.screenshot)
+        if args.screenshot is not None else None
+    )
     if args.metric is not None:
         scenario = replace(scenario, trend_metric=args.metric)
 
@@ -465,7 +621,8 @@ def main() -> None:
     )
 
     def apply_case() -> None:
-        root.geometry(args.geometry)
+        root.minsize(1, 1)
+        root.geometry(_geometry_for_scale(args.geometry, args.scale))
         _apply_scenario(dashboard, scenario, args.page or scenario.default_page)
 
         def stabilize_case() -> None:
@@ -474,6 +631,15 @@ def main() -> None:
                 root.after(250, lambda: _show_trend_tooltip(dashboard, args.tooltip_index))
             if args.scroll_end:
                 root.after(250, lambda: _scroll_trends_to_end(dashboard))
+            if args.scroll_overview_usage:
+                root.after(250, lambda: _scroll_overview_to_usage(dashboard))
+            if args.observed_window is not None:
+                root.after(
+                    250,
+                    lambda: _change_observed_window(dashboard, args.observed_window),
+                )
+            if screenshot_path is not None:
+                root.after(500, lambda: _capture_window(root, screenshot_path))
 
         root.after(1200, stabilize_case)
         if args.auto_close_ms > 0:

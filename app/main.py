@@ -69,6 +69,11 @@ from app.ui_theme import (
     METRIC, NAV, PAGE_TITLE, SECTION_TITLE, SPACE_1, SPACE_2, SPACE_3,
     SPACE_4, SPACE_6, STATUS_TITLE, configure_view,
 )
+from app.usage_summary import (
+    ObservedUsageSummary,
+    UsageWindowKind,
+    unavailable_usage_summary,
+)
 from app.windows_startup import WindowsStartupAdapter
 
 
@@ -102,6 +107,12 @@ TREND_METRIC_LABEL_KEYS = {
     "turn_count": "trend_metric_turn_count",
     "five_hour": "trend_metric_five_hour",
     "weekly": "trend_metric_weekly",
+}
+USAGE_WINDOW_LABEL_KEYS = {
+    UsageWindowKind.TODAY: "observed_usage_today",
+    UsageWindowKind.ROLLING_5H: "observed_usage_rolling_5h",
+    UsageWindowKind.ROLLING_7D: "observed_usage_rolling_7d",
+    UsageWindowKind.ROLLING_30D: "observed_usage_rolling_30d",
 }
 
 
@@ -144,6 +155,13 @@ class Dashboard:
         self.trend_view = TrendView(7, "empty", (), None)
         self.trend_group = "tokens"
         self.trend_metric = "total"
+        self.usage_window_kind = UsageWindowKind.TODAY
+        self.observed_usage_summary: ObservedUsageSummary = unavailable_usage_summary(
+            self.usage_window_kind,
+            as_of_utc=datetime.now(timezone.utc),
+            local_timezone=None,
+            error_code="history_not_loaded",
+        )
         self.status_filter = "all"
         self.label_to_thread: dict[str, str] = {}
         self.selectable_thread_ids: set[str] = set()
@@ -156,8 +174,12 @@ class Dashboard:
         self.window_mode = "dashboard"
         self._closing = False
         self._trend_query_generation = 0
-        self._trend_query_requests: queue.Queue[tuple[int, int, str]] = queue.Queue(maxsize=1)
-        self._trend_query_results: queue.Queue[tuple[int, TrendView, str | None]] = queue.Queue()
+        self._trend_query_requests: queue.Queue[
+            tuple[int, int, str, UsageWindowKind, datetime]
+        ] = queue.Queue(maxsize=1)
+        self._trend_query_results: queue.Queue[
+            tuple[int, TrendView, ObservedUsageSummary, str | None]
+        ] = queue.Queue()
         self._trend_query_stop = threading.Event()
         self._trend_query_poll_scheduled = False
         self._trend_query_worker = threading.Thread(
@@ -410,6 +432,7 @@ class Dashboard:
         page.grid(row=0, column=0, sticky="nsew")
         self.status_advice_card = self._build_status_advice(page)
         self.core_metrics_panel = self._build_core_metrics_panel(page)
+        self.observed_usage_card = self._build_observed_usage_card(page)
         self.task_summary_card = self._build_task_summary_card(page)
         self.quota_center_card = self._build_quota_center_card(page)
         self.trend_preview_card = self._build_trend_preview_card(page)
@@ -572,6 +595,157 @@ class Dashboard:
                 "sparkline": sparkline, "ring": ring,
             })
         return panel
+
+    def _build_observed_usage_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        card = self._section_card(parent)
+        card.grid_columnconfigure(0, weight=1)
+        header = ctk.CTkFrame(card, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_3, 0))
+        header.grid_columnconfigure(0, weight=1)
+        self.observed_usage_title = ctk.CTkLabel(
+            header,
+            text="",
+            font=SECTION_TITLE,
+            text_color=COLORS.primary_text,
+            anchor="w",
+        )
+        self.observed_usage_title.grid(row=0, column=0, sticky="ew")
+        self.observed_usage_window_menu = ctk.CTkOptionMenu(
+            header,
+            values=[""],
+            command=self._change_usage_window,
+            width=142,
+            height=30,
+            fg_color=COLORS.raised_surface,
+            button_color=COLORS.accent,
+            button_hover_color=COLORS.accent_hover,
+            text_color=COLORS.primary_text,
+        )
+        self.observed_usage_window_menu.grid(row=0, column=1, padx=(SPACE_3, 0))
+        self.observed_usage_disclaimer = ctk.CTkLabel(
+            card,
+            text="",
+            font=CAPTION,
+            text_color=COLORS.secondary_text,
+            anchor="w",
+            justify="left",
+            wraplength=620,
+        )
+        self.observed_usage_disclaimer.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=SPACE_4,
+            pady=(SPACE_1, SPACE_2),
+        )
+
+        self.observed_usage_metrics_host = ctk.CTkFrame(card, fg_color="transparent")
+        self.observed_usage_metrics_host.grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            padx=SPACE_3,
+        )
+        self.observed_usage_metric_widgets: dict[str, dict[str, object]] = {}
+        for name in ("total", "input", "output", "cached", "reasoning"):
+            metric_card = ctk.CTkFrame(
+                self.observed_usage_metrics_host,
+                fg_color=COLORS.raised_surface,
+                corner_radius=CONTROL_RADIUS,
+                border_width=1,
+                border_color=COLORS.border,
+                height=86,
+            )
+            metric_card.grid_propagate(False)
+            metric_card.grid_columnconfigure(0, weight=1)
+            title_var = tk.StringVar(master=self.root, value="")
+            value_var = tk.StringVar(master=self.root, value="—")
+            full_var = tk.StringVar(master=self.root, value="—")
+            ctk.CTkLabel(
+                metric_card,
+                textvariable=title_var,
+                font=CAPTION,
+                text_color=COLORS.secondary_text,
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew", padx=SPACE_2, pady=(SPACE_2, 0))
+            value_label = ctk.CTkLabel(
+                metric_card,
+                textvariable=value_var,
+                font=METRIC if name == "total" else BODY_STRONG,
+                text_color=COLORS.accent if name == "total" else COLORS.primary_text,
+                anchor="w",
+            )
+            value_label.grid(
+                row=1,
+                column=0,
+                sticky="ew",
+                padx=SPACE_2,
+                pady=(SPACE_1, SPACE_2),
+            )
+            WidgetTooltip(value_label, lambda variable=full_var: variable.get())
+            self.observed_usage_metric_widgets[name] = {
+                "card": metric_card,
+                "title": title_var,
+                "value": value_var,
+                "full": full_var,
+            }
+
+        self.observed_usage_aux_host = ctk.CTkFrame(card, fg_color="transparent")
+        self.observed_usage_aux_host.grid(
+            row=3,
+            column=0,
+            sticky="ew",
+            padx=SPACE_3,
+            pady=(SPACE_2, 0),
+        )
+        self.observed_usage_aux_widgets: dict[str, dict[str, object]] = {}
+        for name in ("responses", "sessions", "average", "cache_reuse"):
+            cell = ctk.CTkFrame(
+                self.observed_usage_aux_host,
+                fg_color=COLORS.raised_surface,
+                corner_radius=CONTROL_RADIUS,
+            )
+            cell.grid_columnconfigure(0, weight=1)
+            title_var = tk.StringVar(master=self.root, value="")
+            value_var = tk.StringVar(master=self.root, value="—")
+            ctk.CTkLabel(
+                cell,
+                textvariable=title_var,
+                font=CAPTION,
+                text_color=COLORS.secondary_text,
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew", padx=SPACE_2, pady=(SPACE_2, 0))
+            ctk.CTkLabel(
+                cell,
+                textvariable=value_var,
+                font=BODY_STRONG,
+                text_color=COLORS.primary_text,
+                anchor="w",
+            ).grid(row=1, column=0, sticky="ew", padx=SPACE_2, pady=(0, SPACE_2))
+            self.observed_usage_aux_widgets[name] = {
+                "cell": cell,
+                "title": title_var,
+                "value": value_var,
+            }
+
+        self.observed_usage_coverage_var = tk.StringVar(master=self.root, value="")
+        self.observed_usage_coverage_label = ctk.CTkLabel(
+            card,
+            textvariable=self.observed_usage_coverage_var,
+            font=CAPTION,
+            text_color=COLORS.secondary_text,
+            anchor="w",
+            justify="left",
+            wraplength=680,
+        )
+        self.observed_usage_coverage_label.grid(
+            row=4,
+            column=0,
+            sticky="ew",
+            padx=SPACE_4,
+            pady=(SPACE_2, SPACE_3),
+        )
+        return card
 
     def _build_task_summary_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
         card = self._section_card(parent)
@@ -930,6 +1104,7 @@ class Dashboard:
     def _apply_status_layout(self, content_width: int) -> None:
         cards = (
             self.status_advice_card, self.core_metrics_panel,
+            self.observed_usage_card,
             self.task_summary_card, self.quota_center_card,
             self.trend_preview_card, self.status_recent_card,
             self.quick_actions_card,
@@ -953,11 +1128,14 @@ class Dashboard:
             self.core_metrics_panel.grid(
                 row=1, column=0, columnspan=2, sticky="ew", pady=(0, SPACE_3),
             )
+            self.observed_usage_card.grid(
+                row=2, column=0, columnspan=2, sticky="ew", pady=(0, SPACE_3),
+            )
             for card, row, column in (
-                (self.task_summary_card, 2, 0),
-                (self.quota_center_card, 2, 1),
-                (self.trend_preview_card, 3, 0),
-                (self.status_recent_card, 3, 1),
+                (self.task_summary_card, 3, 0),
+                (self.quota_center_card, 3, 1),
+                (self.trend_preview_card, 4, 0),
+                (self.status_recent_card, 4, 1),
             ):
                 card.grid(
                     row=row, column=column, sticky="nsew",
@@ -965,13 +1143,14 @@ class Dashboard:
                     pady=(0, SPACE_3),
                 )
             self.quick_actions_card.grid(
-                row=4, column=0, columnspan=2, sticky="ew", pady=(0, SPACE_3),
+                row=5, column=0, columnspan=2, sticky="ew", pady=(0, SPACE_3),
             )
         else:
             self.status_page.grid_columnconfigure(0, weight=1, uniform="")
             for row, card in enumerate(cards):
                 card.grid(row=row, column=0, sticky="ew", pady=(0, SPACE_3))
         self._layout_core_metrics(content_width)
+        self._layout_observed_usage(content_width)
 
     def _layout_core_metrics(self, width: int) -> None:
         columns = metric_columns_for_width(width)
@@ -986,6 +1165,44 @@ class Dashboard:
             row, column = divmod(index, columns)
             card.grid(
                 row=row, column=column, sticky="nsew", padx=SPACE_1,
+                pady=SPACE_1,
+            )
+
+    def _layout_observed_usage(self, width: int) -> None:
+        metric_columns = min(5, metric_columns_for_width(width))
+        for column in range(5):
+            self.observed_usage_metrics_host.grid_columnconfigure(
+                column,
+                weight=1 if column < metric_columns else 0,
+                uniform="observed_usage" if column < metric_columns else "",
+            )
+        for index, widget in enumerate(self.observed_usage_metric_widgets.values()):
+            card = widget["card"]
+            card.grid_forget()
+            row, column = divmod(index, metric_columns)
+            card.grid(
+                row=row,
+                column=column,
+                sticky="nsew",
+                padx=SPACE_1,
+                pady=SPACE_1,
+            )
+        aux_columns = 4 if width >= 900 else 2
+        for column in range(4):
+            self.observed_usage_aux_host.grid_columnconfigure(
+                column,
+                weight=1 if column < aux_columns else 0,
+                uniform="observed_usage_aux" if column < aux_columns else "",
+            )
+        for index, widget in enumerate(self.observed_usage_aux_widgets.values()):
+            cell = widget["cell"]
+            cell.grid_forget()
+            row, column = divmod(index, aux_columns)
+            cell.grid(
+                row=row,
+                column=column,
+                sticky="nsew",
+                padx=SPACE_1,
                 pady=SPACE_1,
             )
 
@@ -1699,6 +1916,42 @@ class Dashboard:
             widget["title"].set(translate(f"core_metric_{semantic}", language))
             widget["scope"].set(translate(f"core_metric_{semantic}_scope", language))
 
+        self.observed_usage_title.configure(
+            text=translate("observed_usage_title", language),
+        )
+        self.observed_usage_disclaimer.configure(
+            text=translate("observed_usage_disclaimer", language),
+        )
+        self.usage_window_labels = {
+            translate(label_key, language): kind
+            for kind, label_key in USAGE_WINDOW_LABEL_KEYS.items()
+        }
+        self.observed_usage_window_menu.configure(
+            values=list(self.usage_window_labels),
+        )
+        self.observed_usage_window_menu.set(
+            translate(USAGE_WINDOW_LABEL_KEYS[self.usage_window_kind], language),
+        )
+        for name, key in {
+            "total": "metric_total",
+            "input": "metric_input",
+            "output": "metric_output",
+            "cached": "metric_cached",
+            "reasoning": "metric_reasoning",
+        }.items():
+            self.observed_usage_metric_widgets[name]["title"].set(
+                translate(key, language),
+            )
+        for name, key in {
+            "responses": "observed_usage_responses",
+            "sessions": "observed_usage_sessions",
+            "average": "observed_usage_average",
+            "cache_reuse": "observed_usage_cache_reuse",
+        }.items():
+            self.observed_usage_aux_widgets[name]["title"].set(
+                translate(key, language),
+            )
+
         self.simple_task_title.configure(text=translate("session_detail_title", language))
         for name, key in {
             "turns": "task_turns", "instruction": "instruction_usage",
@@ -1890,6 +2143,7 @@ class Dashboard:
             self._apply_presentation(self.presentation)
         else:
             self._render_advisor()
+            self._render_observed_usage()
             self._render_trends()
             self._render_recommendations()
         self._render_diagnostics()
@@ -2177,11 +2431,7 @@ class Dashboard:
         """Read only the app-owned store; never refresh a Codex source here."""
 
         self._invalidate_pending_trend_queries()
-        selected_id = self.snapshot.selected_thread_id if self.snapshot is not None else None
-        thread_filter = selected_id or "no_selection"
-        self.trend_view, self.history_error = self._query_trend_view(
-            self.trend_range_days, thread_filter,
-        )
+        self._schedule_trend_query()
 
     def _query_trend_view(
         self, range_days: int, thread_filter: str,
@@ -2198,6 +2448,26 @@ class Dashboard:
                 error_code="history_query_failed",
             ), "history_query_failed"
 
+    def _query_observed_usage(
+        self,
+        scope: UsageWindowKind,
+        as_of_utc: datetime,
+    ) -> tuple[ObservedUsageSummary, str | None]:
+        try:
+            summary = self.history_store.summarize_usage(
+                scope,
+                as_of_utc=as_of_utc,
+                local_timezone=None,
+            )
+            return summary, summary.error_code
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return unavailable_usage_summary(
+                scope,
+                as_of_utc=as_of_utc,
+                local_timezone=None,
+                error_code="history_query_failed",
+            ), "history_query_failed"
+
     def _schedule_trend_query(self) -> None:
         """Coalesce local-history requests off Tk and discard stale results."""
 
@@ -2207,8 +2477,21 @@ class Dashboard:
         selected_id = self.snapshot.selected_thread_id if self.snapshot is not None else None
         thread_filter = selected_id or "no_selection"
         self.trend_view = TrendView(range_days, "unavailable", (), None)
+        as_of_utc = datetime.now(timezone.utc)
+        self.observed_usage_summary = unavailable_usage_summary(
+            self.usage_window_kind,
+            as_of_utc=as_of_utc,
+            local_timezone=None,
+            error_code="history_query_pending",
+        )
         self.history_error = None
-        request = (generation, range_days, thread_filter)
+        request = (
+            generation,
+            range_days,
+            thread_filter,
+            self.usage_window_kind,
+            as_of_utc,
+        )
         try:
             self._trend_query_requests.put_nowait(request)
         except queue.Full:
@@ -2232,28 +2515,40 @@ class Dashboard:
                     request = self._trend_query_requests.get_nowait()
                 except queue.Empty:
                     break
-            generation, range_days, thread_filter = request
-            view, error = self._query_trend_view(range_days, thread_filter)
-            self._trend_query_results.put((generation, view, error))
+            generation, range_days, thread_filter, usage_scope, as_of_utc = request
+            view, trend_error = self._query_trend_view(range_days, thread_filter)
+            usage_summary, usage_error = self._query_observed_usage(
+                usage_scope,
+                as_of_utc,
+            )
+            self._trend_query_results.put((
+                generation,
+                view,
+                usage_summary,
+                trend_error or usage_error,
+            ))
 
     def _poll_trend_query_results(self) -> None:
         if self._closing or not self._trend_query_poll_scheduled:
             return
-        candidate: tuple[TrendView, str | None] | None = None
+        candidate: tuple[TrendView, ObservedUsageSummary, str | None] | None = None
         while True:
             try:
-                generation, view, error = self._trend_query_results.get_nowait()
+                generation, view, usage_summary, error = (
+                    self._trend_query_results.get_nowait()
+                )
             except queue.Empty:
                 break
             if generation == self._trend_query_generation:
-                candidate = (view, error)
+                candidate = (view, usage_summary, error)
         if candidate is None:
             self.root.after(25, self._poll_trend_query_results)
             return
         self._trend_query_poll_scheduled = False
-        self.trend_view, self.history_error = candidate
+        self.trend_view, self.observed_usage_summary, self.history_error = candidate
         if self.snapshot is not None:
             self.advisor_result = self._evaluate_advisor()
+        self._render_observed_usage()
         self._render_trends()
         self._render_advisor()
         self._render_recommendations()
@@ -2351,6 +2646,10 @@ class Dashboard:
             if layout == "wide" else content_width - 64
         )
         self.status_reason_label.configure(wraplength=max(180, reason_width))
+        if hasattr(self, "observed_usage_coverage_label"):
+            wrap = max(220, content_width - 64)
+            self.observed_usage_coverage_label.configure(wraplength=wrap)
+            self.observed_usage_disclaimer.configure(wraplength=wrap)
 
     def _on_root_unmap(self, event: object) -> None:
         if (
@@ -2498,6 +2797,7 @@ class Dashboard:
         self.recent_note.configure(text=self._recent_sessions_note())
         self._render_sessions(presentation, render_session_rows=render_session_rows)
         self._render_advisor()
+        self._render_observed_usage()
         self._render_safe_overview()
         self._render_status_recent(presentation)
         self._render_trends()
@@ -2570,6 +2870,14 @@ class Dashboard:
         self.trend_metric = TREND_GROUP_METRICS[group][0]
         self._configure_trend_metric_menu()
         self._render_trends()
+
+    def _change_usage_window(self, label: str) -> None:
+        scope = self.usage_window_labels.get(label)
+        if scope is None or scope == self.usage_window_kind:
+            return
+        self.usage_window_kind = scope
+        self._schedule_trend_query()
+        self._render_observed_usage()
 
     def _change_trend_metric(self, label: str) -> None:
         metric = self.trend_metric_labels.get(label)
@@ -2937,6 +3245,115 @@ class Dashboard:
             translate("advisor_rules_body", self.language),
             parent=self.root,
         )
+
+    def _render_observed_usage(self) -> None:
+        if not hasattr(self, "observed_usage_metric_widgets"):
+            return
+        summary = self.observed_usage_summary
+        metric_values = {
+            "total": summary.total_tokens,
+            "input": summary.input_tokens,
+            "output": summary.output_tokens,
+            "cached": summary.cached_tokens,
+            "reasoning": summary.reasoning_tokens,
+        }
+        for name, aggregate in metric_values.items():
+            value = format_compact_token_count(aggregate.value)
+            widget = self.observed_usage_metric_widgets[name]
+            widget["value"].set(value)
+            widget["full"].set(self._full_token_tooltip(aggregate.value))
+
+        has_observations = summary.observed_response_count > 0
+        average = summary.average_total_tokens_per_response
+        cache_reuse = summary.cache_reuse.value
+        self.observed_usage_aux_widgets["responses"]["value"].set(
+            str(summary.observed_response_count) if has_observations else "—"
+        )
+        self.observed_usage_aux_widgets["sessions"]["value"].set(
+            str(summary.covered_thread_count) if has_observations else "—"
+        )
+        self.observed_usage_aux_widgets["average"]["value"].set(
+            format_compact_token_count(round(average)) if average is not None else "—"
+        )
+        self.observed_usage_aux_widgets["cache_reuse"]["value"].set(
+            f"{cache_reuse * 100:.1f}%" if cache_reuse is not None else "—"
+        )
+
+        details: list[str] = []
+        if summary.scope is UsageWindowKind.ROLLING_5H:
+            details.append(translate("observed_usage_rolling_5h_label", self.language))
+        if has_observations:
+            details.append(translate(
+                "observed_usage_summary",
+                self.language,
+                responses=summary.observed_response_count,
+                sessions=summary.covered_thread_count,
+            ))
+        state_key = {
+            "complete_for_local_history": "observed_usage_all_retained",
+            "limited_history": "observed_usage_limited",
+            "partial": "observed_usage_partial",
+            "no_observations": "observed_usage_no_data",
+            "unknown": "observed_usage_unknown",
+            "unavailable": "observed_usage_unavailable",
+        }[summary.coverage_state]
+        details.append(translate(state_key, self.language))
+
+        history_started = summary.coverage.history_started_at
+        if (
+            history_started is not None
+            and history_started > summary.window_start_utc
+        ):
+            details.append(translate(
+                "observed_usage_data_since",
+                self.language,
+                time=history_started.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+            ))
+        metric_labels = {
+            "input_tokens": "metric_input",
+            "output_tokens": "metric_output",
+            "total_tokens": "metric_total",
+            "cached_tokens": "metric_cached",
+            "reasoning_tokens": "metric_reasoning",
+        }
+        for message in summary.coverage_messages:
+            if message.code == "metric_coverage" and message.metric in metric_labels:
+                details.append(translate(
+                    "observed_usage_field_coverage",
+                    self.language,
+                    metric=translate(metric_labels[message.metric], self.language),
+                    eligible=message.eligible_count,
+                    total=message.total_count,
+                ))
+            elif message.code == "thread_coverage":
+                details.append(translate(
+                    "observed_usage_thread_coverage",
+                    self.language,
+                    eligible=message.eligible_count,
+                    total=message.total_count,
+                ))
+        if summary.freshness_state == "stale":
+            details.append(translate("observed_usage_stale", self.language))
+        if summary.last_reliable_observed_at is not None:
+            details.append(translate(
+                "observed_usage_last_observed",
+                self.language,
+                time=summary.last_reliable_observed_at.astimezone().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+            ))
+        self.observed_usage_coverage_var.set(" · ".join(details))
+        coverage_color = {
+            "complete_for_local_history": COLORS.real,
+            "limited_history": COLORS.orange,
+            "partial": COLORS.orange,
+            "no_observations": COLORS.unknown,
+            "unknown": COLORS.unknown,
+            "unavailable": COLORS.error,
+        }[summary.coverage_state]
+        if summary.freshness_state == "stale":
+            coverage_color = COLORS.stale
+        self.observed_usage_coverage_label.configure(text_color=coverage_color)
 
     def _render_safe_overview(self) -> None:
         quota = self.quota_snapshot

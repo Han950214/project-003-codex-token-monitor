@@ -376,10 +376,11 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
     def test_wide_status_layout_uses_balanced_columns(self):
         dashboard = object.__new__(Dashboard)
         dashboard.status_page = FakeWidget()
-        cards = [FakeWidget() for _ in range(7)]
+        cards = [FakeWidget() for _ in range(8)]
         (
             dashboard.status_advice_card,
             dashboard.core_metrics_panel,
+            dashboard.observed_usage_card,
             dashboard.task_summary_card,
             dashboard.quota_center_card,
             dashboard.trend_preview_card,
@@ -387,23 +388,26 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
             dashboard.quick_actions_card,
         ) = cards
         core_widths = []
+        usage_widths = []
         dashboard._layout_core_metrics = core_widths.append
+        dashboard._layout_observed_usage = usage_widths.append
 
         Dashboard._apply_status_layout(dashboard, 1_400)
 
         self.assertEqual(
             tuple(card.grid_calls[-1][1]["column"] for card in cards),
-            (0, 0, 0, 1, 0, 1, 0),
+            (0, 0, 0, 0, 1, 0, 1, 0),
         )
         self.assertEqual(
             tuple(card.grid_calls[-1][1].get("columnspan", 1) for card in cards),
-            (2, 2, 1, 1, 1, 1, 2),
+            (2, 2, 2, 1, 1, 1, 1, 2),
         )
         self.assertTrue(all(
             ("propagate", (True,), {}) in card.configure_calls
             for card in cards
         ))
         self.assertEqual(core_widths, [1_400])
+        self.assertEqual(usage_widths, [1_400])
 
         Dashboard._apply_status_layout(dashboard, 1_200)
         self.assertTrue(all(

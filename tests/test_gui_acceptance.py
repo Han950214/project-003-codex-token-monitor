@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from app.analytics_ui import metric_samples, summarize_metric, trend_view_from_query
 from app.main import Dashboard
 from app.paths import DATA_DIR_ENV
+from app.usage_summary import UsageWindowKind
 from scripts.gui_acceptance import (
     GEOMETRIES,
     PAGES,
@@ -18,7 +19,10 @@ from scripts.gui_acceptance import (
     SCALES,
     SCENARIOS,
     _apply_scenario,
+    _change_observed_window,
+    _geometry_for_scale,
     _isolated_data_root,
+    _scroll_overview_to_usage,
     _scroll_trends_to_end,
     _show_trend_tooltip,
     build_scenario,
@@ -48,7 +52,29 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             "advisor_quota_sufficient",
             "advisor_quota_insufficient",
             "mini_dashboard_dedup",
+            "observed_usage_complete",
+            "observed_usage_partial",
+            "observed_usage_empty",
+            "observed_usage_unavailable",
         ))
+
+    def test_geometry_is_normalized_for_customtkinter_window_scaling(self):
+        self.assertEqual(_geometry_for_scale("980x660", 1.0), "980x660")
+        self.assertEqual(_geometry_for_scale("980x660", 1.25), "784x528")
+        self.assertEqual(_geometry_for_scale("1440x900", 1.5), "960x600")
+
+    def test_observed_window_hook_uses_real_dashboard_change_callback(self):
+        menu = Mock()
+        dashboard = SimpleNamespace(
+            usage_window_labels={"Today": UsageWindowKind.TODAY},
+            observed_usage_window_menu=menu,
+            _change_usage_window=Mock(),
+        )
+
+        _change_observed_window(dashboard, "today")
+
+        menu.set.assert_called_once_with("Today")
+        dashboard._change_usage_window.assert_called_once_with("Today")
 
     def test_launcher_requires_an_isolated_system_temp_directory(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -92,6 +118,15 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         _scroll_trends_to_end(SimpleNamespace(trend_chart=chart))
 
         canvas.yview_moveto.assert_called_once_with(1.0)
+
+    def test_scroll_hook_centers_observed_usage_card(self):
+        canvas = SimpleNamespace(yview_moveto=Mock())
+
+        _scroll_overview_to_usage(
+            SimpleNamespace(status_page=SimpleNamespace(_parent_canvas=canvas))
+        )
+
+        canvas.yview_moveto.assert_called_once_with(0.26)
 
     def test_quota_only_change_does_not_add_or_refresh_token_observation(self):
         scenario = self._scenario("token_quota_independence")
@@ -229,6 +264,7 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             trend_group_menu=Mock(),
             trend_range_menu=Mock(),
             _configure_trend_metric_menu=Mock(),
+            _render_observed_usage=Mock(),
             _render_trends=Mock(),
             _render_advisor=Mock(),
             _render_recommendations=Mock(),
@@ -240,10 +276,12 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         self.assertEqual(dashboard.trend_range_days, 7)
         self.assertIs(dashboard.trend_view, scenario.trend_view)
         self.assertIs(dashboard.advisor_result, scenario.advisor_result)
+        self.assertIs(dashboard.observed_usage_summary, scenario.usage_summary)
         self.assertEqual((dashboard.trend_group, dashboard.trend_metric), ("tokens", "total"))
         dashboard.trend_group_menu.set.assert_called_once_with("Token Trends")
         dashboard.trend_range_menu.set.assert_called_once_with("Last 7 days")
         dashboard._render_trends.assert_called_once_with()
+        dashboard._render_observed_usage.assert_called_once_with()
         dashboard._render_advisor.assert_called_once_with()
         dashboard._render_recommendations.assert_called_once_with()
         dashboard.show_page.assert_called_once_with("usage_trends")
@@ -256,6 +294,7 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             trend_group_menu=Mock(),
             trend_range_menu=Mock(),
             _configure_trend_metric_menu=Mock(),
+            _render_observed_usage=Mock(),
             _render_trends=Mock(),
             _render_advisor=Mock(),
             _render_recommendations=Mock(),
@@ -279,10 +318,23 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             with self.subTest(scenario=name):
                 scenario = self._scenario(name)
                 samples = (*scenario.after.samples, *scenario.after.quota_samples)
-                self.assertTrue(samples)
                 for sample in samples:
                     self.assertTrue(forbidden.isdisjoint(vars(sample)))
+                self.assertTrue(forbidden.isdisjoint(vars(scenario.usage_summary)))
                 self.assertIn(Path(tempfile.gettempdir()).resolve(), scenario.store.path.parents)
+
+    def test_observed_usage_gui_states_cover_complete_partial_empty_and_unavailable(self):
+        expected = {
+            "observed_usage_complete": "complete_for_local_history",
+            "observed_usage_partial": "partial",
+            "observed_usage_empty": "no_observations",
+            "observed_usage_unavailable": "unavailable",
+        }
+        for name, state in expected.items():
+            with self.subTest(name=name):
+                scenario = self._scenario(name)
+                self.assertEqual(scenario.usage_summary.coverage_state, state)
+                self.assertEqual(scenario.default_page, "overview")
 
 
 if __name__ == "__main__":

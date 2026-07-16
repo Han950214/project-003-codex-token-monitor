@@ -9,11 +9,19 @@ import sqlite3
 import threading
 from contextlib import closing
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from app.paths import history_db_path
+from app.usage_summary import (
+    ObservedUsageRecord,
+    ObservedUsageSummary,
+    UsageWindowKind,
+    aggregate_observed_usage,
+    unavailable_usage_summary,
+    usage_window_bounds,
+)
 
 if TYPE_CHECKING:
     from app.dashboard import DashboardSnapshot, MiniThreadSnapshot
@@ -30,6 +38,14 @@ _TABLE = "usage_history_samples"
 _META_TABLE = "usage_history_meta"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _CODE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,63}$")
+_RESPONSE_PAYLOAD_PREDICATE = "(" + " OR ".join(
+    f"{name} IS NOT NULL"
+    for name in (
+        "input_tokens", "output_tokens", "total_tokens", "cached_tokens",
+        "reasoning_tokens",
+    )
+) + ")"
+_UTC_TEXT_GLOB = "????-??-??T??:??:??.??????Z"
 
 
 def _utc_now() -> datetime:
@@ -481,6 +497,82 @@ class UsageHistoryStore:
                 range_days, "unavailable", error_code=self.last_error,
             )
 
+    def summarize_usage(
+        self,
+        scope: UsageWindowKind | str,
+        *,
+        as_of_utc: datetime | None = None,
+        local_timezone: tzinfo | None = None,
+    ) -> ObservedUsageSummary:
+        """Aggregate one global response window without exposing SQLite to UI."""
+
+        as_of = _aware_utc(as_of_utc or self.clock(), "as_of_utc")
+        assert as_of is not None
+        bounds = usage_window_bounds(
+            scope,
+            as_of_utc=as_of,
+            local_timezone=local_timezone,
+        )
+        if not self._initialized and not self.initialize():
+            return unavailable_usage_summary(
+                bounds.scope,
+                as_of_utc=as_of,
+                local_timezone=local_timezone,
+                error_code=self.last_error or "history_storage_error",
+            )
+        start = _iso_utc(bounds.start_utc)
+        end = _iso_utc(bounds.end_utc)
+        try:
+            with closing(self._connect()) as connection:
+                rows = connection.execute(
+                    f"SELECT * FROM {_TABLE} "
+                    "WHERE source_observed_at_utc >= ? "
+                    "AND source_observed_at_utc <= ? "
+                    f"AND {_RESPONSE_PAYLOAD_PREDICATE} "
+                    "ORDER BY source_observed_at_utc, sampled_at_utc, id",
+                    (start, end),
+                ).fetchall()
+                earliest_row = connection.execute(
+                    f"SELECT MIN(source_observed_at_utc) FROM {_TABLE} "
+                    "WHERE legacy_unknown_time = 0 "
+                    "AND source_observed_at_utc IS NOT NULL "
+                    "AND source_observed_at_utc GLOB ? "
+                    f"AND {_RESPONSE_PAYLOAD_PREDICATE}",
+                    (_UTC_TEXT_GLOB,),
+                ).fetchone()
+                unknown_row = connection.execute(
+                    f"SELECT COUNT(*) FROM {_TABLE} WHERE ("
+                    "legacy_unknown_time = 1 "
+                    "OR source_observed_at_utc IS NULL "
+                    "OR source_observed_at_utc NOT GLOB ?"
+                    ") AND sampled_at_utc >= ? AND sampled_at_utc <= ? "
+                    f"AND {_RESPONSE_PAYLOAD_PREDICATE}",
+                    (_UTC_TEXT_GLOB, start, end),
+                ).fetchone()
+            records = tuple(_observed_usage_record_from_row(row) for row in rows)
+            first_retained = _parse_utc_safely(
+                None if earliest_row is None else earliest_row[0],
+            )[0]
+            unknown_count = 0 if unknown_row is None else int(unknown_row[0])
+            summary = aggregate_observed_usage(
+                records,
+                bounds.scope,
+                as_of_utc=as_of,
+                local_timezone=local_timezone,
+                first_retained_observed_at=first_retained,
+                unknown_time_record_count=unknown_count,
+            )
+            self.last_error = None
+            return summary
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            self.last_error = _storage_error_code(exc)
+            return unavailable_usage_summary(
+                bounds.scope,
+                as_of_utc=as_of,
+                local_timezone=local_timezone,
+                error_code=self.last_error,
+            )
+
     def prune(self, *, now: datetime | None = None) -> int:
         now = _aware_utc(now or self.clock(), "now")
         assert now is not None
@@ -644,6 +736,10 @@ class UsageHistoryStore:
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_thread_source_observed "
                 f"ON {_TABLE}(thread_safe_id, source_observed_at_utc, id)"
+            )
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_source_observed "
+                f"ON {_TABLE}(source_observed_at_utc, id)"
             )
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             connection.commit()
@@ -831,6 +927,40 @@ def _sample_from_row(row: sqlite3.Row) -> HistorySample:
         sample_id=int(row["id"]),
         schema_version=int(row["schema_version"]),
         stored_fingerprint=str(row["sample_fingerprint"]),
+    )
+
+
+def _observed_usage_record_from_row(row: sqlite3.Row) -> ObservedUsageRecord:
+    observed_at, observed_invalid = _parse_utc_safely(row["source_observed_at_utc"])
+    recorded_at = _parse_utc_safely(row["sampled_at_utc"])[0]
+    return ObservedUsageRecord(
+        source_observed_at=observed_at,
+        recorded_at=recorded_at,
+        thread_safe_id=(
+            row["thread_safe_id"] if isinstance(row["thread_safe_id"], str) else None
+        ),
+        model_safe_id=(
+            row["model_safe_id"] if isinstance(row["model_safe_id"], str) else None
+        ),
+        source_type=str(row["source_type"] or "unknown"),
+        source_status=str(row["source_status"] or "unavailable"),
+        source_available=bool(row["source_available"]),
+        token_stale=bool(row["token_stale"]),
+        token_stale_reason=(
+            row["token_stale_reason"]
+            if isinstance(row["token_stale_reason"], str) else None
+        ),
+        input_tokens=row["input_tokens"],
+        output_tokens=row["output_tokens"],
+        total_tokens=row["total_tokens"],
+        cached_tokens=row["cached_tokens"],
+        reasoning_tokens=row["reasoning_tokens"],
+        session_total_tokens=row["session_total_tokens"],
+        is_derived=bool(row["is_derived"]),
+        legacy_unknown_time=bool(row["legacy_unknown_time"]),
+        observed_time_invalid=observed_invalid,
+        stored_fingerprint=str(row["sample_fingerprint"] or ""),
+        sample_id=int(row["id"]),
     )
 
 
@@ -1447,6 +1577,13 @@ def _parse_utc(value: object) -> datetime | None:
         raise ValueError("stored_datetime_invalid")
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return _aware_utc(parsed, "stored_datetime")
+
+
+def _parse_utc_safely(value: object) -> tuple[datetime | None, bool]:
+    try:
+        return _parse_utc(value), False
+    except (TypeError, ValueError):
+        return None, value is not None
 
 
 def _safe_identifier(value: str | None) -> str | None:
