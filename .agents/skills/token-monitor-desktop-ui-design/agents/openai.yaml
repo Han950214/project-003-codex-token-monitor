@@ -1,0 +1,6 @@
+interface:
+  display_name: "Token Monitor Desktop UI Design"
+  short_description: "为 Token Monitor 设计清晰且不混淆数据口径的桌面界面。"
+  default_prompt: "Use $token-monitor-desktop-ui-design to plan this desktop UI without changing usage semantics."
+policy:
+  allow_implicit_invocation: true

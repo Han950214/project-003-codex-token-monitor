@@ -1,0 +1,6 @@
+interface:
+  display_name: "Token Monitor Desktop Visual Review"
+  short_description: "在真实 Token Monitor Desktop 中截图复核并完成至少两轮视觉修正。"
+  default_prompt: "Use $token-monitor-desktop-visual-review to validate this desktop UI with real screenshots."
+policy:
+  allow_implicit_invocation: true
