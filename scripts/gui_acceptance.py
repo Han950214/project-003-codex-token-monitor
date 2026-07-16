@@ -60,6 +60,7 @@ SCENARIOS = (
     "mini_dashboard_dedup",
     "observed_usage_complete",
     "observed_usage_partial",
+    "observed_usage_resolved",
     "observed_usage_in_progress",
     "observed_usage_empty",
     "observed_usage_unavailable",
@@ -481,35 +482,41 @@ def build_scenario(
         advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
         group, metric, page = "tokens", "total", "overview"
 
-    elif name == "observed_usage_in_progress":
+    elif name in {"observed_usage_resolved", "observed_usage_in_progress"}:
         response = "qa-response-in-progress"
+        lifecycle_rows = (
+            (current - timedelta(seconds=3), "in_progress", 100),
+            (current - timedelta(seconds=2), "in_progress", 200),
+        ) + (() if name == "observed_usage_in_progress" else (
+            (current - timedelta(seconds=1), "exact", 300),
+        ))
         outcomes = tuple(store.record(_token_observation(
             sampled_at=observed,
             source_observed_at=observed,
-            source_status="in_progress",
+            source_status=status,
             response_safe_id=response,
             input_tokens=total * 3 // 5,
             output_tokens=total * 2 // 5,
             total_tokens=total,
             cached_tokens=total * 3 // 10,
             reasoning_tokens=total // 5,
-        )) for observed, total in (
-            (current - timedelta(seconds=2), 100),
-            (current - timedelta(seconds=1), 200),
-        ))
+        )) for observed, status, total in lifecycle_rows)
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
         advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
         group, metric, page = "tokens", "total", "overview"
+        resolved = name == "observed_usage_resolved"
         instruction = InstructionUsage(
-            "qa-turn-active", "in_progress",
-            TokenUsage(120, 60, 80, 40, 200),
-            2, None, 0, 0, 0, False, True,
+            response,
+            "exact" if resolved else "in_progress",
+            TokenUsage(180, 90, 120, 60, 300) if resolved
+            else TokenUsage(120, 60, 80, 40, 200),
+            3 if resolved else 2, None, 0, 0, 0, resolved, not resolved,
         )
         selected_session = SimpleNamespace(
             thread_id=QA_THREAD_ID,
             instruction=instruction,
             thread_cumulative_usage=TokenUsage(600, 240, 200, 40, 800),
-            status="in_progress",
+            status="exact" if resolved else "in_progress",
             observed_at=current - timedelta(seconds=1),
             display_title="Codex Session · 07-16 12:00",
             full_title="Codex Session · 07-16 12:00",

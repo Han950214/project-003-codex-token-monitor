@@ -144,6 +144,29 @@ def summarize(
     )
 
 
+def summarize_streaming(records: tuple[ObservedUsageRecord, ...]):
+    bounds = usage_window_bounds(
+        UsageWindowKind.ROLLING_5H,
+        as_of_utc=NOW,
+        local_timezone=timezone.utc,
+    )
+    ordered = tuple(sorted(records, key=lambda item: (
+        item.thread_safe_id,
+        item.response_safe_id,
+        item.source_observed_at,
+        item.recorded_at,
+        item.sample_id,
+    )))
+    return aggregate_observed_usage(
+        ordered,
+        UsageWindowKind.ROLLING_5H,
+        as_of_utc=NOW,
+        local_timezone=timezone.utc,
+        first_retained_observed_at=bounds.start_utc - timedelta(seconds=1),
+        records_grouped_by_response=True,
+    )
+
+
 class UsageWindowTests(unittest.TestCase):
     def test_today_uses_local_calendar_midnight_not_last_24_hours(self):
         china = timezone(timedelta(hours=8), "Asia/Shanghai")
@@ -247,7 +270,11 @@ class UsageWindowTests(unittest.TestCase):
 
                 self.assertEqual(result.observed_response_count, 1)
                 self.assertEqual(result.total_tokens.value, 300)
-                self.assertEqual(result.in_progress_observation_count, 1)
+                self.assertEqual(result.in_progress_observation_count, 0)
+                self.assertNotIn(
+                    "in_progress_excluded",
+                    {message.code for message in result.coverage_messages},
+                )
 
                 exactly_at_start = summarize((usage_record(
                     at=bounds.start_utc,
@@ -321,24 +348,30 @@ class UsageAggregationTests(unittest.TestCase):
             ),
         )
 
-        result = summarize(records)
-
-        self.assertEqual(result.observed_response_count, 1)
-        self.assertEqual((
-            result.input_tokens.value,
-            result.output_tokens.value,
-            result.total_tokens.value,
-            result.cached_tokens.value,
-            result.reasoning_tokens.value,
-        ), (180, 120, 300, 90, 60))
-        self.assertEqual(result.average_total_tokens_per_response, 300)
-        self.assertEqual(result.cache_reuse.value, 0.5)
-        self.assertEqual(result.in_progress_observation_count, 2)
-        self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
-        self.assertIn(
-            "in_progress_excluded",
-            {message.code for message in result.coverage_messages},
-        )
+        for path, result in (
+            ("ordinary", summarize(records)),
+            ("streaming", summarize_streaming(records)),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(result.observed_response_count, 1)
+                self.assertEqual((
+                    result.input_tokens.value,
+                    result.output_tokens.value,
+                    result.total_tokens.value,
+                    result.cached_tokens.value,
+                    result.reasoning_tokens.value,
+                ), (180, 120, 300, 90, 60))
+                self.assertEqual(result.average_total_tokens_per_response, 300)
+                self.assertEqual(result.cache_reuse.value, 0.5)
+                self.assertEqual(result.in_progress_observation_count, 0)
+                self.assertEqual(
+                    result.coverage.state,
+                    CoverageState.COMPLETE_FOR_LOCAL_HISTORY,
+                )
+                self.assertNotIn(
+                    "in_progress_excluded",
+                    {message.code for message in result.coverage_messages},
+                )
 
     def test_only_in_progress_has_no_fake_zero_and_explicit_exclusion(self):
         response = "response-active"
@@ -353,22 +386,25 @@ class UsageAggregationTests(unittest.TestCase):
             ),
         )
 
-        result = summarize(records)
-
-        self.assertEqual(result.observed_response_count, 0)
-        for metric in (
-            result.input_tokens, result.output_tokens, result.total_tokens,
-            result.cached_tokens, result.reasoning_tokens,
-        ):
-            self.assertIsNone(metric.value)
-        self.assertIsNone(result.average_total_tokens_per_response)
-        self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
-        self.assertEqual(result.freshness.state, FreshnessState.UNAVAILABLE)
-        self.assertEqual(result.in_progress_observation_count, 2)
+        for result in (summarize(records), summarize_streaming(records)):
+            self.assertEqual(result.observed_response_count, 0)
+            for metric in (
+                result.input_tokens, result.output_tokens, result.total_tokens,
+                result.cached_tokens, result.reasoning_tokens,
+            ):
+                self.assertIsNone(metric.value)
+            self.assertIsNone(result.average_total_tokens_per_response)
+            self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
+            self.assertEqual(result.freshness.state, FreshnessState.UNAVAILABLE)
+            self.assertEqual(result.in_progress_observation_count, 2)
+            self.assertIn(
+                "in_progress_excluded",
+                {message.code for message in result.coverage_messages},
+            )
 
     def test_in_progress_to_partial_terminal_counts_legal_fields_once(self):
         response = "response-partial"
-        result = summarize((
+        records = (
             usage_record(
                 at=NOW - timedelta(seconds=2), response=response,
                 status="in_progress", total_tokens=100, sample_id=1,
@@ -376,16 +412,73 @@ class UsageAggregationTests(unittest.TestCase):
             usage_record(
                 at=NOW - timedelta(seconds=1), response=response,
                 status="completed_partial", input_tokens=None,
-                output_tokens=None, total_tokens=200, cached_tokens=None,
+                output_tokens=None, total_tokens=180, cached_tokens=None,
                 reasoning_tokens=None, sample_id=2,
             ),
-        ))
+        )
 
-        self.assertEqual(result.observed_response_count, 1)
-        self.assertEqual(result.total_tokens.value, 200)
-        self.assertIsNone(result.input_tokens.value)
-        self.assertEqual(result.coverage.partial_terminal_response_count, 1)
-        self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
+        for result in (summarize(records), summarize_streaming(records)):
+            self.assertEqual(result.observed_response_count, 1)
+            self.assertEqual(result.total_tokens.value, 180)
+            self.assertIsNone(result.input_tokens.value)
+            self.assertEqual(result.in_progress_observation_count, 0)
+            self.assertNotIn(
+                "in_progress_excluded",
+                {message.code for message in result.coverage_messages},
+            )
+            self.assertEqual(result.coverage.partial_terminal_response_count, 1)
+            self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
+
+    def test_post_complete_update_resolves_prior_in_progress_snapshots(self):
+        response = "response-post-complete"
+        records = (
+            usage_record(
+                at=NOW - timedelta(seconds=3), response=response,
+                status="in_progress", total_tokens=100, sample_id=1,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=2), response=response,
+                status="exact", input_tokens=210, output_tokens=90,
+                total_tokens=300, sample_id=2,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=1), response=response,
+                status="exact", input_tokens=245, output_tokens=105,
+                total_tokens=350, sample_id=3,
+            ),
+        )
+
+        for result in (summarize(records), summarize_streaming(records)):
+            self.assertEqual(result.observed_response_count, 1)
+            self.assertEqual(result.total_tokens.value, 350)
+            self.assertEqual(result.in_progress_observation_count, 0)
+
+    def test_only_unresolved_response_contributes_in_progress_coverage(self):
+        records = (
+            usage_record(
+                at=NOW - timedelta(seconds=4), response="response-a",
+                status="in_progress", total_tokens=100, sample_id=1,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=3), response="response-a",
+                status="exact", input_tokens=210, output_tokens=90,
+                total_tokens=300, sample_id=2,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=2), response="response-b",
+                status="in_progress", total_tokens=150, sample_id=3,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=1), response="response-b",
+                status="in_progress", total_tokens=200, sample_id=4,
+            ),
+        )
+
+        for result in (summarize(records), summarize_streaming(records)):
+            self.assertEqual(result.observed_response_count, 1)
+            self.assertEqual(result.total_tokens.value, 300)
+            self.assertEqual(result.in_progress_observation_count, 2)
+            self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
 
     def test_post_complete_dashboard_to_mini_exact_update_uses_latest_terminal(self):
         response = "response-updated-exact"
@@ -807,7 +900,11 @@ class UsageHistorySummaryStoreTests(unittest.TestCase):
 
             self.assertEqual(result.observed_response_count, 1)
             self.assertEqual(result.total_tokens.value, 300)
-            self.assertEqual(result.in_progress_observation_count, 2)
+            self.assertEqual(result.in_progress_observation_count, 0)
+            self.assertNotIn(
+                "in_progress_excluded",
+                {message.code for message in result.coverage_messages},
+            )
 
     def test_store_only_in_progress_then_partial_terminal_is_honest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -841,7 +938,7 @@ class UsageHistorySummaryStoreTests(unittest.TestCase):
                 sampled_at=terminal_at,
                 input_tokens=None,
                 output_tokens=None,
-                total_tokens=300,
+                total_tokens=180,
                 cached_tokens=None,
                 reasoning_tokens=None,
                 response=response,
@@ -856,8 +953,8 @@ class UsageHistorySummaryStoreTests(unittest.TestCase):
             )
             self.assertEqual(completed.coverage_state, "partial")
             self.assertEqual(completed.observed_response_count, 1)
-            self.assertEqual(completed.total_tokens.value, 300)
-            self.assertEqual(completed.in_progress_observation_count, 2)
+            self.assertEqual(completed.total_tokens.value, 180)
+            self.assertEqual(completed.in_progress_observation_count, 0)
 
     def test_store_post_complete_cross_source_update_changes_summary_and_trend(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1196,17 +1293,48 @@ class UsageSummaryUiContractTests(unittest.TestCase):
                 status="in_progress", total_tokens=200, sample_id=2,
             ),
         ))
-        dashboard = self.dashboard(summary)
+        for language, expected in (
+            ("en", ("No completed observations yet", "In-progress responses are not included yet", "They will be included after completion")),
+            ("zh-CN", ("暂无已完成的观测", "进行中的指令尚未计入历史汇总", "完成后将自动计入")),
+        ):
+            dashboard = self.dashboard(summary)
+            dashboard.language = language
+            Dashboard._render_observed_usage(dashboard)
+            for widget in dashboard.observed_usage_metric_widgets.values():
+                widget["value"].set.assert_called_once_with("—")
+            dashboard.observed_usage_aux_widgets["responses"]["value"].set.assert_called_once_with("—")
+            coverage = dashboard.observed_usage_coverage_var.set.call_args.args[0]
+            for message in expected:
+                self.assertIn(message, coverage)
 
-        Dashboard._render_observed_usage(dashboard)
+    def test_resolved_progressive_response_has_no_pending_message_in_both_languages(self):
+        response = "response-resolved-ui"
+        summary = summarize((
+            usage_record(
+                at=NOW - timedelta(seconds=3), response=response,
+                status="in_progress", total_tokens=100, sample_id=1,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=2), response=response,
+                status="in_progress", total_tokens=200, sample_id=2,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=1), response=response,
+                status="exact", input_tokens=210, output_tokens=90,
+                total_tokens=300, sample_id=3,
+            ),
+        ))
 
-        for widget in dashboard.observed_usage_metric_widgets.values():
-            widget["value"].set.assert_called_once_with("—")
-        dashboard.observed_usage_aux_widgets["responses"]["value"].set.assert_called_once_with("—")
-        coverage = dashboard.observed_usage_coverage_var.set.call_args.args[0]
-        self.assertIn("No completed observations yet", coverage)
-        self.assertIn("In-progress responses are not included yet", coverage)
-        self.assertIn("They will be included after completion", coverage)
+        for language, forbidden in (
+            ("en", ("In-progress responses are not included yet", "They will be included after completion")),
+            ("zh-CN", ("进行中的指令尚未计入历史汇总", "完成后将自动计入")),
+        ):
+            dashboard = self.dashboard(summary)
+            dashboard.language = language
+            Dashboard._render_observed_usage(dashboard)
+            coverage = dashboard.observed_usage_coverage_var.set.call_args.args[0]
+            for message in forbidden:
+                self.assertNotIn(message, coverage)
 
     def test_usage_window_switch_only_schedules_local_history_query(self):
         dashboard = object.__new__(Dashboard)

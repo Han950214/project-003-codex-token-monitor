@@ -355,7 +355,6 @@ def aggregate_observed_usage(
     quality = {
         "unknown": max(0, int(unknown_time_record_count)),
         "excluded": 0,
-        "in_progress": 0,
         "missing_identity": max(0, int(missing_response_identity_count)),
     }
     earliest_identified: datetime | None = None
@@ -395,8 +394,6 @@ def aggregate_observed_usage(
                     quality["missing_identity"] += 1
                 continue
             if lifecycle == _IN_PROGRESS_STATUS:
-                if in_window:
-                    quality["in_progress"] += 1
                 yield record
                 continue
             if lifecycle not in _TERMINAL_RESPONSE_STATUSES:
@@ -415,12 +412,17 @@ def aggregate_observed_usage(
             yield record
 
     canonical = (
-        _canonical_grouped_records(identified())
+        _canonical_grouped_records(identified(), bounds.start_utc)
         if records_grouped_by_response
-        else iter(_deduplicate_records(identified()))
+        else iter(_deduplicate_records(identified(), bounds.start_utc))
     )
     accumulator = _SummaryAccumulator()
-    for record in canonical:
+    unresolved_in_progress = 0
+    for lifecycle in canonical:
+        unresolved_in_progress += lifecycle.unresolved_in_progress_observation_count
+        record = lifecycle.terminal
+        if record is None:
+            continue
         observed_at = record.source_observed_at
         if observed_at is not None and bounds.start_utc <= observed_at <= bounds.end_utc:
             accumulator.add(record)
@@ -434,7 +436,7 @@ def aggregate_observed_usage(
     )
     unknown_times = quality["unknown"]
     excluded = quality["excluded"]
-    in_progress = quality["in_progress"]
+    in_progress = unresolved_in_progress
     missing_identity = quality["missing_identity"]
 
     messages: list[CoverageMessage] = []
@@ -602,43 +604,63 @@ def unavailable_usage_summary(
     )
 
 
+@dataclass(frozen=True)
+class _ResponseLifecycle:
+    terminal: ObservedUsageRecord | None
+    unresolved_in_progress_observation_count: int = 0
+
+
 def _deduplicate_records(
     records: Iterable[ObservedUsageRecord],
-) -> tuple[ObservedUsageRecord, ...]:
-    groups: dict[tuple[str, str], ObservedUsageRecord] = {}
+    window_start: datetime,
+) -> tuple[_ResponseLifecycle, ...]:
+    groups: dict[
+        tuple[str, str], tuple[ObservedUsageRecord | None, int]
+    ] = {}
     for record in records:
         assert record.thread_safe_id is not None
         assert record.response_safe_id is not None
-        if not _eligible_terminal(record):
-            continue
         key = (record.thread_safe_id, record.response_safe_id)
-        existing = groups.get(key)
-        if existing is None or _response_candidate_rank(record) > _response_candidate_rank(existing):
-            groups[key] = record
-    return tuple(sorted(
-        groups.values(),
-        key=lambda item: (
-            item.thread_safe_id, item.response_safe_id,
-            item.source_observed_at, item.sample_id,
-        ),
-    ))
+        terminal, in_progress = groups.get(key, (None, 0))
+        if _eligible_terminal(record):
+            if (
+                terminal is None
+                or _response_candidate_rank(record) > _response_candidate_rank(terminal)
+            ):
+                terminal = record
+        elif (
+            record.source_status.casefold() == _IN_PROGRESS_STATUS
+            and record.source_observed_at is not None
+            and record.source_observed_at >= window_start
+        ):
+            in_progress += 1
+        groups[key] = terminal, in_progress
+    return tuple(
+        _ResponseLifecycle(terminal, 0 if terminal is not None else in_progress)
+        for _key, (terminal, in_progress) in sorted(groups.items())
+    )
 
 
 def _canonical_grouped_records(
     records: Iterable[ObservedUsageRecord],
-) -> Iterable[ObservedUsageRecord]:
+    window_start: datetime,
+) -> Iterable[_ResponseLifecycle]:
     """Release one response group at a time from identity-ordered rows."""
 
     active_key: tuple[str, str] | None = None
     active_winner: ObservedUsageRecord | None = None
+    active_in_progress = 0
     for record in records:
         assert record.thread_safe_id is not None
         assert record.response_safe_id is not None
         key = (record.thread_safe_id, record.response_safe_id)
         if active_key is not None and key != active_key:
-            if active_winner is not None:
-                yield active_winner
+            yield _ResponseLifecycle(
+                active_winner,
+                0 if active_winner is not None else active_in_progress,
+            )
             active_winner = None
+            active_in_progress = 0
         active_key = key
         if (
             _eligible_terminal(record)
@@ -649,8 +671,17 @@ def _canonical_grouped_records(
             )
         ):
             active_winner = record
-    if active_winner is not None:
-        yield active_winner
+        elif (
+            record.source_status.casefold() == _IN_PROGRESS_STATUS
+            and record.source_observed_at is not None
+            and record.source_observed_at >= window_start
+        ):
+            active_in_progress += 1
+    if active_key is not None:
+        yield _ResponseLifecycle(
+            active_winner,
+            0 if active_winner is not None else active_in_progress,
+        )
 
 
 def _eligible_terminal(record: ObservedUsageRecord) -> bool:

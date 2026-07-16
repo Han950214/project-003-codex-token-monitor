@@ -55,6 +55,7 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             "mini_dashboard_dedup",
             "observed_usage_complete",
             "observed_usage_partial",
+            "observed_usage_resolved",
             "observed_usage_in_progress",
             "observed_usage_empty",
             "observed_usage_unavailable",
@@ -341,6 +342,7 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         expected = {
             "observed_usage_complete": "complete_for_local_history",
             "observed_usage_partial": "partial",
+            "observed_usage_resolved": "limited_history",
             "observed_usage_in_progress": "partial",
             "observed_usage_empty": "no_observations",
             "observed_usage_unavailable": "unavailable",
@@ -360,6 +362,18 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         self.assertEqual(scenario.usage_summary.in_progress_observation_count, 2)
         self.assertEqual(
             scenario.selected_session.instruction.usage.total_tokens, 200,
+        )
+
+    def test_resolved_scenario_counts_terminal_without_pending_coverage(self):
+        scenario = self._scenario("observed_usage_resolved")
+
+        self.assertEqual(scenario.record_results, (True, True, True))
+        self.assertEqual(scenario.usage_summary.observed_response_count, 1)
+        self.assertEqual(scenario.usage_summary.total_tokens.value, 300)
+        self.assertEqual(scenario.usage_summary.in_progress_observation_count, 0)
+        self.assertNotIn(
+            "in_progress_excluded",
+            {message.code for message in scenario.usage_summary.coverage_messages},
         )
 
     def test_in_progress_dashboard_fixture_supports_real_range_switch_identity(self):
