@@ -5,10 +5,13 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from unittest.mock import Mock
 
+from app.analytics_ui import metric_samples, trend_view_from_query
+from app.codex_rollout import make_response_safe_id
 from app.history import HistoryObservation, UsageHistoryStore
 from app.i18n import translate
 from app.main import Dashboard
@@ -82,7 +85,9 @@ def usage_record(
     at: datetime = NOW,
     thread: str | None = "thread-1",
     model: str | None = "model-1",
+    response: str | None = None,
     source: str = "dashboard",
+    status: str = "exact",
     available: bool = True,
     stale: bool = False,
     input_tokens: object = 100,
@@ -98,9 +103,12 @@ def usage_record(
         source_observed_at=at,
         recorded_at=at + timedelta(seconds=1),
         thread_safe_id=thread,
+        response_safe_id=make_response_safe_id(
+            thread or "missing-thread", response or f"response-{sample_id}",
+        ),
         model_safe_id=model,
         source_type=source,
-        source_status="stale" if stale else "exact",
+        source_status=status,
         source_available=available,
         token_stale=stale,
         token_stale_reason="source_stale" if stale else None,
@@ -210,8 +218,230 @@ class UsageWindowTests(unittest.TestCase):
         self.assertEqual(result.observed_response_count, 3)
         self.assertEqual(result.total_tokens.value, 360)
 
+    def test_progressive_snapshots_cross_each_window_by_canonical_terminal_time(self):
+        for kind in UsageWindowKind:
+            with self.subTest(kind=kind):
+                bounds = usage_window_bounds(
+                    kind, as_of_utc=NOW, local_timezone=timezone.utc,
+                )
+                response = f"response-{kind.value}"
+                result = summarize((
+                    usage_record(
+                        at=bounds.start_utc - timedelta(microseconds=1),
+                        response=response, status="in_progress",
+                        total_tokens=100, sample_id=1,
+                    ),
+                    usage_record(
+                        at=bounds.start_utc,
+                        response=response, status="in_progress",
+                        total_tokens=200, sample_id=2,
+                    ),
+                    usage_record(
+                        at=bounds.start_utc + timedelta(microseconds=1),
+                        response=response, status="exact",
+                        input_tokens=180, output_tokens=120,
+                        total_tokens=300, cached_tokens=90,
+                        reasoning_tokens=60, sample_id=3,
+                    ),
+                ), scope=kind)
+
+                self.assertEqual(result.observed_response_count, 1)
+                self.assertEqual(result.total_tokens.value, 300)
+                self.assertEqual(result.in_progress_observation_count, 1)
+
+                exactly_at_start = summarize((usage_record(
+                    at=bounds.start_utc,
+                    response=f"at-start-{kind.value}",
+                    status="exact",
+                    sample_id=30,
+                ),), scope=kind)
+                just_before_start = summarize((usage_record(
+                    at=bounds.start_utc - timedelta(microseconds=1),
+                    response=f"before-start-{kind.value}",
+                    status="exact",
+                    sample_id=31,
+                ),), scope=kind)
+                self.assertEqual(exactly_at_start.observed_response_count, 1)
+                self.assertEqual(just_before_start.observed_response_count, 0)
+
+                outside = summarize((
+                    usage_record(
+                        at=NOW - timedelta(microseconds=1),
+                        response=f"future-{kind.value}", status="in_progress",
+                        total_tokens=200, sample_id=4,
+                    ),
+                    usage_record(
+                        at=NOW + timedelta(microseconds=1),
+                        response=f"future-{kind.value}", status="exact",
+                        total_tokens=300, sample_id=5,
+                    ),
+                ), scope=kind)
+                self.assertEqual(outside.observed_response_count, 0)
+                self.assertIsNone(outside.total_tokens.value)
+
+                updated = summarize((
+                    usage_record(
+                        at=bounds.start_utc - timedelta(microseconds=1),
+                        response=f"updated-{kind.value}", source="dashboard",
+                        input_tokens=60, output_tokens=40, total_tokens=100,
+                        cached_tokens=30, reasoning_tokens=20, sample_id=6,
+                    ),
+                    usage_record(
+                        at=bounds.start_utc + timedelta(microseconds=1),
+                        response=f"updated-{kind.value}", source="mini",
+                        input_tokens=None, output_tokens=None, total_tokens=300,
+                        cached_tokens=None, reasoning_tokens=None, sample_id=7,
+                    ),
+                ), scope=kind)
+                self.assertEqual(updated.observed_response_count, 1)
+                self.assertEqual(updated.total_tokens.value, 300)
+
 
 class UsageAggregationTests(unittest.TestCase):
+    def test_progressive_snapshots_count_only_one_terminal_response(self):
+        response = "response-progressive"
+        records = (
+            usage_record(
+                at=NOW - timedelta(seconds=3), response=response,
+                status="in_progress", input_tokens=60, output_tokens=40,
+                total_tokens=100, cached_tokens=30, reasoning_tokens=20,
+                sample_id=1,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=2), response=response,
+                status="in_progress", input_tokens=120, output_tokens=80,
+                total_tokens=200, cached_tokens=60, reasoning_tokens=40,
+                sample_id=2,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=1), response=response,
+                status="exact", input_tokens=180, output_tokens=120,
+                total_tokens=300, cached_tokens=90, reasoning_tokens=60,
+                sample_id=3,
+            ),
+        )
+
+        result = summarize(records)
+
+        self.assertEqual(result.observed_response_count, 1)
+        self.assertEqual((
+            result.input_tokens.value,
+            result.output_tokens.value,
+            result.total_tokens.value,
+            result.cached_tokens.value,
+            result.reasoning_tokens.value,
+        ), (180, 120, 300, 90, 60))
+        self.assertEqual(result.average_total_tokens_per_response, 300)
+        self.assertEqual(result.cache_reuse.value, 0.5)
+        self.assertEqual(result.in_progress_observation_count, 2)
+        self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
+        self.assertIn(
+            "in_progress_excluded",
+            {message.code for message in result.coverage_messages},
+        )
+
+    def test_only_in_progress_has_no_fake_zero_and_explicit_exclusion(self):
+        response = "response-active"
+        records = (
+            usage_record(
+                at=NOW - timedelta(seconds=2), response=response,
+                status="in_progress", total_tokens=100, sample_id=1,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=1), response=response,
+                status="in_progress", total_tokens=200, sample_id=2,
+            ),
+        )
+
+        result = summarize(records)
+
+        self.assertEqual(result.observed_response_count, 0)
+        for metric in (
+            result.input_tokens, result.output_tokens, result.total_tokens,
+            result.cached_tokens, result.reasoning_tokens,
+        ):
+            self.assertIsNone(metric.value)
+        self.assertIsNone(result.average_total_tokens_per_response)
+        self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
+        self.assertEqual(result.freshness.state, FreshnessState.UNAVAILABLE)
+        self.assertEqual(result.in_progress_observation_count, 2)
+
+    def test_in_progress_to_partial_terminal_counts_legal_fields_once(self):
+        response = "response-partial"
+        result = summarize((
+            usage_record(
+                at=NOW - timedelta(seconds=2), response=response,
+                status="in_progress", total_tokens=100, sample_id=1,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=1), response=response,
+                status="completed_partial", input_tokens=None,
+                output_tokens=None, total_tokens=200, cached_tokens=None,
+                reasoning_tokens=None, sample_id=2,
+            ),
+        ))
+
+        self.assertEqual(result.observed_response_count, 1)
+        self.assertEqual(result.total_tokens.value, 200)
+        self.assertIsNone(result.input_tokens.value)
+        self.assertEqual(result.coverage.partial_terminal_response_count, 1)
+        self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
+
+    def test_post_complete_dashboard_to_mini_exact_update_uses_latest_terminal(self):
+        response = "response-updated-exact"
+        result = summarize((
+            usage_record(
+                at=NOW - timedelta(seconds=2), response=response,
+                input_tokens=10, output_tokens=2, total_tokens=12,
+                cached_tokens=4, reasoning_tokens=1, sample_id=1,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=1), response=response,
+                source="mini",
+                input_tokens=30, output_tokens=6, total_tokens=36,
+                cached_tokens=12, reasoning_tokens=3, stale=True, sample_id=2,
+            ),
+        ))
+
+        self.assertEqual(result.observed_response_count, 1)
+        self.assertEqual(result.total_tokens.value, 36)
+
+    def test_same_source_time_fresh_and_stale_exact_count_once(self):
+        observed = NOW - timedelta(seconds=1)
+        result = summarize((
+            usage_record(
+                at=observed, response="response-freshness", sample_id=1,
+            ),
+            usage_record(
+                at=observed, response="response-freshness", stale=True,
+                sample_id=2,
+            ),
+        ))
+
+        self.assertEqual(result.observed_response_count, 1)
+        self.assertEqual(result.total_tokens.value, 120)
+
+    def test_distinct_response_ids_are_preserved_even_with_identical_values(self):
+        observed = NOW - timedelta(seconds=1)
+        result = summarize((
+            usage_record(at=observed, response="response-a", sample_id=1),
+            usage_record(at=observed, response="response-b", sample_id=2),
+        ))
+
+        self.assertEqual(result.observed_response_count, 2)
+        self.assertEqual(result.total_tokens.value, 240)
+
+    def test_legacy_rows_without_response_identity_are_excluded(self):
+        legacy = usage_record()
+        object.__setattr__(legacy, "response_safe_id", None)
+
+        result = summarize((legacy,))
+
+        self.assertEqual(result.observed_response_count, 0)
+        self.assertIsNone(result.total_tokens.value)
+        self.assertEqual(result.coverage.missing_response_identity_count, 1)
+        self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
+
     def test_single_and_multi_session_metrics_use_response_values_only(self):
         records = (
             usage_record(at=NOW - timedelta(minutes=2), session_total_tokens=9_000),
@@ -251,16 +481,19 @@ class UsageAggregationTests(unittest.TestCase):
             cached_tokens=None,
             reasoning_tokens=None,
             fingerprint="mini-fingerprint",
+            response="response-cross-read",
             sample_id=1,
         )
         dashboard = usage_record(
             at=observed,
             fingerprint="dashboard-fingerprint",
+            response="response-cross-read",
             sample_id=2,
         )
         duplicate_refresh = usage_record(
             at=observed,
             fingerprint="dashboard-fingerprint",
+            response="response-cross-read",
             sample_id=3,
         )
 
@@ -273,9 +506,9 @@ class UsageAggregationTests(unittest.TestCase):
     def test_identical_values_are_distinct_by_response_time_and_model(self):
         same_time = NOW - timedelta(minutes=1)
         records = (
-            usage_record(at=same_time - timedelta(seconds=1), sample_id=1),
-            usage_record(at=same_time, sample_id=2),
-            usage_record(at=same_time, model="model-2", sample_id=3),
+            usage_record(at=same_time - timedelta(seconds=1), response="response-a", sample_id=1),
+            usage_record(at=same_time, response="response-b", sample_id=2),
+            usage_record(at=same_time, model="model-2", response="response-c", sample_id=3),
         )
 
         result = summarize(records)
@@ -413,7 +646,7 @@ class UsageAggregationTests(unittest.TestCase):
         self.assertEqual(result.cache_reuse.missing_record_count, 1)
         self.assertIsNone(zero_only.cache_reuse.value)
 
-    def test_thread_count_uses_only_valid_safe_ids_without_dropping_tokens(self):
+    def test_invalid_thread_identity_is_excluded_from_strict_response_totals(self):
         records = (
             usage_record(thread="thread-1", sample_id=1),
             usage_record(at=NOW - timedelta(seconds=1), thread=None, sample_id=2),
@@ -422,10 +655,11 @@ class UsageAggregationTests(unittest.TestCase):
 
         result = summarize(records)
 
-        self.assertEqual(result.observed_response_count, 3)
+        self.assertEqual(result.observed_response_count, 1)
         self.assertEqual(result.covered_thread_count, 1)
         self.assertEqual(result.coverage.thread_eligible_record_count, 1)
-        self.assertEqual(result.coverage.thread_missing_record_count, 2)
+        self.assertEqual(result.coverage.thread_missing_record_count, 0)
+        self.assertEqual(result.coverage.missing_response_identity_count, 2)
         self.assertEqual(result.coverage.state, CoverageState.PARTIAL)
 
     def test_coverage_states_are_distinct_and_explain_field_counts(self):
@@ -465,7 +699,7 @@ class UsageAggregationTests(unittest.TestCase):
         self.assertEqual(empty.freshness.state, FreshnessState.UNAVAILABLE)
 
     def test_missing_source_time_lowers_coverage_without_using_recorded_time(self):
-        missing_time = usage_record()
+        missing_time = usage_record(at=NOW - timedelta(seconds=1))
         object.__setattr__(missing_time, "source_observed_at", None)
 
         result = summarize((missing_time,))
@@ -495,11 +729,16 @@ class UsageHistorySummaryStoreTests(unittest.TestCase):
         cached_tokens: int | None = 40,
         reasoning_tokens: int | None = 5,
         session_total_tokens: int | None = 5_000,
+        response: str | None = None,
     ) -> HistoryObservation:
         return HistoryObservation(
             sampled_at=sampled_at or at,
             source_observed_at=at,
             thread_safe_id=thread,
+            response_safe_id=make_response_safe_id(
+                thread or "missing-thread",
+                response or f"response-{int(at.timestamp() * 1_000_000)}",
+            ),
             model_safe_id="model-1",
             source_type=source,
             source_status="exact",
@@ -537,6 +776,221 @@ class UsageHistorySummaryStoreTests(unittest.TestCase):
             self.assertEqual(result.total_tokens.value, 370)
             self.assertEqual(result.observed_response_count, 2)
             self.assertEqual(result.covered_thread_count, 2)
+
+    def test_store_progressive_snapshots_use_one_response_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            response = "response-progressive-store"
+            for index, (status, total) in enumerate((
+                ("in_progress", 100),
+                ("in_progress", 200),
+                ("exact", 300),
+            ), 1):
+                item = self.observation(
+                    at=NOW - timedelta(seconds=4 - index),
+                    sampled_at=NOW - timedelta(seconds=4 - index),
+                    input_tokens=total * 3 // 5,
+                    output_tokens=total * 2 // 5,
+                    total_tokens=total,
+                    cached_tokens=total * 3 // 10,
+                    reasoning_tokens=total // 5,
+                    response=response,
+                )
+                item = replace(item, source_status=status)
+                self.assertTrue(store.record(item))
+
+            result = store.summarize_usage(
+                UsageWindowKind.ROLLING_5H,
+                as_of_utc=NOW,
+                local_timezone=timezone.utc,
+            )
+
+            self.assertEqual(result.observed_response_count, 1)
+            self.assertEqual(result.total_tokens.value, 300)
+            self.assertEqual(result.in_progress_observation_count, 2)
+
+    def test_store_only_in_progress_then_partial_terminal_is_honest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            response = "response-store-partial-terminal"
+            for index, total in enumerate((100, 200), 1):
+                observed = NOW - timedelta(seconds=4 - index)
+                item = self.observation(
+                    at=observed,
+                    sampled_at=observed,
+                    total_tokens=total,
+                    response=response,
+                )
+                self.assertTrue(store.record(replace(
+                    item, source_status="in_progress",
+                )))
+
+            in_progress = store.summarize_usage(
+                UsageWindowKind.ROLLING_5H,
+                as_of_utc=NOW,
+                local_timezone=timezone.utc,
+            )
+            self.assertEqual(in_progress.coverage_state, "partial")
+            self.assertEqual(in_progress.observed_response_count, 0)
+            self.assertIsNone(in_progress.total_tokens.value)
+            self.assertEqual(in_progress.in_progress_observation_count, 2)
+
+            terminal_at = NOW - timedelta(seconds=1)
+            terminal = self.observation(
+                at=terminal_at,
+                sampled_at=terminal_at,
+                input_tokens=None,
+                output_tokens=None,
+                total_tokens=300,
+                cached_tokens=None,
+                reasoning_tokens=None,
+                response=response,
+            )
+            self.assertTrue(store.record(replace(
+                terminal, source_status="completed_partial",
+            )))
+            completed = store.summarize_usage(
+                UsageWindowKind.ROLLING_5H,
+                as_of_utc=NOW,
+                local_timezone=timezone.utc,
+            )
+            self.assertEqual(completed.coverage_state, "partial")
+            self.assertEqual(completed.observed_response_count, 1)
+            self.assertEqual(completed.total_tokens.value, 300)
+            self.assertEqual(completed.in_progress_observation_count, 2)
+
+    def test_store_post_complete_cross_source_update_changes_summary_and_trend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            response = "response-cross-source-update"
+            self.assertTrue(store.record(self.observation(
+                at=NOW - timedelta(seconds=2), source="dashboard",
+                input_tokens=10, output_tokens=2, total_tokens=12,
+                cached_tokens=4, reasoning_tokens=1, response=response,
+            )))
+            self.assertTrue(store.record(self.observation(
+                at=NOW - timedelta(seconds=1), source="mini",
+                input_tokens=None, output_tokens=None, total_tokens=36,
+                cached_tokens=None, reasoning_tokens=None, response=response,
+            )))
+
+            summary = store.summarize_usage(
+                UsageWindowKind.ROLLING_5H,
+                as_of_utc=NOW,
+                local_timezone=timezone.utc,
+            )
+            query = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(summary.observed_response_count, 1)
+            self.assertEqual(summary.total_tokens.value, 36)
+            self.assertEqual(query.sample_count, 1)
+            self.assertEqual(query.samples[0].total_tokens, 36)
+            self.assertEqual(query.samples[0].source_type, "mini")
+            self.assertEqual(
+                (
+                    query.samples[0].input_tokens,
+                    query.samples[0].output_tokens,
+                    query.samples[0].cached_tokens,
+                    query.samples[0].reasoning_tokens,
+                ),
+                (None, None, None, None),
+            )
+
+    def test_progressive_token_filter_preserves_quota_round_trip_and_windows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            response = "response-progressive-quota"
+            reset = NOW + timedelta(hours=4)
+            weekly_observed = NOW - timedelta(minutes=3)
+            for index, (status, total, remaining) in enumerate((
+                ("in_progress", 100, 80.0),
+                ("in_progress", 200, 70.0),
+                ("exact", 300, 80.0),
+            ), 1):
+                observed = NOW - timedelta(minutes=11 - index)
+                item = self.observation(
+                    at=observed,
+                    sampled_at=observed,
+                    input_tokens=total * 3 // 5,
+                    output_tokens=total * 2 // 5,
+                    total_tokens=total,
+                    cached_tokens=total * 3 // 10,
+                    reasoning_tokens=total // 5,
+                    response=response,
+                )
+                item = replace(
+                    item,
+                    source_status=status,
+                    quota_observed_at=observed,
+                    quota_source_status="normal",
+                    five_hour_observed_at=observed,
+                    five_hour_last_seen_at=observed,
+                    five_hour_used_percent=100.0 - remaining,
+                    five_hour_remaining_percent=remaining,
+                    five_hour_reset_at=reset,
+                    five_hour_source="codex_app_server",
+                    five_hour_available=True,
+                    weekly_observed_at=weekly_observed,
+                    weekly_last_seen_at=observed,
+                    weekly_used_percent=40.0,
+                    weekly_remaining_percent=60.0,
+                    weekly_reset_at=NOW + timedelta(days=5),
+                    weekly_source="codex_app_server",
+                    weekly_available=True,
+                )
+                self.assertTrue(store.record(item))
+
+            for index in range(500):
+                observed = NOW - timedelta(minutes=7) + timedelta(milliseconds=index)
+                item = self.observation(
+                    at=observed,
+                    sampled_at=observed,
+                    input_tokens=180,
+                    output_tokens=120,
+                    total_tokens=300,
+                    cached_tokens=90,
+                    reasoning_tokens=60,
+                    response=response,
+                )
+                item = replace(
+                    item,
+                    source_status="exact",
+                    quota_observed_at=observed,
+                    quota_source_status="normal",
+                    five_hour_observed_at=observed,
+                    five_hour_last_seen_at=observed,
+                    five_hour_used_percent=20.0,
+                    five_hour_remaining_percent=80.0,
+                    five_hour_reset_at=reset,
+                    five_hour_source="codex_app_server",
+                    five_hour_available=True,
+                    weekly_observed_at=weekly_observed,
+                    weekly_last_seen_at=observed,
+                    weekly_used_percent=40.0,
+                    weekly_remaining_percent=60.0,
+                    weekly_reset_at=NOW + timedelta(days=5),
+                    weekly_source="codex_app_server",
+                    weekly_available=True,
+                )
+                self.assertTrue(store.record(item))
+
+            summary = store.summarize_usage(
+                UsageWindowKind.ROLLING_5H,
+                as_of_utc=NOW,
+                local_timezone=timezone.utc,
+            )
+            view = trend_view_from_query(store.query(7, now=NOW))
+
+            self.assertEqual(summary.observed_response_count, 1)
+            self.assertEqual(summary.total_tokens.value, 300)
+            self.assertEqual(
+                [value for _sample, value in metric_samples(view, "five_hour")],
+                [80.0, 70.0, 80.0],
+            )
+            self.assertEqual(
+                [value for _sample, value in metric_samples(view, "weekly")],
+                [60.0],
+            )
 
     def test_store_uses_source_time_and_inclusive_as_of_not_recorded_or_last_seen(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -645,13 +1099,17 @@ class UsageHistorySummaryStoreTests(unittest.TestCase):
                 " ".join(str(item) for row in plan for item in row),
             )
 
-    def test_query_contract_bounds_membership_by_source_time_and_never_last_seen(self):
+    def test_query_contract_streams_one_identity_ordered_projection(self):
         source = inspect.getsource(UsageHistoryStore.summarize_usage)
 
-        self.assertIn("source_observed_at_utc >= ?", source)
-        self.assertIn("source_observed_at_utc <= ?", source)
+        self.assertEqual(source.count("connection.execute("), 1)
+        self.assertIn("_USAGE_SUMMARY_COLUMNS", source)
+        self.assertIn("ORDER BY thread_safe_id, response_safe_id", source)
+        self.assertNotIn("SELECT *", source)
         self.assertNotIn("last_seen_at_utc >=", source)
-        self.assertIn(") AND sampled_at_utc >= ? AND sampled_at_utc <= ?", source)
+        self.assertNotIn(".fetchall()", source)
+        self.assertIn("fetchmany(512)", source)
+        self.assertIn("records_grouped_by_response=True", source)
 
     def test_unavailable_store_returns_non_crashing_unavailable_summary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -726,6 +1184,29 @@ class UsageSummaryUiContractTests(unittest.TestCase):
         coverage = dashboard.observed_usage_coverage_var.set.call_args.args[0]
         self.assertIn("Some historical fields are unavailable", coverage)
         self.assertIn("Input covers 0/1 responses", coverage)
+
+    def test_only_in_progress_renders_no_completed_and_exclusion_messages(self):
+        summary = summarize((
+            usage_record(
+                at=NOW - timedelta(seconds=2), response="response-active-ui",
+                status="in_progress", total_tokens=100, sample_id=1,
+            ),
+            usage_record(
+                at=NOW - timedelta(seconds=1), response="response-active-ui",
+                status="in_progress", total_tokens=200, sample_id=2,
+            ),
+        ))
+        dashboard = self.dashboard(summary)
+
+        Dashboard._render_observed_usage(dashboard)
+
+        for widget in dashboard.observed_usage_metric_widgets.values():
+            widget["value"].set.assert_called_once_with("—")
+        dashboard.observed_usage_aux_widgets["responses"]["value"].set.assert_called_once_with("—")
+        coverage = dashboard.observed_usage_coverage_var.set.call_args.args[0]
+        self.assertIn("No completed observations yet", coverage)
+        self.assertIn("In-progress responses are not included yet", coverage)
+        self.assertIn("They will be included after completion", coverage)
 
     def test_usage_window_switch_only_schedules_local_history_query(self):
         dashboard = object.__new__(Dashboard)

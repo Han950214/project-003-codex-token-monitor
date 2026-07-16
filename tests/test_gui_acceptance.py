@@ -22,6 +22,7 @@ from scripts.gui_acceptance import (
     _change_observed_window,
     _geometry_for_scale,
     _isolated_data_root,
+    _scroll_overview_to_quota,
     _scroll_overview_to_usage,
     _scroll_trends_to_end,
     _show_trend_tooltip,
@@ -54,6 +55,7 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             "mini_dashboard_dedup",
             "observed_usage_complete",
             "observed_usage_partial",
+            "observed_usage_in_progress",
             "observed_usage_empty",
             "observed_usage_unavailable",
         ))
@@ -126,7 +128,16 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             SimpleNamespace(status_page=SimpleNamespace(_parent_canvas=canvas))
         )
 
-        canvas.yview_moveto.assert_called_once_with(0.26)
+        canvas.yview_moveto.assert_called_once_with(0.36)
+
+    def test_scroll_hook_exposes_independent_quota_card(self):
+        canvas = SimpleNamespace(yview_moveto=Mock())
+
+        _scroll_overview_to_quota(
+            SimpleNamespace(status_page=SimpleNamespace(_parent_canvas=canvas))
+        )
+
+        canvas.yview_moveto.assert_called_once_with(0.58)
 
     def test_quota_only_change_does_not_add_or_refresh_token_observation(self):
         scenario = self._scenario("token_quota_independence")
@@ -268,6 +279,8 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             _render_trends=Mock(),
             _render_advisor=Mock(),
             _render_recommendations=Mock(),
+            _render_safe_overview=Mock(),
+            status_recent_rows=[],
             show_page=Mock(),
         )
 
@@ -284,6 +297,7 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         dashboard._render_observed_usage.assert_called_once_with()
         dashboard._render_advisor.assert_called_once_with()
         dashboard._render_recommendations.assert_called_once_with()
+        dashboard._render_safe_overview.assert_called_once_with()
         dashboard.show_page.assert_called_once_with("usage_trends")
 
     def test_round_trip_scenario_applies_global_quota_metric(self):
@@ -327,6 +341,7 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         expected = {
             "observed_usage_complete": "complete_for_local_history",
             "observed_usage_partial": "partial",
+            "observed_usage_in_progress": "partial",
             "observed_usage_empty": "no_observations",
             "observed_usage_unavailable": "unavailable",
         }
@@ -335,6 +350,47 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
                 scenario = self._scenario(name)
                 self.assertEqual(scenario.usage_summary.coverage_state, state)
                 self.assertEqual(scenario.default_page, "overview")
+
+    def test_in_progress_scenario_keeps_live_current_response_and_no_completed_total(self):
+        scenario = self._scenario("observed_usage_in_progress")
+
+        self.assertEqual(scenario.record_results, (True, True))
+        self.assertEqual(scenario.usage_summary.observed_response_count, 0)
+        self.assertIsNone(scenario.usage_summary.total_tokens.value)
+        self.assertEqual(scenario.usage_summary.in_progress_observation_count, 2)
+        self.assertEqual(
+            scenario.selected_session.instruction.usage.total_tokens, 200,
+        )
+
+    def test_in_progress_dashboard_fixture_supports_real_range_switch_identity(self):
+        scenario = self._scenario("observed_usage_in_progress")
+        dashboard = SimpleNamespace(
+            language="en",
+            trend_group_labels={"Token Trends": "tokens"},
+            trend_group_menu=Mock(),
+            trend_range_menu=Mock(),
+            observed_usage_window_menu=Mock(),
+            status_recent_rows=[],
+            _configure_trend_metric_menu=Mock(),
+            _render_observed_usage=Mock(),
+            _render_trends=Mock(),
+            _render_advisor=Mock(),
+            _render_recommendations=Mock(),
+            _render_safe_overview=Mock(),
+            show_page=Mock(),
+        )
+
+        _apply_scenario(dashboard, scenario, "overview")
+
+        self.assertEqual(
+            dashboard.snapshot.selected_thread_id,
+            scenario.selected_session.thread_id,
+        )
+        self.assertEqual(
+            dashboard.snapshot.sessions_result.refreshed_at,
+            scenario.current_observed_at,
+        )
+        dashboard._render_safe_overview.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field, replace
@@ -14,6 +15,21 @@ from typing import Any
 CODEX_SESSIONS_DIR_ENV = "CODEX_SESSIONS_DIR"
 DEFAULT_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 _MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
+_RESPONSE_SAFE_ID_DOMAIN = b"codex-token-monitor:response-safe-id:v1\0"
+
+
+def make_response_safe_id(thread_id: object, turn_id: object) -> str | None:
+    """Return a content-free stable identity for one response."""
+
+    if not isinstance(thread_id, str) or not thread_id:
+        return None
+    if not isinstance(turn_id, str) or not turn_id:
+        return None
+    encoded = json.dumps(
+        [thread_id, turn_id], separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    digest = hashlib.sha256(_RESPONSE_SAFE_ID_DOMAIN + encoded).hexdigest()
+    return f"sha256:{digest}"
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,7 @@ from app.codex_rollout import (
     InstructionUsage,
     RolloutSessionsResult,
     RolloutUsageResult,
+    make_response_safe_id,
 )
 from app.codex_state import CodexThreadMetadata, CodexThreadTotal, load_thread_metadata
 from app.metrics import PricingConfig, SessionSummary
@@ -49,6 +50,8 @@ class MiniThreadSnapshot:
     observed_at: datetime | None
     turn_count: int | None = None
     full_title: str | None = None
+    response_safe_id: str | None = None
+    response_status: str | None = None
 
 
 class DashboardViewModel:
@@ -196,6 +199,7 @@ class DashboardViewModel:
             return MiniThreadSnapshot(
                 session.display_title, None, None, status, session.observed_at,
                 session.turn_count, session.full_title or session.display_title,
+                response_status="unavailable",
             )
         instruction = session.instruction
         instruction_total = instruction.usage.total_tokens if instruction is not None and instruction.usage is not None else None
@@ -205,6 +209,9 @@ class DashboardViewModel:
             session.display_title, instruction_total, session_total, status,
             session.observed_at, session.turn_count,
             session.full_title or session.display_title,
+            make_response_safe_id(session.thread_id, instruction.turn_id)
+            if instruction is not None else None,
+            _history_instruction_status(instruction),
         )
 
     def _select(self, sessions: list[CodexSessionUsage]) -> CodexSessionUsage | None:
@@ -275,6 +282,16 @@ def display_session_status(
         if effective_session_status == "in_progress" and instruction.unreconciled_events == 0:
             return "in_progress"
         return "incomplete"
+    return "exact" if instruction.exact else "completed_partial"
+
+
+def _history_instruction_status(instruction: InstructionUsage | None) -> str:
+    """Normalize parser facts for persistence without display-state overload."""
+
+    if instruction is None:
+        return "unavailable"
+    if instruction.in_progress:
+        return "in_progress"
     return "exact" if instruction.exact else "completed_partial"
 
 

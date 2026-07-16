@@ -10,10 +10,10 @@ Current boundary: the status center discovers multiple recent Codex Threads from
 
 - “当前指令 / Current response”继续使用最新可靠响应观测；“当前会话 / Current session”继续使用当前 Thread 权威累计数字，二者不从历史窗口反推。
 - “已观测用量 / Observed usage”按今日、最近 5 小时、最近 7 天和最近 30 天汇总本机历史库中的规范响应观测。今日使用系统本地日历边界；滚动窗口使用实际经过时间，边界两端均包含。
-- 汇总层只计算响应 Token 字段，不累计 `session_total_tokens`，不把 Quota 行加入 Token，不把缺失或无效字段当作零。Mini 与 Dashboard 的同一观测继续按现有规范投影去重。
+- 汇总层只计算带安全响应身份的终态 Token 字段，不累计进行中快照或 `session_total_tokens`，不把 Quota 行加入 Token，不把缺失或无效字段当作零。Mini、Dashboard、状态转换和 post-complete 更新按同一响应归并；不同响应不会因数字相同而合并。
 - 每项 Token 指标保留有效、缺失和无效记录计数；界面区分完整本地历史、有限历史、部分覆盖、无观测、未知和不可用，并单独显示 fresh、stale 或 unavailable。
 - 官方 5 小时与每周 Quota 保持独立区域和百分比语义；本地 Token 汇总不等同于 Codex 官方账单或额度，也不从 Quota 反推 Token。
-- Schema 仍为 v3；本阶段只增加全局来源时间索引和有界查询，不新增历史数据库、网络请求、遥测、导出或云能力。应用版本仍为 `0.1.0`。
+- 历史 Schema 为 v4：只新增由 `Thread ID + turn_id` 域分隔 SHA-256 得到的 `response_safe_id`，不保存原始 `turn_id`。旧 v3 Token 行保持身份未知，不猜测回填、不进入严格总和，并明确降低覆盖；Quota 历史保持可用。30 天汇总使用有界字段投影、`fetchmany` 和逐响应流式归并，不新增历史数据库、网络请求、遥测、导出或云能力。应用版本仍为 `0.1.0`。
 
 ## Phase 3.1-B2 真实趋势与优化建议
 
@@ -111,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
 
 ## Current Status
 
-Phase 3.1-C 已在既有 v3 历史层上增加全局响应用量窗口汇总与覆盖说明；范围切换在后台只读查询本地历史，不刷新 Codex 来源、不写历史。Phase 3.1-B2 的趋势、Advisor、额度事件序列与 Mini/Dashboard 去重语义保持不变。应用版本仍为 `0.1.0`。
+Phase 3.1-C 的历史层已升级为 v4，并用安全 `response_safe_id` 提供全局响应用量窗口汇总与覆盖说明；旧 v3 Token 行保留但不进入严格总和。范围切换在后台只读查询本地历史，不刷新 Codex 来源、不写历史。Phase 3.1-B2 的趋势、Advisor、额度事件序列与 Mini/Dashboard 去重语义保持不变。应用版本仍为 `0.1.0`。
 
 Phase 2.8-A-S 保留多 Thread 分离、500 条近期候选、已知路径回读和 Rollout 进程内缓存规则。近期列表每页 10 条，可在内存中翻页；点击近期行或下拉任务时直接切换完整刷新留下的快照，不重新读取 Rollout、SQLite、标题或额度。默认选择仍可自动跟随最近活动；主窗口最小化时会把当时实际选中的 Thread 解析为固定选择。近期范围默认 7 天，可切换 30 或 90 天。
 

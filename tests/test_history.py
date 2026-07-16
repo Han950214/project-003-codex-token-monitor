@@ -8,11 +8,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.codex_rollout import InstructionUsage, TokenUsage
+from app.codex_rollout import InstructionUsage, TokenUsage, make_response_safe_id
 from app.analytics_ui import metric_samples, trend_view_from_query
 from app.dashboard import MiniThreadSnapshot
 from app.history import (
     MAX_HISTORY_ROWS,
+    MAX_TREND_QUERY_ROWS,
     RETENTION_DAYS,
     SCHEMA_VERSION,
     HistoryObservation,
@@ -70,12 +71,14 @@ def observation(
     source_status: str = "exact",
     source_available: bool = True,
     token_stale: bool = False,
+    response_safe_id: str | None = None,
 ) -> HistoryObservation:
     return HistoryObservation(
         sampled_at=sampled_at,
         source_observed_at=source_observed_at,
         quota_observed_at=quota_observed_at,
         thread_safe_id=thread,
+        response_safe_id=response_safe_id,
         model_safe_id="gpt-5",
         source_status=source_status,
         source_available=source_available,
@@ -108,7 +111,55 @@ def observation(
 
 class HistorySchemaTests(unittest.TestCase):
     def test_constants_match_phase_contract(self):
-        self.assertEqual((SCHEMA_VERSION, RETENTION_DAYS, MAX_HISTORY_ROWS), (3, 90, 200_000))
+        self.assertEqual((SCHEMA_VERSION, RETENTION_DAYS, MAX_HISTORY_ROWS), (4, 90, 200_000))
+
+    def test_trend_query_materializes_only_latest_bounded_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = UsageHistoryStore(Path(directory) / "history.sqlite3", clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            for index in range(MAX_TREND_QUERY_ROWS + 25):
+                observed = NOW - timedelta(seconds=MAX_TREND_QUERY_ROWS + 25 - index)
+                self.assertTrue(store.record(observation(
+                    sampled_at=observed,
+                    source_observed_at=observed,
+                    total=1_000 + index,
+                    response_safe_id=make_response_safe_id("thread-1", f"turn-{index}"),
+                )))
+
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(result.sample_count, MAX_TREND_QUERY_ROWS)
+            self.assertEqual(result.samples[0].total_tokens, 1_025)
+            self.assertEqual(result.samples[-1].total_tokens, 1_524)
+
+    def test_repeated_snapshots_do_not_displace_an_earlier_distinct_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = UsageHistoryStore(Path(directory) / "history.sqlite3", clock=lambda: NOW)
+            self.assertTrue(store.initialize())
+            earlier = NOW - timedelta(minutes=20)
+            self.assertTrue(store.record(observation(
+                sampled_at=earlier,
+                source_observed_at=earlier,
+                total=700,
+                response_safe_id=make_response_safe_id("thread-1", "earlier-turn"),
+            )))
+            repeated = make_response_safe_id("thread-1", "repeated-turn")
+            for index in range(MAX_TREND_QUERY_ROWS + 25):
+                observed = NOW - timedelta(minutes=10) + timedelta(milliseconds=index)
+                self.assertTrue(store.record(observation(
+                    sampled_at=observed,
+                    source_observed_at=observed,
+                    total=1_000 + index,
+                    response_safe_id=repeated,
+                )))
+
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(result.sample_count, 2)
+            self.assertEqual(
+                [sample.total_tokens for sample in result.samples],
+                [700, 1_524],
+            )
 
     def test_new_database_initializes_versioned_schema_and_unique_index(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -116,7 +167,7 @@ class HistorySchemaTests(unittest.TestCase):
             store = UsageHistoryStore(path, clock=lambda: NOW)
             self.assertTrue(store.initialize())
             with closing(sqlite3.connect(path)) as connection, connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
                 columns = {
                     row[1] for row in connection.execute(
                         "PRAGMA table_info(usage_history_samples)"
@@ -132,7 +183,49 @@ class HistorySchemaTests(unittest.TestCase):
             self.assertIn("weekly_last_seen_at_utc", columns)
             self.assertIn("five_hour_event_seq", columns)
             self.assertIn("weekly_event_seq", columns)
+            self.assertIn("response_safe_id", columns)
             self.assertIn("ux_usage_history_samples_fingerprint", indexes)
+            self.assertIn("ix_usage_history_samples_response_observed", indexes)
+
+    def test_v3_migration_adds_nullable_response_identity_without_guessing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "CREATE TABLE usage_history_samples("
+                    "id INTEGER PRIMARY KEY, schema_version INTEGER, "
+                    "sampled_at_utc TEXT, source_observed_at_utc TEXT, "
+                    "thread_safe_id TEXT, total_tokens INTEGER, "
+                    "sample_fingerprint TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO usage_history_samples VALUES(1, 3, ?, ?, ?, ?, ?)",
+                    (
+                        "2026-07-15T12:00:00.000000Z",
+                        "2026-07-15T11:59:00.000000Z",
+                        "thread-legacy", 321, "legacy-fingerprint",
+                    ),
+                )
+                connection.execute("PRAGMA user_version=3")
+
+            store = UsageHistoryStore(path, clock=lambda: NOW)
+            self.assertTrue(store.initialize(), store.last_error)
+            self.assertTrue(store.initialize(), store.last_error)
+            with closing(sqlite3.connect(path)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                row = connection.execute(
+                    "SELECT response_safe_id, total_tokens, sample_fingerprint "
+                    "FROM usage_history_samples WHERE id=1"
+                ).fetchone()
+                indexes = {
+                    item[1] for item in connection.execute(
+                        "PRAGMA index_list(usage_history_samples)"
+                    )
+                }
+
+            self.assertEqual(version, 4)
+            self.assertEqual(row, (None, 321, "legacy-fingerprint"))
+            self.assertIn("ix_usage_history_samples_response_observed", indexes)
 
     def test_existing_database_and_unrelated_data_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -199,7 +292,7 @@ class HistorySchemaTests(unittest.TestCase):
                     "five_hour_last_seen_at_utc, weekly_observed_at_utc, "
                     "weekly_last_seen_at_utc FROM usage_history_samples WHERE id=1"
                 ).fetchone()
-            self.assertEqual(version, 3)
+            self.assertEqual(version, 4)
             self.assertEqual(row, (321, observed_text, observed_text, observed_text, observed_text))
 
     def test_v1_stale_quota_row_is_preserved_without_invented_window_time(self):
@@ -289,7 +382,7 @@ class HistorySchemaTests(unittest.TestCase):
                     "SELECT key, value FROM usage_history_meta "
                     "WHERE key LIKE 'quota_%_active_%_v3'"
                 ))
-            self.assertEqual(version, 3)
+            self.assertEqual(version, 4)
             self.assertEqual(rows, [(1, 1), (2, 1)])
             self.assertEqual(meta["quota_five_hour_active_seq_v3"], "3")
             self.assertEqual(meta["quota_weekly_active_seq_v3"], "1")
@@ -454,22 +547,77 @@ class HistoryObservationTests(unittest.TestCase):
         )
         self.assertEqual((item.session_total_tokens, item.turn_count), (999, 4))
         self.assertEqual(item.thread_safe_id, "thread-1")
+        self.assertEqual(
+            item.response_safe_id, make_response_safe_id("thread-1", "turn-1"),
+        )
 
     def test_from_mini_preserves_only_available_mini_numbers(self):
         mini = MiniThreadSnapshot(
-            "content title is ignored", 120, 999, "exact", NOW, 4,
+            "content title is ignored", 120, 999, "exact", NOW, 4, None,
+            make_response_safe_id("thread-1", "turn-1"), "exact",
         )
         item = HistoryObservation.from_mini(
             mini, quota(), "thread-1", sampled_at=NOW,
         )
         self.assertEqual((item.total_tokens, item.session_total_tokens), (120, 999))
         self.assertIsNone(item.input_tokens)
+        self.assertEqual(
+            item.response_safe_id, make_response_safe_id("thread-1", "turn-1"),
+        )
         self.assertNotIn("content title", repr(item))
+
+    def test_stale_unfinished_dashboard_persists_in_progress_not_partial(self):
+        instruction = InstructionUsage(
+            "turn-active", "in_progress", TokenUsage(60, 30, 40, 20, 100),
+            1, None, 0, 0, 0, False, True,
+        )
+        selected = SimpleNamespace(
+            thread_id="thread-1", instruction=instruction,
+            thread_cumulative_usage=TokenUsage(60, 30, 40, 20, 100),
+            observed_at=NOW - timedelta(minutes=11), status="incomplete",
+            turn_count=1,
+        )
+        snapshot = SimpleNamespace(
+            selected_session=selected,
+            rollout=SimpleNamespace(
+                instruction=instruction,
+                thread_cumulative_usage=selected.thread_cumulative_usage,
+                thread_id="thread-1", observed_at=selected.observed_at,
+                turn_count=1,
+            ),
+            selected_thread_id="thread-1", state_metadata={}, state_total=None,
+        )
+
+        item = HistoryObservation.from_dashboard(snapshot, quota(), sampled_at=NOW)
+
+        self.assertEqual(item.source_status, "in_progress")
+        self.assertTrue(item.token_stale)
+        self.assertEqual(
+            item.response_safe_id,
+            make_response_safe_id("thread-1", "turn-active"),
+        )
+
+    def test_mini_incomplete_display_state_is_persisted_as_in_progress(self):
+        mini = MiniThreadSnapshot(
+            "ignored", 100, 100, "incomplete", NOW, 1, None,
+            make_response_safe_id("thread-1", "turn-active"),
+        )
+
+        item = HistoryObservation.from_mini(
+            mini, quota(), "thread-1", sampled_at=NOW,
+        )
+
+        self.assertEqual(item.source_status, "in_progress")
+        self.assertTrue(item.token_stale)
 
     def test_unsafe_identifiers_are_irreversibly_normalized(self):
         item = observation(thread=r"C:\Users\name\secret project")
         self.assertTrue(item.thread_safe_id.startswith("sha256:"))
         self.assertNotIn("secret", item.thread_safe_id)
+
+    def test_response_identity_rejects_raw_turn_identifiers(self):
+        with self.assertRaisesRegex(ValueError, "response_safe_id_invalid"):
+            replace(observation(), response_safe_id="turn-raw-identifier")
 
     def test_dto_and_database_contract_exclude_content_fields(self):
         names = {field.name.lower() for field in fields(HistoryObservation)}
@@ -480,6 +628,7 @@ class HistoryObservationTests(unittest.TestCase):
         }
         self.assertTrue(names.isdisjoint(forbidden))
         self.assertIn("reasoning_tokens", names)
+        self.assertIn("response_safe_id", names)
 
 
 class HistoryStoreTests(unittest.TestCase):

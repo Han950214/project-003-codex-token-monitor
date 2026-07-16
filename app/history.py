@@ -11,8 +11,9 @@ from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Iterable
 
+from app.codex_rollout import make_response_safe_id
 from app.paths import history_db_path
 from app.usage_summary import (
     ObservedUsageRecord,
@@ -28,15 +29,17 @@ if TYPE_CHECKING:
     from app.quota import CodexQuotaSnapshot, QuotaWindow
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 RETENTION_DAYS = 90
 MAX_HISTORY_ROWS = 200_000
+MAX_TREND_QUERY_ROWS = 500
 HISTORY_STALE_AFTER = timedelta(minutes=3)
 SUPPORTED_RANGES = (7, 30, 90)
 
 _TABLE = "usage_history_samples"
 _META_TABLE = "usage_history_meta"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_RESPONSE_SAFE_IDENTIFIER = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CODE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,63}$")
 _RESPONSE_PAYLOAD_PREDICATE = "(" + " OR ".join(
     f"{name} IS NOT NULL"
@@ -45,11 +48,42 @@ _RESPONSE_PAYLOAD_PREDICATE = "(" + " OR ".join(
         "reasoning_tokens",
     )
 ) + ")"
+_QUOTA_PAYLOAD_PREDICATE = "(" + " OR ".join(
+    (
+        name if name.endswith(("_available", "_stale"))
+        else f"{name} IS NOT NULL"
+    )
+    for name in (
+        "five_hour_observed_at_utc", "five_hour_last_seen_at_utc",
+        "five_hour_used_percent", "five_hour_remaining_percent",
+        "five_hour_reset_at_utc", "five_hour_available", "five_hour_stale",
+        "five_hour_error_code", "weekly_observed_at_utc",
+        "weekly_last_seen_at_utc", "weekly_used_percent",
+        "weekly_remaining_percent", "weekly_reset_at_utc",
+        "weekly_available", "weekly_stale", "weekly_error_code",
+    )
+) + ")"
 _UTC_TEXT_GLOB = "????-??-??T??:??:??.??????Z"
+_USAGE_SUMMARY_COLUMNS = (
+    "id", "sampled_at_utc", "source_observed_at_utc", "thread_safe_id",
+    "response_safe_id", "model_safe_id", "source_type", "source_status",
+    "source_available", "token_stale", "token_stale_reason", "input_tokens",
+    "output_tokens", "total_tokens", "cached_tokens", "reasoning_tokens",
+    "session_total_tokens", "is_derived", "legacy_unknown_time",
+    "sample_fingerprint",
+)
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _history_instruction_status(instruction: object) -> str:
+    if instruction is None:
+        return "unavailable"
+    if bool(getattr(instruction, "in_progress", False)):
+        return "in_progress"
+    return "exact" if bool(getattr(instruction, "exact", False)) else "completed_partial"
 
 
 @dataclass(frozen=True)
@@ -60,6 +94,7 @@ class HistoryObservation:
     source_observed_at: datetime | None = None
     quota_observed_at: datetime | None = None
     thread_safe_id: str | None = None
+    response_safe_id: str | None = None
     model_safe_id: str | None = None
     source_type: str = "dashboard"
     source_status: str = "unavailable"
@@ -106,6 +141,9 @@ class HistoryObservation:
         ):
             object.__setattr__(self, name, _aware_utc(getattr(self, name), name))
         object.__setattr__(self, "thread_safe_id", _safe_identifier(self.thread_safe_id))
+        object.__setattr__(
+            self, "response_safe_id", _safe_response_identifier(self.response_safe_id),
+        )
         object.__setattr__(self, "model_safe_id", _safe_identifier(self.model_safe_id))
         for name in (
             "source_type", "source_status", "quota_source_status",
@@ -168,10 +206,9 @@ class HistoryObservation:
         model = state.model if state is not None else None
         if model is None and snapshot.state_total is not None:
             model = snapshot.state_total.model
-        source_status = (
-            selected.status if selected is not None
-            else instruction.status if instruction is not None else "unavailable"
-        )
+        source_status = _history_instruction_status(instruction)
+        if selected is not None and selected.status == "unavailable":
+            source_status = "unavailable"
         source_available = bool(
             source_status not in {"unavailable", "no_selection"}
             and (usage is not None or cumulative is not None)
@@ -183,12 +220,27 @@ class HistoryObservation:
             ),
             quota_observed_at=quota.refreshed_at,
             thread_safe_id=thread_id,
+            response_safe_id=make_response_safe_id(
+                thread_id, instruction.turn_id if instruction is not None else None,
+            ),
             model_safe_id=model,
             source_type="dashboard",
             source_status=source_status,
             source_available=source_available,
-            token_stale=source_status == "stale",
-            token_stale_reason="source_stale" if source_status == "stale" else None,
+            token_stale=bool(
+                instruction is not None
+                and instruction.in_progress
+                and selected is not None
+                and selected.status == "incomplete"
+            ),
+            token_stale_reason=(
+                "source_stale_or_unreconciled"
+                if instruction is not None
+                and instruction.in_progress
+                and selected is not None
+                and selected.status == "incomplete"
+                else None
+            ),
             input_tokens=usage.input_tokens if usage is not None else None,
             output_tokens=usage.output_tokens if usage is not None else None,
             total_tokens=usage.total_tokens if usage is not None else None,
@@ -211,8 +263,11 @@ class HistoryObservation:
         model_safe_id: str | None = None,
         sampled_at: datetime | None = None,
     ) -> "HistoryObservation":
+        source_status = mini.response_status or (
+            "in_progress" if mini.status == "incomplete" else mini.status
+        )
         available = bool(
-            mini.status not in {"unavailable", "no_selection"}
+            source_status not in {"unavailable", "no_selection"}
             and (
                 mini.instruction_total_tokens is not None
                 or mini.session_total_tokens is not None
@@ -223,12 +278,17 @@ class HistoryObservation:
             source_observed_at=mini.observed_at,
             quota_observed_at=quota.refreshed_at,
             thread_safe_id=thread_safe_id,
+            response_safe_id=mini.response_safe_id,
             model_safe_id=model_safe_id,
             source_type="mini",
-            source_status=mini.status,
+            source_status=source_status,
             source_available=available,
-            token_stale=mini.status == "stale",
-            token_stale_reason="source_stale" if mini.status == "stale" else None,
+            token_stale=mini.status in {"stale", "incomplete"},
+            token_stale_reason=(
+                "source_stale_or_unreconciled"
+                if mini.status == "incomplete" else
+                "source_stale" if mini.status == "stale" else None
+            ),
             total_tokens=mini.instruction_total_tokens,
             session_total_tokens=mini.session_total_tokens,
             turn_count=mini.turn_count,
@@ -243,6 +303,7 @@ class HistoryObservation:
             "schema_version": SCHEMA_VERSION,
             "source_observed_at": _iso_utc(self.source_observed_at),
             "thread_safe_id": self.thread_safe_id,
+            "response_safe_id": self.response_safe_id,
             "model_safe_id": self.model_safe_id,
             "source_type": self.source_type,
             "source_status": self.source_status,
@@ -326,6 +387,7 @@ _COLUMN_DEFINITIONS = {
     "source_observed_at_utc": "TEXT",
     "quota_observed_at_utc": "TEXT",
     "thread_safe_id": "TEXT",
+    "response_safe_id": "TEXT",
     "model_safe_id": "TEXT",
     "source_type": "TEXT NOT NULL DEFAULT 'unknown'",
     "source_status": "TEXT NOT NULL DEFAULT 'unavailable'",
@@ -470,24 +532,21 @@ class UsageHistoryStore:
         cutoff = _iso_utc(cutoff_at)
         try:
             with closing(self._connect()) as connection:
-                if thread_safe_id is None:
-                    rows = connection.execute(
-                        f"SELECT * FROM {_TABLE} WHERE source_observed_at_utc >= ? "
-                        "ORDER BY source_observed_at_utc, sampled_at_utc, id",
-                        (cutoff,),
-                    ).fetchall()
-                else:
-                    safe_thread = _safe_identifier(thread_safe_id)
-                    rows = connection.execute(
-                        f"SELECT * FROM {_TABLE} WHERE source_observed_at_utc >= ? "
-                        "AND thread_safe_id IS ? "
-                        "ORDER BY source_observed_at_utc, sampled_at_utc, id",
-                        (cutoff, safe_thread),
-                    ).fetchall()
-                quota_rows = connection.execute(
-                    f"SELECT * FROM {_TABLE} ORDER BY sampled_at_utc, id",
-                ).fetchall()
-            samples = _thread_token_samples(rows)
+                invalid_row = connection.execute(
+                    f"SELECT 1 FROM (SELECT sampled_at_utc FROM {_TABLE} "
+                    "ORDER BY sampled_at_utc DESC, id DESC LIMIT ?) "
+                    "WHERE sampled_at_utc IS NULL OR sampled_at_utc NOT GLOB ? LIMIT 1",
+                    (MAX_TREND_QUERY_ROWS, _UTC_TEXT_GLOB),
+                ).fetchone()
+                if invalid_row is not None:
+                    raise ValueError("history_sample_time_invalid")
+                safe_thread = (
+                    None if thread_safe_id is None
+                    else _safe_identifier(thread_safe_id)
+                )
+                rows = _bounded_token_rows(connection, cutoff, safe_thread)
+                quota_rows = _bounded_quota_rows(connection)
+            samples = _thread_token_samples(rows)[-MAX_TREND_QUERY_ROWS:]
             quota = _global_quota_projection(quota_rows, cutoff_at)
             self.last_error = None
             return _query_result(range_days, samples, quota, now)
@@ -520,48 +579,30 @@ class UsageHistoryStore:
                 local_timezone=local_timezone,
                 error_code=self.last_error or "history_storage_error",
             )
-        start = _iso_utc(bounds.start_utc)
-        end = _iso_utc(bounds.end_utc)
         try:
             with closing(self._connect()) as connection:
-                rows = connection.execute(
-                    f"SELECT * FROM {_TABLE} "
-                    "WHERE source_observed_at_utc >= ? "
-                    "AND source_observed_at_utc <= ? "
-                    f"AND {_RESPONSE_PAYLOAD_PREDICATE} "
-                    "ORDER BY source_observed_at_utc, sampled_at_utc, id",
-                    (start, end),
-                ).fetchall()
-                earliest_row = connection.execute(
-                    f"SELECT MIN(source_observed_at_utc) FROM {_TABLE} "
-                    "WHERE legacy_unknown_time = 0 "
-                    "AND source_observed_at_utc IS NOT NULL "
-                    "AND source_observed_at_utc GLOB ? "
-                    f"AND {_RESPONSE_PAYLOAD_PREDICATE}",
-                    (_UTC_TEXT_GLOB,),
-                ).fetchone()
-                unknown_row = connection.execute(
-                    f"SELECT COUNT(*) FROM {_TABLE} WHERE ("
-                    "legacy_unknown_time = 1 "
-                    "OR source_observed_at_utc IS NULL "
-                    "OR source_observed_at_utc NOT GLOB ?"
-                    ") AND sampled_at_utc >= ? AND sampled_at_utc <= ? "
-                    f"AND {_RESPONSE_PAYLOAD_PREDICATE}",
-                    (_UTC_TEXT_GLOB, start, end),
-                ).fetchone()
-            records = tuple(_observed_usage_record_from_row(row) for row in rows)
-            first_retained = _parse_utc_safely(
-                None if earliest_row is None else earliest_row[0],
-            )[0]
-            unknown_count = 0 if unknown_row is None else int(unknown_row[0])
-            summary = aggregate_observed_usage(
-                records,
-                bounds.scope,
-                as_of_utc=as_of,
-                local_timezone=local_timezone,
-                first_retained_observed_at=first_retained,
-                unknown_time_record_count=unknown_count,
-            )
+                cursor = connection.execute(
+                    f"SELECT {', '.join(_USAGE_SUMMARY_COLUMNS)} FROM {_TABLE} "
+                    f"WHERE {_RESPONSE_PAYLOAD_PREDICATE} "
+                    "ORDER BY thread_safe_id, response_safe_id, "
+                    "source_observed_at_utc, sampled_at_utc, id",
+                )
+
+                def records() -> Iterable[ObservedUsageRecord]:
+                    while True:
+                        batch = cursor.fetchmany(512)
+                        if not batch:
+                            return
+                        for row in batch:
+                            yield _observed_usage_record_from_row(row)
+
+                summary = aggregate_observed_usage(
+                    records(),
+                    bounds.scope,
+                    as_of_utc=as_of,
+                    local_timezone=local_timezone,
+                    records_grouped_by_response=True,
+                )
             self.last_error = None
             return summary
         except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
@@ -741,6 +782,17 @@ class UsageHistoryStore:
                 f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_source_observed "
                 f"ON {_TABLE}(source_observed_at_utc, id)"
             )
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_response_observed "
+                f"ON {_TABLE}(thread_safe_id, response_safe_id, "
+                "source_observed_at_utc, sampled_at_utc, id)"
+            )
+            for prefix in ("five_hour", "weekly"):
+                connection.execute(
+                    f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_{prefix}_event "
+                    f"ON {_TABLE}({prefix}_event_seq DESC, "
+                    f"{prefix}_observed_at_utc, id)"
+                )
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             connection.commit()
         except Exception:
@@ -841,6 +893,7 @@ def _observation_row(
         "source_observed_at_utc": _iso_utc(observation.source_observed_at),
         "quota_observed_at_utc": _iso_utc(observation.quota_observed_at),
         "thread_safe_id": observation.thread_safe_id,
+        "response_safe_id": observation.response_safe_id,
         "model_safe_id": observation.model_safe_id,
         "source_type": observation.source_type,
         "source_status": observation.source_status,
@@ -888,6 +941,7 @@ def _sample_from_row(row: sqlite3.Row) -> HistorySample:
         source_observed_at=_parse_utc(row["source_observed_at_utc"]),
         quota_observed_at=_parse_utc(row["quota_observed_at_utc"]),
         thread_safe_id=row["thread_safe_id"],
+        response_safe_id=row["response_safe_id"],
         model_safe_id=row["model_safe_id"],
         source_type=row["source_type"],
         source_status=row["source_status"],
@@ -939,6 +993,10 @@ def _observed_usage_record_from_row(row: sqlite3.Row) -> ObservedUsageRecord:
         thread_safe_id=(
             row["thread_safe_id"] if isinstance(row["thread_safe_id"], str) else None
         ),
+        response_safe_id=(
+            row["response_safe_id"]
+            if isinstance(row["response_safe_id"], str) else None
+        ),
         model_safe_id=(
             row["model_safe_id"] if isinstance(row["model_safe_id"], str) else None
         ),
@@ -981,19 +1039,20 @@ def _thread_token_samples(rows: list[sqlite3.Row]) -> tuple[HistorySample, ...]:
         token = _token_only(sample)
         key = (
             token.thread_safe_id,
-            token.source_observed_at,
-            token.source_status,
-            token.source_available,
-            token.token_stale,
-            token.token_stale_reason,
+            token.response_safe_id
+            if token.response_safe_id is not None
+            else ("legacy_source_time", token.source_observed_at),
         )
         candidates = groups.setdefault(key, [])
-        for index, existing in enumerate(candidates):
-            if _token_values_compatible(existing, token):
-                candidates[index] = _merge_token_samples(existing, token)
-                break
+        if token.response_safe_id is not None and candidates:
+            candidates[0] = _merge_token_samples(candidates[0], token)
         else:
-            candidates.append(token)
+            for index, existing in enumerate(candidates):
+                if _token_values_compatible(existing, token):
+                    candidates[index] = _merge_token_samples(existing, token)
+                    break
+            else:
+                candidates.append(token)
     projected = [sample for candidates in groups.values() for sample in candidates]
     projected.sort(key=lambda sample: (
         sample.source_observed_at,
@@ -1001,6 +1060,100 @@ def _thread_token_samples(rows: list[sqlite3.Row]) -> tuple[HistorySample, ...]:
         sample.sample_id,
     ))
     return tuple(projected)
+
+
+def _bounded_token_rows(
+    connection: sqlite3.Connection,
+    cutoff: str,
+    thread_safe_id: str | None,
+) -> list[sqlite3.Row]:
+    """Return bounded canonical v4 winners plus bounded legacy candidates."""
+
+    thread_clause = "" if thread_safe_id is None else "AND thread_safe_id IS ? "
+    common_parameters: tuple[object, ...] = (
+        (cutoff,) if thread_safe_id is None else (cutoff, thread_safe_id)
+    )
+    lifecycle_rank = (
+        "CASE source_status WHEN 'exact' THEN 3 "
+        "WHEN 'completed_partial' THEN 2 WHEN 'in_progress' THEN 1 ELSE 0 END"
+    )
+    completeness = " + ".join(
+        f"CASE WHEN {name} IS NULL THEN 0 ELSE 1 END" for name in _TOKEN_FIELDS
+    )
+    source_rank = "CASE source_type WHEN 'dashboard' THEN 2 WHEN 'mini' THEN 1 ELSE 0 END"
+    stable_rows = connection.execute(
+        "WITH ranked AS ("
+        f"SELECT id, source_observed_at_utc, ROW_NUMBER() OVER (PARTITION BY "
+        "thread_safe_id, response_safe_id ORDER BY "
+        f"{lifecycle_rank} DESC, source_observed_at_utc DESC, "
+        f"({completeness}) DESC, {source_rank} DESC, source_available DESC, "
+        "token_stale ASC, sampled_at_utc DESC, id DESC) AS candidate_rank "
+        f"FROM {_TABLE} WHERE response_safe_id IS NOT NULL "
+        f"AND source_observed_at_utc >= ? {thread_clause}"
+        "), winners AS ("
+        "SELECT id, source_observed_at_utc FROM ranked WHERE candidate_rank = 1 "
+        "ORDER BY source_observed_at_utc DESC, id DESC LIMIT ?) "
+        f"SELECT sample.* FROM {_TABLE} AS sample JOIN winners USING(id) "
+        "ORDER BY sample.source_observed_at_utc, sample.sampled_at_utc, sample.id",
+        (*common_parameters, MAX_TREND_QUERY_ROWS),
+    ).fetchall()
+    legacy_rows = connection.execute(
+        f"SELECT * FROM (SELECT * FROM {_TABLE} WHERE response_safe_id IS NULL "
+        f"AND source_observed_at_utc >= ? {thread_clause}"
+        "ORDER BY source_observed_at_utc DESC, sampled_at_utc DESC, id DESC LIMIT ?) "
+        "ORDER BY source_observed_at_utc, sampled_at_utc, id",
+        (*common_parameters, MAX_TREND_QUERY_ROWS),
+    ).fetchall()
+    return [*stable_rows, *legacy_rows]
+
+
+def _bounded_quota_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return first/last rows for the latest quota transitions per window."""
+
+    selected: dict[int, sqlite3.Row] = {}
+    for prefix in ("five_hour", "weekly"):
+        observed = f"{prefix}_observed_at_utc"
+        last_seen = f"{prefix}_last_seen_at_utc"
+        event_seq = f"{prefix}_event_seq"
+        available = f"{prefix}_available"
+        stale = f"{prefix}_stale"
+        valid_event = (
+            f"{observed} IS NOT NULL AND {available} = 1 AND {stale} = 0 "
+            f"AND ({prefix}_used_percent IS NOT NULL OR "
+            f"{prefix}_remaining_percent IS NOT NULL OR "
+            f"{prefix}_reset_at_utc IS NOT NULL)"
+        )
+        status_time = (
+            f"CASE WHEN {last_seen} IS NOT NULL THEN {last_seen} "
+            f"WHEN quota_observed_at_utc IS NOT NULL THEN quota_observed_at_utc "
+            "ELSE sampled_at_utc END"
+        )
+        rows = connection.execute(
+            "WITH recent_events AS ("
+            f"SELECT {event_seq} AS seq FROM {_TABLE} WHERE {valid_event} "
+            f"GROUP BY {event_seq} ORDER BY {event_seq} DESC LIMIT ?"
+            "), ranked AS ("
+            f"SELECT id, ROW_NUMBER() OVER (PARTITION BY {event_seq} "
+            f"ORDER BY {observed}, id) AS first_rank, "
+            f"ROW_NUMBER() OVER (PARTITION BY {event_seq} "
+            f"ORDER BY {status_time} DESC, id DESC) AS last_rank "
+            f"FROM {_TABLE} JOIN recent_events ON {event_seq} = recent_events.seq "
+            f"WHERE {valid_event}) "
+            f"SELECT sample.* FROM {_TABLE} AS sample JOIN ranked USING(id) "
+            "WHERE first_rank = 1 OR last_rank = 1",
+            (MAX_TREND_QUERY_ROWS,),
+        ).fetchall()
+        for row in rows:
+            selected[int(row["id"])] = row
+        status_row = connection.execute(
+            f"SELECT * FROM {_TABLE} WHERE {observed} IS NOT NULL "
+            f"OR {last_seen} IS NOT NULL OR {available} = 1 OR {stale} = 1 "
+            f"OR {prefix}_error_code IS NOT NULL "
+            f"ORDER BY {status_time} DESC, id DESC LIMIT 1"
+        ).fetchone()
+        if status_row is not None:
+            selected[int(status_row["id"])] = status_row
+    return sorted(selected.values(), key=lambda row: (row["sampled_at_utc"], row["id"]))
 
 
 def _token_only(sample: HistorySample) -> HistorySample:
@@ -1041,23 +1194,30 @@ def _token_values_compatible(first: HistorySample, second: HistorySample) -> boo
 
 
 def _merge_token_samples(first: HistorySample, second: HistorySample) -> HistorySample:
-    def rank(sample: HistorySample) -> tuple[int, int, int]:
+    def rank(sample: HistorySample) -> tuple[object, ...]:
+        lifecycle_rank = {
+            "exact": 3,
+            "completed_partial": 2,
+            "in_progress": 1,
+        }.get(sample.source_status, 0)
         source_rank = {"dashboard": 2, "mini": 1}.get(sample.source_type, 0)
         completeness = sum(getattr(sample, name) is not None for name in _TOKEN_FIELDS)
-        return completeness, source_rank, -sample.sample_id
+        return (
+            lifecycle_rank,
+            sample.source_observed_at or datetime.min.replace(tzinfo=timezone.utc),
+            completeness,
+            source_rank,
+            int(sample.source_available),
+            int(not sample.token_stale),
+            sample.sampled_at,
+            sample.sample_id,
+        )
 
     preferred, other = (first, second) if rank(first) >= rank(second) else (second, first)
-    values = {
-        name: (
-            getattr(preferred, name)
-            if getattr(preferred, name) is not None
-            else getattr(other, name)
-        )
-        for name in _TOKEN_FIELDS
-    }
-    if preferred.model_safe_id is None:
-        values["model_safe_id"] = other.model_safe_id
-    return replace(preferred, **values)
+    # A candidate is one coherent source snapshot. Filling its missing fields
+    # from another observation can create an impossible mixture (for example,
+    # a newer Mini Total paired with older Dashboard Input and Output).
+    return preferred
 
 
 @dataclass(frozen=True)
@@ -1253,6 +1413,7 @@ def _quota_only(sample: HistorySample) -> HistorySample:
         sample,
         source_observed_at=None,
         thread_safe_id=None,
+        response_safe_id=None,
         model_safe_id=None,
         source_type="global_quota",
         source_status="global_quota",
@@ -1596,6 +1757,15 @@ def _safe_identifier(value: str | None) -> str | None:
         return normalized
     digest = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _safe_response_identifier(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not _RESPONSE_SAFE_IDENTIFIER.fullmatch(normalized):
+        raise ValueError("response_safe_id_invalid")
+    return normalized
 
 
 def _safe_code(value: object) -> str:

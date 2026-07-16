@@ -6,7 +6,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from app.codex_rollout import CodexRolloutReader, TokenUsage, _event_time, configured_sessions_dir
+from app.codex_rollout import (
+    CodexRolloutReader, TokenUsage, _event_time, configured_sessions_dir,
+    make_response_safe_id,
+)
 
 
 def event(kind, turn=None, last=None, total=None, timestamp=1, duration_ms=None, thread_id="thread-12345678"):
@@ -25,6 +28,17 @@ def usage(i, c, o, r):
 
 
 class RolloutReaderTests(unittest.TestCase):
+    def test_response_safe_id_is_stable_scoped_and_content_free(self):
+        first = make_response_safe_id("thread-1", "turn-1")
+
+        self.assertEqual(first, make_response_safe_id("thread-1", "turn-1"))
+        self.assertNotEqual(first, make_response_safe_id("thread-2", "turn-1"))
+        self.assertNotEqual(first, make_response_safe_id("thread-1", "turn-2"))
+        self.assertRegex(first or "", r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn("thread", first or "")
+        self.assertNotIn("turn", first or "")
+        self.assertIsNone(make_response_safe_id(None, "turn-1"))
+
     def write(self, directory, events, name="rollout-a.jsonl"):
         path = Path(directory) / name
         path.write_text("\n".join(json.dumps(item) for item in events), encoding="utf-8")

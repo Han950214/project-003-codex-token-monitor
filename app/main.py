@@ -23,7 +23,7 @@ from app.analytics_ui import (
     trend_view_from_query,
 )
 from app.app_actions import open_codex, open_data_directory
-from app.codex_rollout import configured_sessions_dir
+from app.codex_rollout import configured_sessions_dir, make_response_safe_id
 from app.codex_state import configured_state_path
 from app.dashboard import DashboardViewModel, MiniThreadSnapshot, display_session_status
 from app.dashboard_mode import ALL_PAGES, AppShellState, NAVIGATION_ITEMS
@@ -2782,6 +2782,14 @@ class Dashboard:
             selected.display_title, instruction_total, session_total, status,
             selected.observed_at, getattr(selected, "turn_count", None),
             getattr(selected, "full_title", None) or selected.display_title,
+            make_response_safe_id(selected.thread_id, instruction.turn_id)
+            if instruction is not None else None,
+            (
+                "in_progress" if instruction is not None and instruction.in_progress
+                else "exact" if instruction is not None and instruction.exact
+                else "completed_partial" if instruction is not None
+                else "unavailable"
+            ),
         )
 
     def _apply_presentation(self, presentation: DashboardPresentation, render_session_rows: bool = True) -> None:
@@ -3297,6 +3305,8 @@ class Dashboard:
             "unknown": "observed_usage_unknown",
             "unavailable": "observed_usage_unavailable",
         }[summary.coverage_state]
+        if not has_observations and summary.in_progress_observation_count:
+            state_key = "observed_usage_no_completed"
         details.append(translate(state_key, self.language))
 
         history_started = summary.coverage.history_started_at
@@ -3331,6 +3341,17 @@ class Dashboard:
                     self.language,
                     eligible=message.eligible_count,
                     total=message.total_count,
+                ))
+            elif message.code == "in_progress_excluded":
+                details.append(translate(
+                    "observed_usage_in_progress_excluded", self.language,
+                ))
+                details.append(translate(
+                    "observed_usage_in_progress_pending", self.language,
+                ))
+            elif message.code == "missing_response_identity":
+                details.append(translate(
+                    "observed_usage_missing_identity", self.language,
                 ))
         if summary.freshness_state == "stale":
             details.append(translate("observed_usage_stale", self.language))

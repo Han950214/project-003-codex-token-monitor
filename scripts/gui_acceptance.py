@@ -12,6 +12,7 @@ import argparse
 import os
 import sys
 import tempfile
+import traceback
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.advisor import AdvisorInput, AdvisorResult, evaluate_advice  # noqa: E402
 from app.analytics_ui import TrendView, trend_view_from_query  # noqa: E402
+from app.codex_rollout import (  # noqa: E402
+    InstructionUsage, TokenUsage, make_response_safe_id,
+)
 from app.history import (  # noqa: E402
     HistoryObservation,
     HistoryQueryResult,
@@ -56,6 +60,7 @@ SCENARIOS = (
     "mini_dashboard_dedup",
     "observed_usage_complete",
     "observed_usage_partial",
+    "observed_usage_in_progress",
     "observed_usage_empty",
     "observed_usage_unavailable",
 )
@@ -78,6 +83,38 @@ class ScenarioResult:
     record_results: tuple[bool, ...]
     current_observed_at: datetime
     usage_summary: ObservedUsageSummary
+    selected_session: object | None = None
+
+
+class _SafeQaQuotaProvider:
+    """Deterministic provider that prevents GUI QA from contacting Codex."""
+
+    def __init__(self, observed_at: datetime) -> None:
+        self.snapshot = CodexQuotaSnapshot(
+            QuotaWindow.from_reset_duration(
+                QuotaKind.FIVE_HOUR, used_percent=40.0,
+                remaining_percent=60.0, reset_after=timedelta(hours=4),
+                observed_at=observed_at, source="qa_safe_numbers",
+            ),
+            QuotaWindow.from_reset_duration(
+                QuotaKind.WEEKLY, used_percent=35.0,
+                remaining_percent=65.0, reset_after=timedelta(days=5),
+                observed_at=observed_at, source="qa_safe_numbers",
+            ),
+            observed_at,
+            "normal",
+        )
+
+    def refresh(self) -> CodexQuotaSnapshot:
+        return self.snapshot
+
+    @staticmethod
+    def refresh_thread_titles() -> dict[str, str]:
+        return {}
+
+    @staticmethod
+    def close() -> None:
+        return None
 
 
 def _validated_temp_root(root: Path) -> Path:
@@ -130,6 +167,8 @@ def _token_observation(
     sampled_at: datetime,
     source_observed_at: datetime,
     source_type: str = "dashboard",
+    source_status: str = "exact",
+    response_safe_id: str | None = None,
     stale: bool = False,
     input_tokens: int | None = 1_200,
     output_tokens: int | None = 300,
@@ -148,9 +187,15 @@ def _token_observation(
         source_observed_at=source_observed_at,
         quota_observed_at=five_hour_last_seen_at,
         thread_safe_id=QA_THREAD_ID,
+        response_safe_id=make_response_safe_id(
+            QA_THREAD_ID,
+            response_safe_id or (
+                f"qa-response-{int(source_observed_at.timestamp() * 1_000_000)}"
+            ),
+        ),
         model_safe_id="qa-model-001",
         source_type=source_type,
-        source_status="stale" if stale else "exact",
+        source_status=source_status,
         source_available=True,
         token_stale=stale,
         token_stale_reason="source_stale" if stale else None,
@@ -273,6 +318,7 @@ def build_scenario(
     )
     if not store.initialize():
         raise RuntimeError(store.last_error or "gui_acceptance_history_initialize_failed")
+    selected_session: object | None = None
 
     if name == "token_quota_independence":
         token_at = current - timedelta(minutes=10)
@@ -435,6 +481,41 @@ def build_scenario(
         advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
         group, metric, page = "tokens", "total", "overview"
 
+    elif name == "observed_usage_in_progress":
+        response = "qa-response-in-progress"
+        outcomes = tuple(store.record(_token_observation(
+            sampled_at=observed,
+            source_observed_at=observed,
+            source_status="in_progress",
+            response_safe_id=response,
+            input_tokens=total * 3 // 5,
+            output_tokens=total * 2 // 5,
+            total_tokens=total,
+            cached_tokens=total * 3 // 10,
+            reasoning_tokens=total // 5,
+        )) for observed, total in (
+            (current - timedelta(seconds=2), 100),
+            (current - timedelta(seconds=1), 200),
+        ))
+        before = after = store.query(range_days, QA_THREAD_ID, now=current)
+        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
+        group, metric, page = "tokens", "total", "overview"
+        instruction = InstructionUsage(
+            "qa-turn-active", "in_progress",
+            TokenUsage(120, 60, 80, 40, 200),
+            2, None, 0, 0, 0, False, True,
+        )
+        selected_session = SimpleNamespace(
+            thread_id=QA_THREAD_ID,
+            instruction=instruction,
+            thread_cumulative_usage=TokenUsage(600, 240, 200, 40, 800),
+            status="in_progress",
+            observed_at=current - timedelta(seconds=1),
+            display_title="Codex Session · 07-16 12:00",
+            full_title="Codex Session · 07-16 12:00",
+            turn_count=8,
+        )
+
     else:  # observed_usage_empty / observed_usage_unavailable
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
         advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
@@ -467,6 +548,7 @@ def build_scenario(
         record_results=outcomes,
         current_observed_at=current,
         usage_summary=usage_summary,
+        selected_session=selected_session,
     )
 
 
@@ -516,15 +598,24 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
             observed_at=scenario.current_observed_at,
             source="qa_safe_numbers",
         )
-        dashboard.snapshot = None
+        dashboard.snapshot = (
+            SimpleNamespace(
+                selected_session=scenario.selected_session,
+                recent_sessions=(scenario.selected_session,),
+                selected_thread_id=scenario.selected_session.thread_id,
+                sessions_result=SimpleNamespace(
+                    refreshed_at=scenario.current_observed_at,
+                ),
+            )
+            if scenario.selected_session is not None else None
+        )
         dashboard.quota_snapshot = CodexQuotaSnapshot(
             five,
             weekly,
             scenario.current_observed_at,
             "normal",
         )
-        dashboard._render_safe_overview()  # noqa: SLF001 - QA launcher
-        dashboard._render_status_recent(SimpleNamespace(recent_sessions=()))  # noqa: SLF001
+        dashboard._render_safe_overview()  # noqa: SLF001 - production QA path
     dashboard.show_page(page)
 
 
@@ -561,7 +652,15 @@ def _scroll_overview_to_usage(dashboard: object) -> None:
     page = dashboard.status_page
     if not hasattr(page, "_parent_canvas"):
         raise RuntimeError("Overview scroll container is unavailable")
-    page._parent_canvas.yview_moveto(0.26)  # noqa: SLF001 - QA-only scroll hook
+    page._parent_canvas.yview_moveto(0.36)  # noqa: SLF001 - QA-only scroll hook
+
+
+def _scroll_overview_to_quota(dashboard: object) -> None:
+    """Expose the independent quota card for deterministic evidence."""
+    page = dashboard.status_page
+    if not hasattr(page, "_parent_canvas"):
+        raise RuntimeError("Overview scroll container is unavailable")
+    page._parent_canvas.yview_moveto(0.58)  # noqa: SLF001 - QA-only scroll hook
 
 
 def _change_observed_window(dashboard: object, value: str) -> None:
@@ -585,6 +684,7 @@ def main() -> None:
     parser.add_argument("--tooltip-index", choices=(0, 1, 2), type=int)
     parser.add_argument("--scroll-end", action="store_true")
     parser.add_argument("--scroll-overview-usage", action="store_true")
+    parser.add_argument("--scroll-overview-quota", action="store_true")
     parser.add_argument(
         "--observed-window",
         choices=tuple(kind.value for kind in UsageWindowKind),
@@ -592,9 +692,11 @@ def main() -> None:
     parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--auto-close-ms", type=int, default=0)
     args = parser.parse_args()
-
     data_root = _isolated_data_root()
     data_root.mkdir(parents=True, exist_ok=True)
+    empty_sessions = data_root / "empty-codex-sessions"
+    empty_sessions.mkdir(parents=True, exist_ok=True)
+    os.environ["CODEX_SESSIONS_DIR"] = str(empty_sessions)
     if not save_language(args.language, ui_settings_path()):
         raise RuntimeError("Unable to save isolated GUI acceptance language")
     scenario = build_scenario(args.scenario, data_root, range_days=args.range)
@@ -611,7 +713,25 @@ def main() -> None:
     from app.main import Dashboard
 
     root = ctk.CTk()
-    dashboard = Dashboard(root, history_store=scenario.store)
+    callback_errors: list[BaseException] = []
+
+    def report_callback_exception(
+        exception_type: type[BaseException],
+        exception: BaseException,
+        exception_traceback: object,
+    ) -> None:
+        callback_errors.append(exception)
+        traceback.print_exception(
+            exception_type, exception, exception_traceback,
+        )
+        dashboard.close()
+
+    root.report_callback_exception = report_callback_exception
+    dashboard = Dashboard(
+        root,
+        quota_provider=_SafeQaQuotaProvider(scenario.current_observed_at),
+        history_store=scenario.store,
+    )
     dashboard.auto_refresh.set_enabled(False)
     dashboard.auto_refresh_var.set(False)
     percent = round(args.scale * 100)
@@ -622,7 +742,7 @@ def main() -> None:
 
     def apply_case() -> None:
         root.minsize(1, 1)
-        root.geometry(_geometry_for_scale(args.geometry, args.scale))
+        root.geometry(f"{_geometry_for_scale(args.geometry, args.scale)}+0+0")
         _apply_scenario(dashboard, scenario, args.page or scenario.default_page)
 
         def stabilize_case() -> None:
@@ -633,6 +753,8 @@ def main() -> None:
                 root.after(250, lambda: _scroll_trends_to_end(dashboard))
             if args.scroll_overview_usage:
                 root.after(250, lambda: _scroll_overview_to_usage(dashboard))
+            if args.scroll_overview_quota:
+                root.after(250, lambda: _scroll_overview_to_quota(dashboard))
             if args.observed_window is not None:
                 root.after(
                     250,
@@ -642,11 +764,15 @@ def main() -> None:
                 root.after(500, lambda: _capture_window(root, screenshot_path))
 
         root.after(1200, stabilize_case)
-        if args.auto_close_ms > 0:
-            root.after(args.auto_close_ms, dashboard.close)
+    if args.auto_close_ms > 0:
+        def close_case() -> None:
+            dashboard.close()
+        root.after(args.auto_close_ms, close_case)
 
     root.after_idle(apply_case)
     root.mainloop()
+    if callback_errors:
+        raise RuntimeError("GUI acceptance callback failed") from callback_errors[0]
 
 
 if __name__ == "__main__":

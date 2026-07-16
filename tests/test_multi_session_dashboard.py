@@ -5,7 +5,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
-from app.codex_rollout import CodexSessionUsage, InstructionUsage, RolloutSessionsResult, TokenUsage
+from app.codex_rollout import (
+    CodexSessionUsage, InstructionUsage, RolloutSessionsResult, TokenUsage,
+    make_response_safe_id,
+)
 from app.codex_state import CodexThreadMetadata
 from app.dashboard import DashboardViewModel
 from app.ui_presenter import disambiguated_session_labels, present_dashboard
@@ -186,6 +189,10 @@ class MultiSessionDashboardTests(unittest.TestCase):
         self.assertEqual(mini.instruction_total_tokens, 75)
         self.assertEqual(mini.session_total_tokens, 150)
         self.assertEqual(mini.title, "Pinned")
+        self.assertEqual(
+            mini.response_safe_id, make_response_safe_id("a", "turn-a"),
+        )
+        self.assertEqual(mini.response_status, "exact")
         reader.read_session.assert_called_once_with(known_path)
 
     def test_mini_thread_refresh_does_not_change_dashboard_selection(self):

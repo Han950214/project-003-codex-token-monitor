@@ -13,4 +13,6 @@
 
 只有具备 turn 前 baseline、完整边界和全部累计对账时，指令才标为 `exact`。进行中的指令可显示已验证增量，但仍会增长。Reader 不保存 prompt、用户或助手消息、tool 输出、reasoning 内容或原始 JSON 行；最终可见文字的 Token 目前不可获得。
 
+历史严格汇总使用 Schema v4 的 `response_safe_id` 识别同一响应。该字段是 `Thread ID + turn_id` 的域分隔 SHA-256，只保存哈希，不保存原始 `turn_id`。进行中观测不进入历史 Token 总和；同一响应在 `task_complete` 后继续到达的 Token、状态或新鲜度变化、Mini 与 Dashboard 完整度差异都只形成一个规范终态响应。旧 v3 行没有可证明的响应身份，因此保留但不猜测回填，也不进入严格响应总和。
+
 `logs_2.sqlite`、手动 Runs 存储和旧报告模块保留为 legacy compatibility，但都不在当前 Dashboard 启动、手动刷新或自动刷新链路中；旧报告入口已隐藏。
