@@ -1,6 +1,6 @@
 ---
 name: token-monitor-desktop-ui-design
-description: "当 Codex Token Monitor 任务涉及 Dashboard、telemetry bar、数据源状态、最近响应、线程累计、时间范围汇总、设置、导出、首次启动界面，或用户要求 UI 现代化时，在当前 Python Desktop 技术栈内制定界面设计。纯 usage 解析、SQLite、日志读取或数据口径任务不要调用。"
+description: "当 Codex Token Monitor 任务涉及 Dashboard、telemetry bar、数据源状态、最近响应、线程累计、时间范围汇总、设置、导出、首次启动界面，或用户要求 UI 现代化、认为现有界面丑时，在当前 Python Desktop 技术栈内制定界面设计。纯 usage 解析、SQLite、日志读取或数据口径任务不要调用。"
 ---
 
 # Token Monitor Desktop UI 设计
