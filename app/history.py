@@ -13,7 +13,12 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable
 
-from app.codex_rollout import make_response_safe_id
+from app.codex_rollout import (
+    CompletedResponseUsageBatch,
+    ResponseUsageCandidate,
+    SafeRolloutScanMetadata,
+    make_response_safe_id,
+)
 from app.paths import history_db_path
 from app.usage_summary import (
     ObservedUsageRecord,
@@ -392,6 +397,12 @@ class HistoryQueryResult:
     weekly_stale: bool = False
 
 
+@dataclass(frozen=True)
+class HistoryBatchWriteResult:
+    inserted_count: int
+    canonical_response_count: int
+
+
 _COLUMN_DEFINITIONS = {
     "schema_version": "INTEGER NOT NULL DEFAULT 1",
     "sampled_at_utc": "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000000Z'",
@@ -523,6 +534,185 @@ class UsageHistoryStore:
             except (OSError, sqlite3.Error, ValueError) as exc:
                 self.last_error = _storage_error_code(exc)
                 return False
+
+    def record_completed_batch(
+        self,
+        batch: CompletedResponseUsageBatch,
+        *,
+        mark_success: bool = True,
+    ) -> HistoryBatchWriteResult:
+        """Atomically persist one safe Rollout batch and its success watermark."""
+
+        if not isinstance(batch, CompletedResponseUsageBatch):
+            raise TypeError("completed_response_batch_required")
+        if len(batch.responses) > 100:
+            raise ValueError("completed_response_batch_too_large")
+        observations = tuple(
+            _history_observation_from_candidate(candidate, sampled_at=self.clock())
+            for candidate in batch.responses
+        )
+        with self._lock:
+            if not self._initialized and not self.initialize():
+                return HistoryBatchWriteResult(0, 0)
+            try:
+                with closing(self._connect()) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    inserted = 0
+                    try:
+                        for observation in observations:
+                            storage_fingerprint = _storage_fingerprint(
+                                observation,
+                                {"five_hour": 0, "weekly": 0},
+                            )
+                            values = _observation_row(
+                                observation,
+                                event_sequences={"five_hour": 0, "weekly": 0},
+                                storage_fingerprint=storage_fingerprint,
+                            )
+                            cursor = connection.execute(
+                                f"INSERT INTO {_TABLE} ({', '.join(_INSERT_COLUMNS)}) "
+                                f"VALUES ({', '.join('?' for _ in _INSERT_COLUMNS)}) "
+                                "ON CONFLICT(sample_fingerprint) DO NOTHING",
+                                values,
+                            )
+                            inserted += int(cursor.rowcount == 1)
+                        if mark_success:
+                            _set_meta_value(
+                                connection,
+                                _backfill_meta_key(batch.scan_metadata.safe_file_hash),
+                                _backfill_meta_value(batch, self.clock()),
+                            )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+                self.last_error = None
+                canonical_count = len({
+                    candidate.response_safe_id for candidate in batch.responses
+                })
+                return HistoryBatchWriteResult(inserted, canonical_count)
+            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                self.last_error = _storage_error_code(exc)
+                return HistoryBatchWriteResult(0, 0)
+
+    def record_backfill_failure(
+        self,
+        metadata: SafeRolloutScanMetadata,
+        error_code: str,
+    ) -> bool:
+        """Persist a retryable safe status without marking a file complete."""
+
+        if not isinstance(metadata, SafeRolloutScanMetadata):
+            raise TypeError("safe_rollout_scan_metadata_required")
+        safe_error = _safe_code(error_code)
+        with self._lock:
+            if not self._initialized and not self.initialize():
+                return False
+            try:
+                with closing(self._connect()) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    _set_meta_value(
+                        connection,
+                        _backfill_meta_key(metadata.safe_file_hash),
+                        json.dumps(
+                            {
+                                "size": metadata.size,
+                                "mtime_ns": metadata.mtime_ns,
+                                "processed_completed_count": 0,
+                                "backfill_version": 1,
+                                "result_status": "failed",
+                                "retry_status": safe_error,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=True,
+                        ),
+                    )
+                    connection.commit()
+                self.last_error = None
+                return True
+            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                self.last_error = _storage_error_code(exc)
+                return False
+
+    def backfill_watermark_is_current(
+        self,
+        metadata: SafeRolloutScanMetadata,
+    ) -> bool:
+        """Return whether a file signature has a committed successful batch."""
+
+        if not isinstance(metadata, SafeRolloutScanMetadata):
+            return False
+        return metadata.safe_file_hash in self.current_backfill_file_hashes(
+            (metadata,),
+        )
+
+    def current_backfill_file_hashes(
+        self,
+        metadata_items: Iterable[SafeRolloutScanMetadata],
+    ) -> set[str]:
+        """Load successful matching watermarks without scanning history rows."""
+
+        return {
+            safe_file_hash
+            for safe_file_hash, status in self.backfill_file_statuses(
+                metadata_items,
+            ).items()
+            if status == "success"
+        }
+
+    def backfill_file_statuses(
+        self,
+        metadata_items: Iterable[SafeRolloutScanMetadata],
+    ) -> dict[str, str]:
+        """Load matching safe statuses so new files outrank retryable failures."""
+
+        expected = {
+            metadata.safe_file_hash: metadata
+            for metadata in metadata_items
+            if isinstance(metadata, SafeRolloutScanMetadata)
+        }
+        if not expected:
+            return {}
+        with self._lock:
+            if not self._initialized and not self.initialize():
+                return {}
+            try:
+                rows: list[sqlite3.Row] = []
+                with closing(self._connect()) as connection:
+                    keys = [
+                        _backfill_meta_key(safe_file_hash)
+                        for safe_file_hash in expected
+                    ]
+                    for offset in range(0, len(keys), 500):
+                        chunk = keys[offset:offset + 500]
+                        rows.extend(connection.execute(
+                            f"SELECT key, value FROM {_META_TABLE} "
+                            f"WHERE key IN ({', '.join('?' for _ in chunk)})",
+                            chunk,
+                        ).fetchall())
+                statuses: dict[str, str] = {}
+                prefix = "response_backfill_v1:"
+                for row in rows:
+                    key = str(row["key"])
+                    if not key.startswith(prefix):
+                        continue
+                    safe_file_hash = key[len(prefix):]
+                    metadata = expected.get(safe_file_hash)
+                    if metadata is None:
+                        continue
+                    value = json.loads(str(row["value"]))
+                    if (
+                        isinstance(value, dict)
+                        and value.get("size") == metadata.size
+                        and value.get("mtime_ns") == metadata.mtime_ns
+                    ):
+                        status = value.get("result_status")
+                        if status in {"success", "failed"}:
+                            statuses[safe_file_hash] = status
+                return statuses
+            except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+                return {}
 
     def query(
         self,
@@ -870,6 +1060,55 @@ def _quota_values(quota: "CodexQuotaSnapshot") -> dict[str, object]:
         **_window_values("five_hour", quota.five_hour),
         **_window_values("weekly", quota.weekly),
     }
+
+
+def _history_observation_from_candidate(
+    candidate: ResponseUsageCandidate,
+    *,
+    sampled_at: datetime,
+) -> HistoryObservation:
+    if not isinstance(candidate, ResponseUsageCandidate):
+        raise TypeError("response_usage_candidate_required")
+    return HistoryObservation(
+        sampled_at=sampled_at,
+        source_observed_at=candidate.completion_time_utc,
+        thread_safe_id=candidate.thread_safe_id,
+        response_safe_id=candidate.response_safe_id,
+        model_safe_id=candidate.safe_model_id,
+        source_type="rollout_backfill",
+        source_status=candidate.status,
+        source_available=True,
+        input_tokens=candidate.input_tokens,
+        output_tokens=candidate.output_tokens,
+        total_tokens=candidate.total_tokens,
+        cached_tokens=candidate.cached_input_tokens,
+        reasoning_tokens=candidate.reasoning_tokens,
+    )
+
+
+def _backfill_meta_key(safe_file_hash: str) -> str:
+    return f"response_backfill_v1:{safe_file_hash}"
+
+
+def _backfill_meta_value(
+    batch: CompletedResponseUsageBatch,
+    observed_at: datetime,
+) -> str:
+    metadata = batch.scan_metadata
+    return json.dumps(
+        {
+            "size": metadata.size,
+            "mtime_ns": metadata.mtime_ns,
+            "processed_completed_count": metadata.completed_response_count,
+            "backfill_version": 1,
+            "result_status": "success",
+            "last_success_utc": _iso_utc(observed_at),
+            "retry_status": "none",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
 
 
 def _window_values(prefix: str, window: "QuotaWindow") -> dict[str, object]:

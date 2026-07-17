@@ -9,6 +9,7 @@ import threading
 import tkinter as tk
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from tkinter import messagebox, ttk
 
 import customtkinter as ctk
@@ -25,7 +26,13 @@ from app.analytics_ui import (
 from app.app_actions import open_codex, open_data_directory
 from app.codex_rollout import configured_sessions_dir, make_response_safe_id
 from app.codex_state import configured_state_path
-from app.dashboard import DashboardViewModel, MiniThreadSnapshot, display_session_status
+from app.dashboard import (
+    DashboardViewModel,
+    MiniThreadSnapshot,
+    ResponseHistoryBackfillResult,
+    ResponseHistoryBackfillService,
+    display_session_status,
+)
 from app.dashboard_mode import ALL_PAGES, AppShellState, NAVIGATION_ITEMS
 from app.desktop_widget import (
     DesktopMiniWidget, ExitChoiceDialog, WidgetTooltip, format_percent,
@@ -124,6 +131,19 @@ def pagination_bounds(item_count: int, current_page: int, page_size: int = 10) -
     return page, page_count, start, min(start + page_size, max(0, item_count))
 
 
+def _new_backfill_history_store(
+    primary: UsageHistoryStore,
+) -> UsageHistoryStore:
+    """Create the worker's independent SQLite connection and lock boundary."""
+
+    return UsageHistoryStore(
+        primary.path,
+        retention_days=primary.retention_days,
+        max_rows=primary.max_rows,
+        clock=primary.clock,
+    )
+
+
 class Dashboard:
     def __init__(
         self,
@@ -190,6 +210,19 @@ class Dashboard:
             daemon=True,
         )
         self._trend_query_worker.start()
+        self._history_backfill_service = ResponseHistoryBackfillService(
+            self.view_model.rollout_reader,
+            _new_backfill_history_store(self.history_store),
+        )
+        self._history_backfill_lock = threading.Lock()
+        self._history_backfill_cancel = threading.Event()
+        self._history_backfill_thread: threading.Thread | None = None
+        self._history_backfill_results: queue.Queue[
+            ResponseHistoryBackfillResult
+        ] = queue.Queue(maxsize=1)
+        self._history_backfill_poll_scheduled = False
+        self._history_backfill_last_started: float | None = None
+        self.history_backfill_status = "idle"
         self._taskbar_iconify_scheduled = False
         self._layout_job: str | None = None
         self._sidebar_collapsed = False
@@ -251,6 +284,7 @@ class Dashboard:
         self.refresh()
         self.auto_refresh.set_enabled(bool(self.auto_refresh_var.get()))
         self._apply_startup_mode(load_startup_mode(UI_SETTINGS_PATH))
+        self.root.after(250, self._request_history_backfill)
 
     def _build(self) -> None:
         self.root.grid_columnconfigure(0, minsize=184)
@@ -2477,6 +2511,7 @@ class Dashboard:
 
     def manual_refresh(self) -> None:
         self.auto_refresh.manual_refresh()
+        self._request_history_backfill(manual=True)
 
     def _toggle_auto_refresh(self) -> None:
         enabled = bool(self.auto_refresh_var.get())
@@ -2508,6 +2543,7 @@ class Dashboard:
         self._trend_query_generation += 1
         self._trend_query_poll_scheduled = False
         self._trend_query_stop.set()
+        self._history_backfill_cancel.set()
         self.auto_refresh.close()
         self.quota_provider.close()
         self.tray.stop()
@@ -4199,6 +4235,84 @@ class Dashboard:
         except tk.TclError:
             pass
         self.diagnostic_window = None
+
+    def _request_history_backfill(self, manual: bool = False) -> bool:
+        """Start at most one bounded worker without delaying UI refresh."""
+
+        if self._closing:
+            return False
+        now = monotonic()
+        with self._history_backfill_lock:
+            if (
+                self._history_backfill_thread is not None
+                and self._history_backfill_thread.is_alive()
+            ):
+                return False
+            if (
+                not manual
+                and self._history_backfill_last_started is not None
+                and now - self._history_backfill_last_started < 300
+            ):
+                return False
+            self._history_backfill_last_started = now
+            self._history_backfill_cancel.clear()
+            self.history_backfill_status = "running"
+            self.status_message_var.set(
+                translate("history_backfill_running", self.language)
+            )
+            worker = threading.Thread(
+                target=self._history_backfill_worker_loop,
+                name="response-history-backfill-worker",
+                daemon=True,
+            )
+            self._history_backfill_thread = worker
+            worker.start()
+        if not self._history_backfill_poll_scheduled:
+            self._history_backfill_poll_scheduled = True
+            self.root.after(50, self._poll_history_backfill_results)
+        return True
+
+    def _history_backfill_worker_loop(self) -> None:
+        try:
+            result = self._history_backfill_service.run_once(
+                self._history_backfill_cancel,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            result = ResponseHistoryBackfillResult("failed")
+        try:
+            self._history_backfill_results.put_nowait(result)
+        except queue.Full:
+            try:
+                self._history_backfill_results.get_nowait()
+            except queue.Empty:
+                pass
+            self._history_backfill_results.put_nowait(result)
+
+    def _poll_history_backfill_results(self) -> None:
+        if self._closing:
+            self._history_backfill_poll_scheduled = False
+            return
+        try:
+            result = self._history_backfill_results.get_nowait()
+        except queue.Empty:
+            thread = self._history_backfill_thread
+            if thread is not None and thread.is_alive():
+                self.root.after(50, self._poll_history_backfill_results)
+                return
+            self._history_backfill_poll_scheduled = False
+            return
+        self._history_backfill_poll_scheduled = False
+        self.history_backfill_status = result.status
+        message_key = {
+            "completed": "history_backfill_updated",
+            "incomplete": "history_backfill_incomplete",
+            "cancelled": "history_backfill_incomplete",
+            "unavailable": "history_backfill_files_unavailable",
+            "failed": "history_backfill_files_unavailable",
+        }.get(result.status, "history_backfill_incomplete")
+        self.status_message_var.set(translate(message_key, self.language))
+        if result.inserted_observation_count:
+            self._schedule_trend_query()
 
     def _render_sessions(self, presentation: DashboardPresentation, render_session_rows: bool = True) -> None:
         self._rendering_sessions = True

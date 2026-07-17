@@ -41,6 +41,7 @@ def run_benchmark(
     }
     expected_threads: dict[str, dict[str, object]] = {}
     expected_responses: list[tuple[int, datetime, str, str]] = []
+    fixture_started = perf_counter()
 
     with tempfile.TemporaryDirectory(prefix="CodexTokenMonitor-UsagePerf-") as root:
         path = Path(root) / "usage-history.sqlite3"
@@ -128,6 +129,7 @@ def run_benchmark(
                 "ORDER BY thread_safe_id, response_safe_id, "
                 "source_observed_at_utc, sampled_at_utc, id",
             ).fetchall()
+        fixture_build_elapsed = perf_counter() - fixture_started
 
         tracemalloc.start()
         started = perf_counter()
@@ -139,6 +141,13 @@ def run_benchmark(
         elapsed = perf_counter() - started
         _current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
+        trend_started = perf_counter()
+        trend = store.query(
+            30,
+            "sha256:" + f"{1:064x}",
+            now=as_of,
+        )
+        trend_elapsed = perf_counter() - trend_started
 
     actual_totals = {
         "input_tokens": summary.input_tokens.value,
@@ -253,6 +262,9 @@ def run_benchmark(
         "thread_count": threads,
         "range": UsageWindowKind.ROLLING_30D.value,
         "elapsed_seconds": round(elapsed, 6),
+        "fixture_build_seconds": round(fixture_build_elapsed, 6),
+        "trend_elapsed_seconds": round(trend_elapsed, 6),
+        "trend_sample_count": trend.sample_count,
         "peak_memory_bytes": peak,
         "peak_memory_mib": round(peak_mib, 6),
         "coverage_status": insights.coverage_status.value,

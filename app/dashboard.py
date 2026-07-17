@@ -3,23 +3,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event
+from time import perf_counter
 from typing import Callable
 
 from app.codex_rollout import (
+    CompletedResponseUsageBatch,
     CodexRolloutReader,
     CodexSessionUsage,
     InstructionUsage,
+    RolloutScanInterrupted,
     RolloutSessionsResult,
     RolloutUsageResult,
+    SafeRolloutScanMetadata,
+    configured_sessions_dir,
     make_response_safe_id,
 )
 from app.codex_state import CodexThreadMetadata, CodexThreadTotal, load_thread_metadata
+from app.history import UsageHistoryStore
 from app.metrics import PricingConfig, SessionSummary
 
 
 ACTIVE_EVENT_MAX_AGE = timedelta(minutes=10)
+BACKFILL_MAX_TIME_RANGE_DAYS = 30
+BACKFILL_MAX_PROCESSED_FILES = 500
+BACKFILL_MAX_SCAN_BYTES = 67_108_864
+BACKFILL_MAX_SINGLE_FILE_BYTES = 4_194_304
+BACKFILL_MAX_COMPLETED_RESPONSES = 5_000
+BACKFILL_TIME_BUDGET_MS = 8_000
+BACKFILL_DATABASE_BATCH_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -54,6 +68,181 @@ class MiniThreadSnapshot:
     full_title: str | None = None
     response_safe_id: str | None = None
     response_status: str | None = None
+
+
+@dataclass(frozen=True)
+class ResponseHistoryBackfillResult:
+    status: str
+    candidate_file_count: int = 0
+    processed_file_count: int = 0
+    unchanged_file_count: int = 0
+    skipped_file_count: int = 0
+    completed_response_count: int = 0
+    inserted_observation_count: int = 0
+    scan_bytes: int = 0
+    elapsed_ms: int = 0
+
+
+class ResponseHistoryBackfillService:
+    """Bounded synchronous worker body; callers decide which thread runs it."""
+
+    def __init__(
+        self,
+        reader: CodexRolloutReader,
+        history_store: UsageHistoryStore,
+        *,
+        sessions_dir: Path | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self.reader = reader
+        self.history_store = history_store
+        self.sessions_dir = sessions_dir
+        self.clock = clock
+
+    def run_once(self, cancel_event: Event | None = None) -> ResponseHistoryBackfillResult:
+        cancel = cancel_event or Event()
+        started = perf_counter()
+        deadline = started + (BACKFILL_TIME_BUDGET_MS / 1000)
+        root = self.sessions_dir or configured_sessions_dir()
+        if not root.is_dir():
+            return ResponseHistoryBackfillResult(
+                "unavailable",
+                elapsed_ms=round((perf_counter() - started) * 1000),
+            )
+        cutoff = (
+            self.clock().astimezone(timezone.utc)
+            - timedelta(days=BACKFILL_MAX_TIME_RANGE_DAYS)
+        ).timestamp()
+        discovered: list[tuple[Path, SafeRolloutScanMetadata]] = []
+        try:
+            for path in root.rglob("rollout-*.jsonl"):
+                if cancel.is_set():
+                    return ResponseHistoryBackfillResult(
+                        "cancelled",
+                        candidate_file_count=len(discovered),
+                        elapsed_ms=round((perf_counter() - started) * 1000),
+                    )
+                if perf_counter() >= deadline:
+                    return ResponseHistoryBackfillResult(
+                        "incomplete",
+                        candidate_file_count=len(discovered),
+                        elapsed_ms=round((perf_counter() - started) * 1000),
+                    )
+                metadata = self.reader.file_scan_metadata(path)
+                if metadata.mtime_ns / 1_000_000_000 >= cutoff:
+                    discovered.append((path, metadata))
+        except OSError:
+            return ResponseHistoryBackfillResult(
+                "unavailable",
+                elapsed_ms=round((perf_counter() - started) * 1000),
+            )
+        watermark_statuses = self.history_store.backfill_file_statuses(
+            metadata for _path, metadata in discovered
+        )
+        current = {
+            safe_file_hash
+            for safe_file_hash, status in watermark_statuses.items()
+            if status == "success"
+        }
+        pending = [
+            item for item in discovered
+            if item[1].safe_file_hash not in current
+        ]
+        pending.sort(key=lambda item: (
+            item[1].safe_file_hash in watermark_statuses,
+            -item[1].mtime_ns,
+        ))
+        processed = skipped = completed = inserted = scanned = 0
+        status = "completed"
+        for path, metadata in pending:
+            if cancel.is_set():
+                status = "cancelled"
+                break
+            if perf_counter() >= deadline:
+                status = "incomplete"
+                break
+            if processed >= BACKFILL_MAX_PROCESSED_FILES:
+                status = "incomplete"
+                break
+            if metadata.size > BACKFILL_MAX_SINGLE_FILE_BYTES:
+                self.history_store.record_backfill_failure(
+                    metadata, "file_too_large",
+                )
+                if self.history_store.last_error is not None:
+                    status = "incomplete"
+                    break
+                processed += 1
+                skipped += 1
+                continue
+            estimated_read = (
+                0 if self.reader.has_cached_parse(metadata) else metadata.size
+            )
+            if scanned + estimated_read > BACKFILL_MAX_SCAN_BYTES:
+                status = "incomplete"
+                break
+            try:
+                batch = self.reader.read_completed_batch(
+                    path,
+                    cancel_event=cancel,
+                    deadline=deadline,
+                )
+            except RolloutScanInterrupted:
+                status = "cancelled" if cancel.is_set() else "incomplete"
+                break
+            scanned += batch.scan_metadata.bytes_scanned
+            if scanned > BACKFILL_MAX_SCAN_BYTES:
+                self.history_store.record_backfill_failure(
+                    batch.scan_metadata, "scan_byte_budget_exceeded",
+                )
+                status = "incomplete"
+                break
+            if batch.scan_metadata.result_status != "success":
+                self.history_store.record_backfill_failure(
+                    batch.scan_metadata, "rollout_read_failed",
+                )
+                if self.history_store.last_error is not None:
+                    status = "incomplete"
+                    break
+                processed += 1
+                skipped += 1
+                continue
+            if completed + len(batch.responses) > BACKFILL_MAX_COMPLETED_RESPONSES:
+                status = "incomplete"
+                break
+            responses = batch.responses
+            if not responses:
+                write_result = self.history_store.record_completed_batch(batch)
+                if self.history_store.last_error is not None:
+                    status = "incomplete"
+                    break
+                inserted += write_result.inserted_count
+            else:
+                for offset in range(0, len(responses), BACKFILL_DATABASE_BATCH_SIZE):
+                    chunk = responses[offset:offset + BACKFILL_DATABASE_BATCH_SIZE]
+                    final_chunk = offset + len(chunk) == len(responses)
+                    write_result = self.history_store.record_completed_batch(
+                        CompletedResponseUsageBatch(chunk, batch.scan_metadata),
+                        mark_success=final_chunk,
+                    )
+                    if self.history_store.last_error is not None:
+                        status = "incomplete"
+                        break
+                    inserted += write_result.inserted_count
+                if status != "completed":
+                    break
+            processed += 1
+            completed += len(responses)
+        return ResponseHistoryBackfillResult(
+            status,
+            candidate_file_count=len(discovered),
+            processed_file_count=processed,
+            unchanged_file_count=len(current),
+            skipped_file_count=skipped,
+            completed_response_count=completed,
+            inserted_observation_count=inserted,
+            scan_bytes=scanned,
+            elapsed_ms=round((perf_counter() - started) * 1000),
+        )
 
 
 class DashboardViewModel:
