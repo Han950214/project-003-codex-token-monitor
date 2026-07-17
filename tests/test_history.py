@@ -514,7 +514,94 @@ class HistorySchemaTests(unittest.TestCase):
 
 
 class HistoryObservationTests(unittest.TestCase):
-    def test_from_dashboard_uses_only_normalized_safe_numbers(self):
+    def test_from_dashboard_uses_current_session_not_selected_session(self):
+        current_usage = TokenUsage(100, 40, 20, 5, 120)
+        current_instruction = InstructionUsage(
+            "turn-current", "exact", current_usage, 1, 1000,
+            0, 0, 0, True, False,
+        )
+        current = SimpleNamespace(
+            thread_id="thread-current",
+            instruction=current_instruction,
+            thread_cumulative_usage=TokenUsage(900, 300, 99, 10, 999),
+            observed_at=NOW - timedelta(seconds=5),
+            status="exact",
+            turn_count=5,
+        )
+        selected_usage = TokenUsage(80_000, 0, 20_000, 100, 100_000)
+        selected_instruction = InstructionUsage(
+            "turn-selected", "exact", selected_usage, 1, 1000,
+            0, 0, 0, True, False,
+        )
+        selected = SimpleNamespace(
+            thread_id="thread-selected",
+            instruction=selected_instruction,
+            thread_cumulative_usage=TokenUsage(
+                160_000, 0, 40_000, 200, 200_000,
+            ),
+            observed_at=NOW - timedelta(minutes=5),
+            status="exact",
+            turn_count=40,
+        )
+        snapshot = SimpleNamespace(
+            current_session=current,
+            current_thread_id=current.thread_id,
+            selected_session=selected,
+            selected_thread_id=selected.thread_id,
+            rollout=SimpleNamespace(
+                instruction=selected_instruction,
+                thread_cumulative_usage=selected.thread_cumulative_usage,
+                thread_id=selected.thread_id,
+                observed_at=selected.observed_at,
+                turn_count=selected.turn_count,
+            ),
+            state_metadata={
+                current.thread_id: SimpleNamespace(model="gpt-current"),
+                selected.thread_id: SimpleNamespace(model="gpt-selected"),
+            },
+            state_total=None,
+        )
+
+        item = HistoryObservation.from_dashboard(
+            snapshot, quota(), sampled_at=NOW,
+        )
+
+        self.assertEqual(item.thread_safe_id, current.thread_id)
+        self.assertEqual(
+            item.response_safe_id,
+            make_response_safe_id(current.thread_id, "turn-current"),
+        )
+        self.assertEqual(item.model_safe_id, "gpt-current")
+        self.assertEqual(item.source_observed_at, current.observed_at)
+        self.assertEqual(item.source_status, "exact")
+        self.assertTrue(item.source_available)
+        self.assertFalse(item.token_stale)
+        self.assertEqual(
+            (
+                item.input_tokens,
+                item.output_tokens,
+                item.total_tokens,
+                item.cached_tokens,
+                item.reasoning_tokens,
+                item.session_total_tokens,
+                item.turn_count,
+            ),
+            (100, 20, 120, 40, 5, 999, 5),
+        )
+
+        snapshot.state_metadata = {
+            selected.thread_id: SimpleNamespace(model="gpt-selected"),
+        }
+        snapshot.state_total = SimpleNamespace(
+            thread_id=selected.thread_id,
+            model="gpt-selected",
+        )
+        without_current_metadata = HistoryObservation.from_dashboard(
+            snapshot, quota(), sampled_at=NOW,
+        )
+        self.assertIsNone(without_current_metadata.model_safe_id)
+
+    def test_from_dashboard_legacy_snapshot_falls_back_to_selected_safe_numbers(self):
         usage = TokenUsage(100, 40, 20, 5, 120)
         instruction = InstructionUsage(
             "turn-1", "exact", usage, 1, 1000, 0, 0, 0, True, False,
@@ -1282,6 +1369,29 @@ class HistoryStoreTests(unittest.TestCase):
                 (100, 20, 40, 5),
             )
 
+    def test_token_trend_excludes_in_progress_responses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            in_progress = replace(
+                observation(source_observed_at=NOW - timedelta(seconds=20)),
+                response_safe_id=make_response_safe_id("thread-1", "turn-running"),
+                source_status="in_progress",
+            )
+            completed = replace(
+                observation(source_observed_at=NOW - timedelta(seconds=10)),
+                response_safe_id=make_response_safe_id("thread-1", "turn-complete"),
+                source_status="exact",
+                total_tokens=222,
+            )
+            self.assertTrue(store.record(in_progress))
+            self.assertTrue(store.record(completed))
+
+            result = store.query(7, "thread-1", now=NOW)
+
+            self.assertEqual(result.sample_count, 1)
+            self.assertEqual(result.samples[0].source_status, "exact")
+            self.assertEqual(result.samples[0].total_tokens, 222)
+
     def test_different_reliable_token_times_remain_distinct(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)
@@ -1407,7 +1517,7 @@ class HistoryStoreTests(unittest.TestCase):
                 source_observed_at=NOW + timedelta(seconds=2),
                 source_status="unavailable", source_available=False,
             ))
-            self.assertEqual(store.query(7, "thread-1", now=NOW).status, "unavailable")
+            self.assertEqual(store.query(7, "thread-1", now=NOW).status, "stale")
 
     def test_missing_thread_has_an_explicit_empty_result(self):
         with tempfile.TemporaryDirectory() as directory:

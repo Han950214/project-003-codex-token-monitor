@@ -46,7 +46,9 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
     def test_required_geometry_scale_and_scenario_matrix_is_explicit(self):
         self.assertEqual(GEOMETRIES, ("980x660", "1440x900"))
         self.assertEqual(SCALES, (1.0, 1.25, 1.5))
-        self.assertEqual(PAGES, ("overview", "usage_trends", "recommendations"))
+        self.assertEqual(PAGES, (
+            "overview", "session_detail", "usage_trends", "recommendations",
+        ))
         self.assertEqual(RANGES, (7, 30, 90))
         self.assertEqual(SCENARIOS, (
             "token_quota_independence",
@@ -61,7 +63,23 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             "observed_usage_in_progress",
             "observed_usage_empty",
             "observed_usage_unavailable",
+            "semantic_current_selected_same",
+            "semantic_current_selected_history",
+            "semantic_selected_one_saved",
         ))
+
+    def test_semantic_scenarios_cover_current_selected_and_one_saved_response(self):
+        same = self._scenario("semantic_current_selected_same")
+        history = self._scenario("semantic_current_selected_history")
+        one_saved = self._scenario("semantic_selected_one_saved")
+
+        self.assertEqual(same.current_session.thread_id, same.selected_session.thread_id)
+        self.assertNotEqual(
+            history.current_session.thread_id, history.selected_session.thread_id,
+        )
+        self.assertEqual(history.after.sample_count, 2)
+        self.assertEqual(one_saved.after.sample_count, 1)
+        self.assertEqual(summarize_metric(one_saved.trend_view, "total").sample_count, 1)
 
     def test_geometry_is_normalized_for_customtkinter_window_scaling(self):
         self.assertEqual(_geometry_for_scale("980x660", 1.0), "980x660")

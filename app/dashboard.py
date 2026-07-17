@@ -39,6 +39,8 @@ class DashboardSnapshot:
     selection_mode: str = "auto"
     selected_thread_id: str | None = None
     lookback_days: int = 7
+    current_session: CodexSessionUsage | None = None
+    current_thread_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,7 @@ class DashboardViewModel:
         self.title_batch_loader = title_batch_loader or (lambda: {})
         self.selection_mode = "auto"
         self.selected_thread_id: str | None = None
+        self.current_thread_id: str | None = None
         self._known_paths: dict[str, Path] = {}
         self._known_sessions: dict[str, CodexSessionUsage] = {}
         self._title_cache: dict[str, str] = {}
@@ -90,8 +93,8 @@ class DashboardViewModel:
     def set_auto_follow(self) -> DashboardSnapshot | None:
         self.selection_mode = "auto"
         self.selected_thread_id = None
-        if self._last_snapshot and self._last_snapshot.recent_sessions:
-            return self._cached_snapshot(self._last_snapshot.recent_sessions[0], "auto")
+        if self._last_snapshot and self._last_snapshot.current_session is not None:
+            return self._cached_snapshot(self._last_snapshot.current_session, "auto")
         return None
 
     def select_cached_thread(self, thread_id: str) -> DashboardSnapshot | None:
@@ -128,12 +131,17 @@ class DashboardViewModel:
             else self.rollout_reader.refresh_sessions(lookback_days=self.lookback_days)
         )
         recent = [_effective_session_status(session, result.refreshed_at) for session in result.sessions]
+        current = next(
+            (item for item in recent if item.thread_id == result.latest_active_thread_id),
+            recent[0] if recent else None,
+        )
+        self.current_thread_id = current.thread_id if current is not None else None
         for session in recent:
             self._known_sessions[session.thread_id] = session
             if session.rollout_path is not None:
                 self._known_paths[session.thread_id] = session.rollout_path
 
-        selected = self._select(recent)
+        selected = current if self.selection_mode == "auto" else self._select(recent)
         if self.selection_mode == "pinned" and self.selected_thread_id and selected is None:
             selected = self._load_known_pinned(self.selected_thread_id)
             if selected is not None:
@@ -153,6 +161,12 @@ class DashboardViewModel:
         if isinstance(titles, dict):
             self._title_cache = titles
         recent = [self._apply_title(session) for session in recent]
+        if current is not None:
+            current = next(
+                (item for item in recent if item.thread_id == current.thread_id),
+                self._apply_title(current),
+            )
+            self._known_sessions[current.thread_id] = current
         if selected is not None:
             selected = next(
                 (item for item in recent if item.thread_id == selected.thread_id),
@@ -178,7 +192,7 @@ class DashboardViewModel:
             (), summary, rollout, state_total, reconciliation == "reconciled",
             reconciliation, None, result, tuple(recent), selected, metadata,
             self.selection_mode, selected.thread_id if selected else self.selected_thread_id,
-            self.lookback_days,
+            self.lookback_days, current, self.current_thread_id,
         )
         self._last_snapshot = snapshot
         return snapshot
@@ -266,7 +280,8 @@ class DashboardViewModel:
 
 
 def instruction_usage(snapshot: DashboardSnapshot) -> InstructionUsage | None:
-    return snapshot.selected_session.instruction if snapshot.selected_session else snapshot.rollout.instruction
+    current = snapshot.current_session or snapshot.selected_session
+    return current.instruction if current is not None else snapshot.rollout.instruction
 
 
 def display_session_status(

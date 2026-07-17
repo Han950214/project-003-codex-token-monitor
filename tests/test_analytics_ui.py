@@ -205,6 +205,7 @@ class TrendQualityTests(unittest.TestCase):
         summary = summarize_metric(view, "total")
 
         self.assertEqual(summary.sample_count, 1)
+        self.assertEqual((summary.minimum, summary.maximum, summary.change), (None, None, None))
         self.assertEqual((summary.start_at, summary.end_at), (reliable, reliable))
         self.assertEqual(metric_observed_at(unknown, "total"), None)
 

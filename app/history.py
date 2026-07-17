@@ -190,23 +190,33 @@ class HistoryObservation:
         *,
         sampled_at: datetime | None = None,
     ) -> "HistoryObservation":
-        selected = snapshot.selected_session
-        instruction = selected.instruction if selected is not None else snapshot.rollout.instruction
+        source_session = (
+            getattr(snapshot, "current_session", None) or snapshot.selected_session
+        )
+        instruction = (
+            source_session.instruction
+            if source_session is not None else snapshot.rollout.instruction
+        )
         usage = instruction.usage if instruction is not None else None
         cumulative = (
-            selected.thread_cumulative_usage
-            if selected is not None else snapshot.rollout.thread_cumulative_usage
+            source_session.thread_cumulative_usage
+            if source_session is not None
+            else snapshot.rollout.thread_cumulative_usage
         )
         thread_id = (
-            selected.thread_id if selected is not None
+            source_session.thread_id if source_session is not None
             else snapshot.selected_thread_id or snapshot.rollout.thread_id
         )
         state = snapshot.state_metadata.get(thread_id) if thread_id else None
         model = state.model if state is not None else None
-        if model is None and snapshot.state_total is not None:
+        if (
+            model is None
+            and snapshot.state_total is not None
+            and getattr(snapshot.state_total, "thread_id", None) == thread_id
+        ):
             model = snapshot.state_total.model
         source_status = _history_instruction_status(instruction)
-        if selected is not None and selected.status == "unavailable":
+        if source_session is not None and source_session.status == "unavailable":
             source_status = "unavailable"
         source_available = bool(
             source_status not in {"unavailable", "no_selection"}
@@ -215,7 +225,8 @@ class HistoryObservation:
         return cls(
             sampled_at=sampled_at or _utc_now(),
             source_observed_at=(
-                selected.observed_at if selected is not None else snapshot.rollout.observed_at
+                source_session.observed_at
+                if source_session is not None else snapshot.rollout.observed_at
             ),
             quota_observed_at=quota.refreshed_at,
             thread_safe_id=thread_id,
@@ -229,15 +240,15 @@ class HistoryObservation:
             token_stale=bool(
                 instruction is not None
                 and instruction.in_progress
-                and selected is not None
-                and selected.status == "incomplete"
+                and source_session is not None
+                and source_session.status == "incomplete"
             ),
             token_stale_reason=(
                 "source_stale_or_unreconciled"
                 if instruction is not None
                 and instruction.in_progress
-                and selected is not None
-                and selected.status == "incomplete"
+                and source_session is not None
+                and source_session.status == "incomplete"
                 else None
             ),
             input_tokens=usage.input_tokens if usage is not None else None,
@@ -247,7 +258,8 @@ class HistoryObservation:
             reasoning_tokens=usage.reasoning_output_tokens if usage is not None else None,
             session_total_tokens=cumulative.total_tokens if cumulative is not None else None,
             turn_count=(
-                selected.turn_count if selected is not None else snapshot.rollout.turn_count
+                source_session.turn_count
+                if source_session is not None else snapshot.rollout.turn_count
             ),
             **_quota_values(quota),
         )
@@ -1085,6 +1097,7 @@ def _bounded_token_rows(
         f"({completeness}) DESC, {source_rank} DESC, source_available DESC, "
         "token_stale ASC, sampled_at_utc DESC, id DESC) AS candidate_rank "
         f"FROM {_TABLE} WHERE response_safe_id IS NOT NULL "
+        "AND source_status IN ('exact', 'completed_partial') "
         f"AND source_observed_at_utc >= ? {thread_clause}"
         "), winners AS ("
         "SELECT id, source_observed_at_utc FROM ranked WHERE candidate_rank = 1 "
@@ -1095,6 +1108,7 @@ def _bounded_token_rows(
     ).fetchall()
     legacy_rows = connection.execute(
         f"SELECT * FROM (SELECT * FROM {_TABLE} WHERE response_safe_id IS NULL "
+        "AND source_status IN ('exact', 'completed_partial') "
         f"AND source_observed_at_utc >= ? {thread_clause}"
         "ORDER BY source_observed_at_utc DESC, sampled_at_utc DESC, id DESC LIMIT ?) "
         "ORDER BY source_observed_at_utc, sampled_at_utc, id",

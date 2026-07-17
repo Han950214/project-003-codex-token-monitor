@@ -21,10 +21,13 @@ from app.advisor import (
     QUOTA_RISK_REMAINING_PERCENT,
     AdvisorInput,
     Recommendation,
+    build_advisor_input,
     evaluate_advice,
 )
+from app.analytics_ui import TrendView
 from app.dashboard_mode import ALL_PAGES, AppShellState, NAVIGATION_ITEMS
 from app.desktop_widget import DesktopMiniWidget, HOVER_ALPHA, format_percent
+from app.codex_rollout import CodexSessionUsage, InstructionUsage, TokenUsage
 from app.diagnostics import (
     DIAGNOSTIC_CHECK_CODES,
     DiagnosticContext,
@@ -34,7 +37,7 @@ from app.diagnostics import (
 from app.i18n import TRANSLATIONS, translate
 from app.main import CORE_METRICS, Dashboard
 from app.new_thread import generic_handoff_template
-from app.quota import QuotaKind, QuotaWindow
+from app.quota import CodexQuotaSnapshot, QuotaKind, QuotaWindow
 from app.ui_presenter import _latest_metrics
 from app.ui_format import (
     dashboard_layout_for_width, ellipsize_title, format_compact_token_count,
@@ -630,6 +633,80 @@ class Phase3LocalVisualTests(unittest.TestCase):
 
 
 class Phase3AdvisorTests(unittest.TestCase):
+    def test_advisor_uses_current_session_until_current_changes(self):
+        def session(
+            thread_id, *, turns, input_tokens, cached_tokens, total_tokens,
+        ):
+            usage = TokenUsage(
+                input_tokens, cached_tokens, total_tokens - input_tokens,
+                0, total_tokens,
+            )
+            return SimpleNamespace(
+                thread_id=thread_id,
+                instruction=InstructionUsage(
+                    f"turn-{thread_id}", "exact", usage, 1, None,
+                    0, 0, 0, True, False,
+                ),
+                thread_cumulative_usage=TokenUsage(
+                    input_tokens, cached_tokens, total_tokens - input_tokens,
+                    0, total_tokens,
+                ),
+                observed_at=NOW - timedelta(seconds=turns),
+                status="exact",
+                turn_count=turns,
+            )
+
+        current_a = session(
+            "A", turns=5, input_tokens=1_000,
+            cached_tokens=500, total_tokens=1_200,
+        )
+        historical_b = session(
+            "B", turns=40, input_tokens=OPTIMIZE_INPUT_TOKENS,
+            cached_tokens=0, total_tokens=OPTIMIZE_INPUT_TOKENS + 5_000,
+        )
+        historical_c = session(
+            "C", turns=45, input_tokens=OPTIMIZE_INPUT_TOKENS + 10_000,
+            cached_tokens=0, total_tokens=OPTIMIZE_INPUT_TOKENS + 15_000,
+        )
+        quota_snapshot = CodexQuotaSnapshot.unavailable(observed_at=NOW)
+
+        def build(current, selected):
+            snapshot = SimpleNamespace(
+                current_session=current,
+                selected_session=selected,
+                sessions_result=SimpleNamespace(refreshed_at=NOW),
+            )
+            return build_advisor_input(snapshot, quota_snapshot, now=NOW)
+
+        selected_a = build(current_a, current_a)
+        selected_b = build(current_a, historical_b)
+        selected_c = build(current_a, historical_c)
+
+        self.assertEqual(selected_a, selected_b)
+        self.assertEqual(selected_a, selected_c)
+        self.assertEqual(
+            (
+                selected_b.turn_count,
+                selected_b.instruction_input_tokens,
+                selected_b.instruction_total_tokens,
+                selected_b.cached_input_tokens,
+                selected_b.session_total_tokens,
+                selected_b.session_status,
+                selected_b.thread_safe_id,
+                selected_b.source_observed_at,
+            ),
+            (5, 1_000, 1_200, 500, 1_200, "exact", "A", current_a.observed_at),
+        )
+        self.assertEqual(evaluate_advice(selected_b).primary.code, "normal")
+        self.assertEqual(evaluate_advice(selected_c).primary.code, "normal")
+
+        current_changed = build(historical_b, current_a)
+        self.assertEqual(current_changed.thread_safe_id, "B")
+        self.assertEqual(
+            evaluate_advice(current_changed).primary.code,
+            "new_thread",
+        )
+
     def test_rule_codes_and_thresholds_are_centralized(self):
         self.assertEqual(len(ADVISOR_RULE_CODES), 6)
         self.assertGreater(NEW_THREAD_TURN_COUNT, 0)
@@ -899,6 +976,22 @@ class Phase3QuotaPresentationTests(unittest.TestCase):
 
 
 class Phase3ProductBoundaryTests(unittest.TestCase):
+    @staticmethod
+    def _semantic_session(thread_id, total, cumulative, *, status="exact"):
+        usage = TokenUsage(total // 2, total // 4, total // 2, 0, total)
+        cumulative_usage = TokenUsage(
+            cumulative // 2, cumulative // 4, cumulative // 2, 0, cumulative,
+        )
+        instruction = InstructionUsage(
+            f"turn-{thread_id}", status, usage, 1, None, 0, 0, 0,
+            status == "exact", status == "in_progress",
+        )
+        return CodexSessionUsage(
+            thread_id, f"Session {thread_id}", "safe timestamp fallback",
+            f"rollout-{thread_id}.jsonl", instruction, cumulative_usage,
+            NOW, NOW, status, turn_count=4,
+        )
+
     def test_header_keeps_status_message_visibly_bound(self):
         dashboard = object.__new__(Dashboard)
         dashboard.root = object()
@@ -979,6 +1072,261 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         self.assertEqual(set(dashboard.quota_window_widgets), {"five", "week"})
         self.assertEqual(len(dashboard.quick_action_buttons), 4)
         self.assertEqual(len(dashboard.status_recent_rows), 5)
+
+    def test_recent_task_text_regions_select_their_row(self):
+        class ClickBindingWidget(FakeWidget):
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.master = args[0] if args else None
+                self.bindings = {}
+                self.instances.append(self)
+
+            def bind(self, sequence, callback, *args, **kwargs):
+                self.bindings[sequence] = callback
+
+        dashboard = object.__new__(Dashboard)
+        dashboard.root = object()
+        dashboard.status_recent_rows = []
+        selected = []
+        dashboard._select_status_recent = selected.append
+        parent = ClickBindingWidget()
+
+        with (
+            patch.multiple(
+                main_module.ctk,
+                CTkFrame=ClickBindingWidget,
+                CTkLabel=ClickBindingWidget,
+                CTkButton=ClickBindingWidget,
+            ),
+            patch.object(main_module.tk, "StringVar", FakeVar),
+            patch.object(main_module, "WidgetTooltip", lambda *args, **kwargs: None),
+        ):
+            Dashboard._build_status_recent_card(dashboard, parent)
+
+        row = dashboard.status_recent_rows[0]["button"]
+        text_regions = [
+            widget for widget in ClickBindingWidget.instances
+            if widget.master is row
+        ]
+        callbacks = [
+            widget.bindings["<Button-1>"]
+            for widget in text_regions
+            if "<Button-1>" in widget.bindings
+        ]
+
+        self.assertEqual(len(callbacks), 3)
+        for callback in callbacks:
+            callback(SimpleNamespace())
+        self.assertEqual(selected, [0, 0, 0])
+
+    def test_product_semantics_labels_exist_in_both_languages(self):
+        expected = {
+            "core_metrics_current_active": ("当前运行任务", "Current active task"),
+            "core_metrics_most_recent": ("最近活动任务", "Most recently active task"),
+            "observed_usage_title": ("所选时间用量", "Usage in selected period"),
+            "session_detail_title": ("选中会话", "Selected session"),
+            "selected_session_cumulative": ("会话累计", "Session cumulative"),
+            "selected_task_badge": ("已选中", "Selected"),
+            "trend_summary_samples": ("已保存完成响应", "Saved completed responses"),
+        }
+        for key, (zh, en) in expected.items():
+            with self.subTest(key=key):
+                self.assertEqual(translate(key, "zh-CN"), zh)
+                self.assertEqual(translate(key, "en"), en)
+
+    def test_selected_session_surfaces_use_selected_cumulative_label(self):
+        source = inspect.getsource(Dashboard._apply_language)
+        self.assertEqual(source.count('"session": "selected_session_cumulative"'), 3)
+
+    def test_core_metrics_use_current_while_selected_detail_uses_selected(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.language = "en"
+        current = self._semantic_session("A", 100, 1_000, status="in_progress")
+        current = replace(
+            current,
+            instruction=replace(current.instruction, unreconciled_events=1),
+        )
+        selected = self._semantic_session("B", 200, 2_000)
+        dashboard.snapshot = SimpleNamespace(
+            current_session=current,
+            current_thread_id="A",
+            selected_session=selected,
+            selected_thread_id="B",
+            recent_sessions=(current, selected),
+        )
+        dashboard.quota_snapshot = CodexQuotaSnapshot.unavailable(observed_at=NOW)
+        dashboard.simple_quota_vars = {
+            "five_remaining": FakeVar(), "five_used": FakeVar(), "five_reset": FakeVar(),
+            "week_remaining": FakeVar(), "week_used": FakeVar(), "week_reset": FakeVar(),
+        }
+        dashboard.quota_window_widgets = {}
+        for prefix in ("five", "week"):
+            ring = FakeWidget()
+            ring.set = lambda *args, **kwargs: None
+            dashboard.quota_window_widgets[prefix] = {
+                "state": FakeVar(), "state_label": FakeWidget(),
+                "ring": ring, "progress": FakeWidget(),
+            }
+        dashboard.simple_task_vars = {
+            name: FakeVar() for name in (
+                "title", "status", "turns", "instruction", "session", "activity",
+            )
+        }
+        dashboard.task_full_title_var = FakeVar()
+        dashboard.task_summary_status_var = FakeVar()
+        dashboard.task_summary_status = FakeWidget()
+        dashboard.core_metrics_scope_var = FakeVar()
+        dashboard.core_metric_widgets = []
+        for semantic in ("current_turn", "session_total"):
+            dashboard.core_metric_widgets.append({
+                "semantic": semantic, "value": FakeVar(), "full": FakeVar(),
+                "hint": FakeVar(), "progress": None, "ring": None,
+                "sparkline": None,
+            })
+        dashboard.task_detail_vars = {
+            name: FakeVar() for name in (
+                "title", "status", "activity", "turns", "input", "output",
+                "total", "cached", "reasoning", "cache", "session",
+                "quota_five", "quota_weekly", "advice",
+            )
+        }
+        dashboard.task_detail_viewing_var = FakeVar()
+        dashboard.advisor_result = None
+        dashboard._metric_trend_samples = lambda _semantic: ()
+        dashboard._full_token_tooltip = lambda value: str(value)
+        dashboard._format_quota_summary = lambda _window: "quota"
+
+        Dashboard._render_safe_overview(dashboard)
+
+        core = {item["semantic"]: item["value"].get() for item in dashboard.core_metric_widgets}
+        self.assertEqual(core, {"current_turn": "100", "session_total": "1.0K"})
+        self.assertEqual(dashboard.simple_task_vars["title"].get(), "Session B")
+        self.assertEqual(dashboard.task_detail_vars["total"].get(), "200")
+        self.assertEqual(dashboard.task_detail_vars["session"].get(), "2,000")
+        self.assertEqual(dashboard.core_metrics_scope_var.get(), "Current active task")
+
+        selected_c = self._semantic_session("C", 300, 3_000)
+        dashboard.snapshot = SimpleNamespace(
+            current_session=current,
+            current_thread_id="A",
+            selected_session=selected_c,
+            selected_thread_id="C",
+            recent_sessions=(current, selected, selected_c),
+        )
+
+        Dashboard._render_safe_overview(dashboard)
+
+        core = {item["semantic"]: item["value"].get() for item in dashboard.core_metric_widgets}
+        self.assertEqual(core, {"current_turn": "100", "session_total": "1.0K"})
+        self.assertEqual(dashboard.simple_task_vars["title"].get(), "Session C")
+        self.assertEqual(dashboard.task_detail_vars["total"].get(), "300")
+        self.assertEqual(dashboard.task_detail_vars["session"].get(), "3,000")
+
+    def test_recent_rows_distinguish_current_and_selected_badges(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.language = "en"
+        dashboard.snapshot = SimpleNamespace(
+            current_thread_id="A", selected_thread_id="B",
+        )
+        dashboard.status_recent_rows = []
+        for _ in range(2):
+            dashboard.status_recent_rows.append({
+                "thread_id": None,
+                "title": FakeVar(), "full_title": FakeVar(),
+                "detail": FakeVar(), "current": FakeVar(),
+                "button": FakeWidget(), "badge_label": FakeWidget(),
+            })
+        rows = tuple(SimpleNamespace(
+            thread_id=thread_id, display_title=f"Session {thread_id}",
+            full_title=f"Session {thread_id}", last_activity=NOW,
+            thread_total_tokens=100, status="exact", turn_count=4,
+        ) for thread_id in ("A", "B"))
+
+        Dashboard._render_status_recent(
+            dashboard, SimpleNamespace(recent_sessions=rows),
+        )
+
+        self.assertEqual(dashboard.status_recent_rows[0]["current"].get(), "Current")
+        self.assertEqual(dashboard.status_recent_rows[1]["current"].get(), "Selected")
+
+    def test_trend_preview_has_distinct_zero_one_and_two_sample_states(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.language = "en"
+        dashboard.trend_metric = "total"
+        dashboard.snapshot = SimpleNamespace(
+            selected_session=SimpleNamespace(turn_count=18),
+        )
+        dashboard.trend_quality_var = FakeVar()
+        dashboard.trend_quality_message_var = FakeVar()
+        dashboard.trend_quality_label = FakeWidget()
+        dashboard.trend_scope_var = FakeVar()
+        dashboard.trend_preview_scope_var = FakeVar()
+        dashboard.trend_summary_vars = {
+            key: FakeVar() for key in ("range", "samples", "updated")
+        }
+        dashboard.trend_metric_vars = {
+            key: FakeVar() for key in ("current", "minimum", "maximum", "change")
+        }
+        dashboard.trend_chart = FakeWidget()
+        dashboard.trend_chart.set_points = lambda _points: None
+        dashboard.trend_preview_state_var = FakeVar()
+        dashboard.trend_preview_state = FakeWidget()
+        dashboard.trend_preview_message_var = FakeVar()
+        dashboard.trend_preview_plot = FakeWidget()
+        dashboard.trend_preview_plot.set_samples = (
+            lambda values: len(tuple(values)) >= 2
+        )
+        dashboard._trend_points = (
+            lambda view, _metric: tuple(range(len(view.samples)))
+        )
+
+        samples = tuple(
+            SimpleNamespace(
+                source_available=True,
+                source_observed_at=NOW + timedelta(minutes=index),
+                total_tokens=100 + index * 100,
+                source_type="dashboard",
+                token_stale=False,
+            )
+            for index in range(2)
+        )
+
+        dashboard.trend_view = TrendView(7, "empty", (), None)
+        Dashboard._render_trends(dashboard)
+        self.assertEqual(
+            dashboard.trend_preview_message_var.get(),
+            "No saved completed responses exist in the current range.",
+        )
+        self.assertEqual(dashboard.trend_metric_vars["minimum"].get(), "—")
+        self.assertEqual(dashboard.trend_metric_vars["maximum"].get(), "—")
+        self.assertFalse(dashboard.trend_preview_plot.visible)
+
+        dashboard.trend_view = TrendView(
+            7, "available", samples[:1], samples[0].source_observed_at,
+        )
+        Dashboard._render_trends(dashboard)
+        one_message = dashboard.trend_preview_message_var.get()
+        self.assertIn("Only 1 completed response has been saved", one_message)
+        self.assertIn("Response value: 100", one_message)
+        self.assertIn("Selected session turns: 18", one_message)
+        self.assertIn("Turns are not trend samples", one_message)
+        self.assertEqual(dashboard.trend_metric_vars["minimum"].get(), "—")
+        self.assertEqual(dashboard.trend_metric_vars["maximum"].get(), "—")
+        self.assertFalse(dashboard.trend_preview_plot.visible)
+
+        dashboard.trend_view = TrendView(
+            7, "available", samples, samples[-1].source_observed_at,
+        )
+        Dashboard._render_trends(dashboard)
+        self.assertIn(
+            "2 saved completed responses",
+            dashboard.trend_preview_message_var.get(),
+        )
+        self.assertEqual(dashboard.trend_metric_vars["minimum"].get(), "100")
+        self.assertEqual(dashboard.trend_metric_vars["maximum"].get(), "200")
+        self.assertTrue(dashboard.trend_preview_plot.visible)
 
     def test_metric_detail_keeps_six_required_technical_fields(self):
         metrics = _latest_metrics(None, "unavailable")

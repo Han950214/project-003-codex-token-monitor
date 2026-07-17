@@ -5,9 +5,11 @@ import queue
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from app.analytics_ui import TrendView
 from app.main import Dashboard, TREND_GROUP_METRICS, smoke
+from app.usage_summary import UsageWindowKind
 
 
 class HistoryIntegrationContractTests(unittest.TestCase):
@@ -39,6 +41,54 @@ class HistoryIntegrationContractTests(unittest.TestCase):
         source = inspect.getsource(Dashboard._apply_cached_snapshot)
         self.assertIn("_schedule_trend_query", source)
         self.assertNotIn("_record_history", source)
+
+    def test_selected_thread_filters_trend_request_but_not_usage_scope(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard._trend_query_generation = 0
+        dashboard.trend_range_days = 7
+        dashboard.snapshot = SimpleNamespace(selected_thread_id="thread-b")
+        dashboard.usage_window_kind = UsageWindowKind.ROLLING_7D
+        dashboard._trend_query_requests = queue.Queue(maxsize=1)
+        dashboard._trend_query_poll_scheduled = False
+        dashboard.root = SimpleNamespace(after=Mock())
+        dashboard._render_usage_insights = Mock()
+        preserved_usage_summary = SimpleNamespace(scope=UsageWindowKind.ROLLING_7D)
+        dashboard.observed_usage_summary = preserved_usage_summary
+
+        Dashboard._schedule_trend_query(
+            dashboard, preserve_observed_usage=True,
+        )
+
+        request = dashboard._trend_query_requests.get_nowait()
+        self.assertEqual(request[2], "thread-b")
+        self.assertEqual(request[3], UsageWindowKind.ROLLING_7D)
+        self.assertIs(dashboard.observed_usage_summary, preserved_usage_summary)
+
+        dashboard.snapshot = SimpleNamespace(selected_thread_id="thread-c")
+        Dashboard._schedule_trend_query(
+            dashboard, preserve_observed_usage=True,
+        )
+        next_request = dashboard._trend_query_requests.get_nowait()
+        self.assertEqual(next_request[2], "thread-c")
+        self.assertEqual(next_request[3], UsageWindowKind.ROLLING_7D)
+        self.assertIs(dashboard.observed_usage_summary, preserved_usage_summary)
+
+        summary = SimpleNamespace(error_code=None)
+        dashboard.history_store = Mock()
+        dashboard.history_store.summarize_usage.return_value = summary
+        observed_at = datetime(2026, 7, 17, tzinfo=timezone.utc)
+
+        result, error = Dashboard._query_observed_usage(
+            dashboard, UsageWindowKind.ROLLING_7D, observed_at,
+        )
+
+        self.assertIs(result, summary)
+        self.assertIsNone(error)
+        dashboard.history_store.summarize_usage.assert_called_once_with(
+            UsageWindowKind.ROLLING_7D,
+            as_of_utc=observed_at,
+            local_timezone=None,
+        )
 
     def test_interactive_history_queries_run_off_the_tk_thread(self):
         schedule = inspect.getsource(Dashboard._schedule_trend_query)

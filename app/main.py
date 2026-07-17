@@ -515,11 +515,19 @@ class Dashboard:
             anchor="w",
         )
         self.core_metrics_title.grid(
-            row=0, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_3, SPACE_2),
+            row=0, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_3, 0),
+        )
+        self.core_metrics_scope_var = tk.StringVar(master=self.root, value="")
+        self.core_metrics_scope = ctk.CTkLabel(
+            panel, textvariable=self.core_metrics_scope_var, font=CAPTION,
+            text_color=COLORS.accent, anchor="w",
+        )
+        self.core_metrics_scope.grid(
+            row=1, column=0, sticky="ew", padx=SPACE_4, pady=(0, SPACE_2),
         )
         self.core_cards_frame = ctk.CTkFrame(panel, fg_color="transparent")
         self.core_cards_frame.grid(
-            row=1, column=0, sticky="ew", padx=SPACE_3, pady=(0, SPACE_3),
+            row=2, column=0, sticky="ew", padx=SPACE_3, pady=(0, SPACE_3),
         )
         accents = (
             COLORS.accent, COLORS.purple, COLORS.real, COLORS.orange,
@@ -1015,22 +1023,31 @@ class Dashboard:
                 text_color=COLORS.primary_text, anchor="w",
             )
             title.grid(row=0, column=0, sticky="ew", padx=SPACE_3, pady=(SPACE_1, 0))
-            ctk.CTkLabel(
+            badge_label = ctk.CTkLabel(
                 row, textvariable=current_var, font=CAPTION,
-                text_color=COLORS.real, anchor="e",
-            ).grid(row=0, column=1, padx=SPACE_3, pady=(SPACE_1, 0))
-            ctk.CTkLabel(
+                text_color=COLORS.real, anchor="e", height=24,
+                corner_radius=6, padx=6, fg_color=COLORS.raised_surface,
+            )
+            badge_label.grid(row=0, column=1, padx=SPACE_3, pady=(SPACE_1, 0))
+            detail_label = ctk.CTkLabel(
                 row, textvariable=detail_var, font=CAPTION,
                 text_color=COLORS.secondary_text, anchor="w",
-            ).grid(
+            )
+            detail_label.grid(
                 row=1, column=0, columnspan=2, sticky="ew", padx=SPACE_3,
                 pady=(0, SPACE_1),
             )
+            for click_target in (title, badge_label, detail_label):
+                click_target.bind(
+                    "<Button-1>",
+                    lambda _event, item=index: self._select_status_recent(item),
+                )
             WidgetTooltip(title, lambda variable=full_title: variable.get())
             self.status_recent_rows.append({
                 "button": row, "title": title_var, "detail": detail_var,
                 "current": current_var, "full_title": full_title,
-                "thread_id": None,
+                "thread_id": None, "title_label": title,
+                "badge_label": badge_label, "detail_label": detail_label,
             })
         return card
 
@@ -1224,11 +1241,18 @@ class Dashboard:
             for name in (
                 "title", "status", "activity", "turns", "input", "output",
                 "total", "cached", "reasoning", "cache", "session",
-                "quota_five", "quota_weekly", "advice",
             )
         }
+        self.task_detail_viewing_var = tk.StringVar(master=self.root, value="")
+        self.task_detail_viewing = ctk.CTkLabel(
+            page, textvariable=self.task_detail_viewing_var, font=BODY_STRONG,
+            text_color=COLORS.accent, anchor="w",
+        )
+        self.task_detail_viewing.grid(
+            row=1, column=0, sticky="ew", pady=(0, SPACE_2),
+        )
         overview = self._section_card(page)
-        overview.grid(row=1, column=0, sticky="ew")
+        overview.grid(row=2, column=0, sticky="ew")
         overview.grid_columnconfigure(1, weight=1)
         self.task_detail_labels = {}
         for row, name in enumerate(("title", "status", "activity", "turns")):
@@ -1251,7 +1275,7 @@ class Dashboard:
                 pady=(SPACE_3 if row == 0 else SPACE_1),
             )
         metrics = ctk.CTkFrame(page, fg_color="transparent")
-        metrics.grid(row=2, column=0, sticky="ew", pady=(SPACE_3, 0))
+        metrics.grid(row=3, column=0, sticky="ew", pady=(SPACE_3, 0))
         metric_names = ("input", "output", "total", "cached", "reasoning", "cache")
         for index, name in enumerate(metric_names):
             row, column = divmod(index, 3)
@@ -1273,9 +1297,9 @@ class Dashboard:
                 anchor="w",
             ).grid(row=1, column=0, sticky="ew", padx=SPACE_3, pady=(0, SPACE_2))
         context = self._section_card(page)
-        context.grid(row=3, column=0, sticky="ew", pady=(SPACE_1, 0))
+        context.grid(row=4, column=0, sticky="ew", pady=(SPACE_1, 0))
         context.grid_columnconfigure(1, weight=1)
-        for row, name in enumerate(("session", "quota_five", "quota_weekly", "advice")):
+        for row, name in enumerate(("session",)):
             label = ctk.CTkLabel(
                 context, text="", font=CAPTION,
                 text_color=COLORS.secondary_text, anchor="w",
@@ -1289,7 +1313,7 @@ class Dashboard:
                 wraplength=760,
             ).grid(row=row, column=1, sticky="ew", padx=SPACE_4, pady=SPACE_2)
         actions = ctk.CTkFrame(page, fg_color="transparent")
-        actions.grid(row=4, column=0, sticky="ew", pady=SPACE_3)
+        actions.grid(row=5, column=0, sticky="ew", pady=SPACE_3)
         self.task_refresh_button = ctk.CTkButton(actions, text="", command=self.manual_refresh)
         self.task_switch_button = ctk.CTkButton(actions, text="", command=lambda: self.show_page("sessions"), fg_color="transparent", border_width=1, border_color=COLORS.border, text_color=COLORS.primary_text)
         self.task_new_thread_button = ctk.CTkButton(actions, text="", command=self._show_new_thread_dialog, fg_color=COLORS.orange, hover_color=COLORS.estimate)
@@ -2099,7 +2123,7 @@ class Dashboard:
         self.simple_task_title.configure(text=translate("session_detail_title", language))
         for name, key in {
             "turns": "task_turns", "instruction": "instruction_usage",
-            "session": "session_usage",
+            "session": "selected_session_cumulative",
         }.items():
             self.simple_task_labels[name].configure(text=translate(key, language))
         self.task_switch_button_home.configure(text=translate("switch_task", language))
@@ -2123,9 +2147,9 @@ class Dashboard:
             "activity": "recent_activity", "turns": "task_turns",
             "input": "metric_input", "output": "metric_output",
             "total": "metric_total", "cached": "metric_cached",
-            "reasoning": "metric_reasoning", "cache": "cache_reuse",
-            "session": "session_usage", "quota_five": "five_hour_limit",
-            "quota_weekly": "weekly_limit", "advice": "current_advice",
+            "reasoning": "metric_reasoning",
+            "cache": "selected_session_cache_reuse",
+            "session": "selected_session_cumulative",
         }
         for name, key in task_detail_keys.items():
             self.task_detail_labels[name].configure(text=translate(key, language))
@@ -2158,7 +2182,7 @@ class Dashboard:
         for name, key in {
             "title": "task_title", "status": "task_status",
             "activity": "recent_activity", "turns": "task_turns",
-            "session": "session_usage", "cache": "cache_reuse",
+            "session": "selected_session_cumulative", "cache": "selected_session_cache_reuse",
         }.items():
             self.sessions_side_labels[name].configure(text=translate(key, language))
         self.sessions_side_open.configure(text=translate("view_details", language))
@@ -2613,7 +2637,9 @@ class Dashboard:
                 error_code="history_query_failed",
             ), "history_query_failed"
 
-    def _schedule_trend_query(self) -> None:
+    def _schedule_trend_query(
+        self, *, preserve_observed_usage: bool = False,
+    ) -> None:
         """Coalesce local-history requests off Tk and discard stale results."""
 
         self._trend_query_generation += 1
@@ -2623,12 +2649,13 @@ class Dashboard:
         thread_filter = selected_id or "no_selection"
         self.trend_view = TrendView(range_days, "unavailable", (), None)
         as_of_utc = datetime.now(timezone.utc)
-        self.observed_usage_summary = unavailable_usage_summary(
-            self.usage_window_kind,
-            as_of_utc=as_of_utc,
-            local_timezone=None,
-            error_code="history_query_pending",
-        )
+        if not preserve_observed_usage:
+            self.observed_usage_summary = unavailable_usage_summary(
+                self.usage_window_kind,
+                as_of_utc=as_of_utc,
+                local_timezone=None,
+                error_code="history_query_pending",
+            )
         self._render_usage_insights()
         self.history_error = None
         request = (
@@ -2720,7 +2747,7 @@ class Dashboard:
 
     def _apply_cached_snapshot(self, snapshot) -> None:
         self.snapshot = snapshot
-        self._schedule_trend_query()
+        self._schedule_trend_query(preserve_observed_usage=True)
         self.advisor_result = self._evaluate_advisor()
         self.presentation = present_dashboard(snapshot, bool(self.auto_refresh_var.get()))
         self._apply_presentation(self.presentation)
@@ -3160,14 +3187,31 @@ class Dashboard:
             preview.end_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
             if preview.end_at is not None else "—"
         )
-        preview_details = translate(
-            "trend_preview_details", self.language,
-            current=self._format_trend_value("total", preview.current),
-            start=preview_start,
-            end=preview_end,
-            updated=preview_end,
-        )
-        self.trend_preview_message_var.set(f"{preview_message}\n{preview_details}")
+        if preview.sample_count == 0:
+            preview_body = preview_message
+        elif preview.sample_count == 1:
+            selected = self.snapshot.selected_session if self.snapshot is not None else None
+            turns = getattr(selected, "turn_count", None) if selected is not None else None
+            preview_details = translate(
+                "trend_preview_one_details", self.language,
+                current=self._format_trend_value("total", preview.current),
+                observed=preview_end,
+                turns=turns if turns is not None else "—",
+            )
+            preview_body = (
+                f"{preview_message}\n{preview_details}\n"
+                f"{translate('trend_sample_note', self.language)}"
+            )
+        else:
+            preview_details = translate(
+                "trend_preview_details", self.language,
+                current=self._format_trend_value("total", preview.current),
+                start=preview_start,
+                end=preview_end,
+                updated=preview_end,
+            )
+            preview_body = f"{preview_message}\n{preview_details}"
+        self.trend_preview_message_var.set(preview_body)
         preview_values = tuple(value for _, value in metric_samples(view, "total"))
         preview_visible = (
             preview_quality in {"available", "stale"}
@@ -3503,9 +3547,10 @@ class Dashboard:
             f"{cache_reuse * 100:.1f}%" if cache_reuse is not None else "—"
         )
 
-        details: list[str] = []
-        if summary.scope is UsageWindowKind.ROLLING_5H:
-            details.append(translate("observed_usage_rolling_5h_label", self.language))
+        range_label = translate(USAGE_WINDOW_LABEL_KEYS[summary.scope], self.language)
+        details: list[str] = [translate(
+            "observed_usage_scope", self.language, range=range_label,
+        )]
         if has_observations:
             details.append(translate(
                 "observed_usage_summary",
@@ -3634,35 +3679,75 @@ class Dashboard:
                 )
 
         selected = self.snapshot.selected_session if self.snapshot is not None else None
-        if selected is None:
-            full_title = translate("no_selected_thread", self.language)
-            usage = cumulative = None
-            values = {
-                "title": full_title,
-                "status": translate("quota_unavailable", self.language),
-                "turns": "—", "instruction": "—", "session": "—", "activity": "—",
-            }
-            cache = "—"
-        else:
-            instruction = selected.instruction
+        current = (
+            getattr(self.snapshot, "current_session", None) or selected
+            if self.snapshot is not None else None
+        )
+
+        def session_values(session):
+            if session is None:
+                full_title = translate("no_selected_thread", self.language)
+                values = {
+                    "title": full_title,
+                    "status": translate("quota_unavailable", self.language),
+                    "turns": "—", "instruction": "—", "session": "—",
+                    "activity": "—",
+                }
+                return full_title, values, None, None, "—", "unavailable"
+            instruction = session.instruction
             usage = instruction.usage if instruction is not None else None
-            cumulative = selected.thread_cumulative_usage
-            status = display_session_status(selected, instruction)
-            cache = "—" if usage is None or usage.input_tokens <= 0 else f"{usage.cached_input_tokens / usage.input_tokens * 100:.1f}%"
-            full_title = getattr(selected, "full_title", None) or selected.display_title
+            cumulative = session.thread_cumulative_usage
+            status = display_session_status(session, instruction)
+            cache = (
+                "—" if usage is None or usage.input_tokens <= 0
+                else f"{usage.cached_input_tokens / usage.input_tokens * 100:.1f}%"
+            )
+            full_title = getattr(session, "full_title", None) or session.display_title
             values = {
                 "title": ellipsize_title(full_title, 52),
                 "status": localize_presenter_text(status, self.language),
-                "turns": str(getattr(selected, "turn_count", 0)) if getattr(selected, "turn_count", 0) else "—",
-                "instruction": format_compact_token_count(usage.total_tokens if usage is not None else None),
-                "session": format_compact_token_count(cumulative.total_tokens if cumulative is not None else None),
-                "activity": selected.observed_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                "turns": (
+                    str(getattr(session, "turn_count", 0))
+                    if getattr(session, "turn_count", 0) else "—"
+                ),
+                "instruction": format_compact_token_count(
+                    usage.total_tokens if usage is not None else None,
+                ),
+                "session": format_compact_token_count(
+                    cumulative.total_tokens if cumulative is not None else None,
+                ),
+                "activity": session.observed_at.astimezone().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
             }
-        for name, value in values.items():
+            return full_title, values, usage, cumulative, cache, status
+
+        (
+            current_full_title, current_values, current_usage,
+            current_cumulative, current_cache, current_status,
+        ) = session_values(current)
+        (
+            selected_full_title, selected_values, selected_usage,
+            selected_cumulative, selected_cache, selected_status,
+        ) = session_values(selected)
+        current_instruction = (
+            current.instruction if current is not None else None
+        )
+        self.core_metrics_scope_var.set(translate(
+            "core_metrics_current_active"
+            if (
+                current_instruction is not None
+                and current_instruction.in_progress
+            )
+            else "core_metrics_most_recent",
+            self.language,
+        ))
+
+        for name, value in selected_values.items():
             self.simple_task_vars[name].set(value)
-        self.task_full_title_var.set(full_title)
-        self.task_summary_status_var.set(values["status"])
-        status_code = getattr(selected, "status", "unavailable") if selected is not None else "unavailable"
+        self.task_full_title_var.set(selected_full_title)
+        self.task_summary_status_var.set(selected_values["status"])
+        status_code = selected_status
         tone, tone_soft = {
             "in_progress": (COLORS.real, COLORS.real_soft),
             "exact": (COLORS.real, COLORS.real_soft),
@@ -3675,25 +3760,38 @@ class Dashboard:
             fg_color=tone_soft,
         )
 
-        instruction_total = usage.total_tokens if usage is not None else None
-        session_total = cumulative.total_tokens if cumulative is not None else None
-        reasoning = usage.reasoning_output_tokens if usage is not None else None
+        instruction_total = (
+            current_usage.total_tokens if current_usage is not None else None
+        )
+        session_total = (
+            current_cumulative.total_tokens if current_cumulative is not None else None
+        )
+        reasoning = (
+            current_usage.reasoning_output_tokens
+            if current_usage is not None else None
+        )
         metric_values = {
             "current_turn": (
                 format_compact_token_count(instruction_total),
                 self._full_token_tooltip(instruction_total),
-                values["status"], None,
+                current_values["status"], None,
             ),
             "session_total": (
                 format_compact_token_count(session_total),
                 self._full_token_tooltip(session_total),
-                translate("task_turns_value", self.language, value=values["turns"]), None,
+                translate(
+                    "task_turns_value", self.language,
+                    value=current_values["turns"],
+                ), None,
             ),
             "cache_reuse": (
-                cache,
-                translate("derived_percent_value", self.language, value=cache) if cache != "—" else "—",
+                current_cache,
+                translate(
+                    "derived_percent_value", self.language, value=current_cache,
+                ) if current_cache != "—" else "—",
                 translate("locally_derived", self.language),
-                None if cache == "—" else float(cache.rstrip("%")) / 100.0,
+                None if current_cache == "—"
+                else float(current_cache.rstrip("%")) / 100.0,
             ),
             "reasoning": (
                 format_compact_token_count(reasoning),
@@ -3745,30 +3843,39 @@ class Dashboard:
                 else:
                     widget["sparkline"].grid_remove()
 
-        self.task_detail_vars["title"].set(full_title)
-        self.task_detail_vars["status"].set(values["status"])
-        self.task_detail_vars["activity"].set(values["activity"])
-        self.task_detail_vars["turns"].set(values["turns"])
+        self.task_detail_viewing_var.set(translate(
+            "selected_session_viewing", self.language,
+            label=selected_full_title,
+        ))
+        self.task_detail_vars["title"].set(selected_full_title)
+        self.task_detail_vars["status"].set(selected_values["status"])
+        self.task_detail_vars["activity"].set(selected_values["activity"])
+        self.task_detail_vars["turns"].set(selected_values["turns"])
+        selected_instruction_total = (
+            selected_usage.total_tokens if selected_usage is not None else None
+        )
+        selected_session_total = (
+            selected_cumulative.total_tokens
+            if selected_cumulative is not None else None
+        )
+        selected_reasoning = (
+            selected_usage.reasoning_output_tokens
+            if selected_usage is not None else None
+        )
         for name, raw in (
-            ("input", usage.input_tokens if usage is not None else None),
-            ("output", usage.output_tokens if usage is not None else None),
-            ("total", instruction_total),
-            ("cached", usage.cached_input_tokens if usage is not None else None),
-            ("reasoning", reasoning),
-            ("session", session_total),
+            ("input", selected_usage.input_tokens if selected_usage is not None else None),
+            ("output", selected_usage.output_tokens if selected_usage is not None else None),
+            ("total", selected_instruction_total),
+            ("cached", selected_usage.cached_input_tokens if selected_usage is not None else None),
+            ("reasoning", selected_reasoning),
+            ("session", selected_session_total),
         ):
             self.task_detail_vars[name].set(format_full_token_count(raw))
         self.task_detail_vars["cache"].set(
-            translate("derived_percent_value", self.language, value=cache) if cache != "—" else "—"
+            translate(
+                "derived_percent_value", self.language, value=selected_cache,
+            ) if selected_cache != "—" else "—"
         )
-        self.task_detail_vars["quota_five"].set(self._format_quota_summary(quota.five_hour))
-        self.task_detail_vars["quota_weekly"].set(self._format_quota_summary(quota.weekly))
-        if self.advisor_result is not None:
-            primary = self.advisor_result.primary
-            self.task_detail_vars["advice"].set(
-                f"{translate(primary.title_key, self.language)} · "
-                f"{translate(primary.body_key, self.language)}"
-            )
 
     def _metric_trend_samples(self, semantic: str) -> tuple[int, ...]:
         """Return chronological real samples; never synthesize chart points."""
@@ -3811,6 +3918,7 @@ class Dashboard:
 
     def _render_status_recent(self, presentation: DashboardPresentation) -> None:
         selected_id = self.snapshot.selected_thread_id if self.snapshot else None
+        current_id = getattr(self.snapshot, "current_thread_id", None) if self.snapshot else None
         for index, widget in enumerate(self.status_recent_rows):
             if index >= len(presentation.recent_sessions):
                 widget["thread_id"] = None
@@ -3818,6 +3926,8 @@ class Dashboard:
                 widget["full_title"].set("—")
                 widget["detail"].set("")
                 widget["current"].set("")
+                if "badge_label" in widget:
+                    widget["badge_label"].configure(text_color=COLORS.real)
                 widget["button"].configure(state="disabled", fg_color=COLORS.raised_surface)
                 continue
             row = presentation.recent_sessions[index]
@@ -3836,12 +3946,27 @@ class Dashboard:
                 status=localize_presenter_text(row.status, self.language),
                 turns=row.turn_count or "—", total=total, activity=activity,
             ))
-            current = row.thread_id == selected_id
-            widget["current"].set(translate("current_task_badge", self.language) if current else "")
+            is_current = row.thread_id == current_id
+            is_selected = row.thread_id == selected_id
+            badges = []
+            if is_current:
+                badges.append(translate("current_task_badge", self.language))
+            if is_selected:
+                badges.append(translate("selected_task_badge", self.language))
+            widget["current"].set(" · ".join(badges))
+            if "badge_label" in widget:
+                widget["badge_label"].configure(
+                    text_color=COLORS.real if is_current else COLORS.accent,
+                    width=112 if len(badges) > 1 else 64,
+                    fg_color=(
+                        COLORS.accent_soft if is_selected
+                        else COLORS.raised_surface
+                    ),
+                )
             widget["button"].configure(
                 state="normal",
-                fg_color=COLORS.accent_soft if current else COLORS.raised_surface,
-                border_color=COLORS.accent if current else COLORS.border,
+                fg_color=COLORS.accent_soft if is_selected else COLORS.raised_surface,
+                border_color=COLORS.accent if is_selected else COLORS.border,
             )
 
     def _execute_primary_action(self) -> None:
@@ -4093,6 +4218,7 @@ class Dashboard:
         }
         page_ids = {row.thread_id for row in page_rows}
         selected_id = self.snapshot.selected_thread_id if self.snapshot else None
+        current_id = getattr(self.snapshot, "current_thread_id", None) if self.snapshot else None
         menu_ids = page_ids | ({selected_id} if selected_id else set())
         self.label_to_thread = {labels[thread_id]: thread_id for thread_id in labels if thread_id in self.selectable_thread_ids and thread_id in menu_ids}
         auto_label = translate("auto_follow", self.language)
@@ -4115,6 +4241,13 @@ class Dashboard:
             self.sessions_tree.delete(item)
         for row in page_rows:
             status = localize_presenter_text(row.status, self.language)
+            badges = []
+            if row.thread_id == current_id:
+                badges.append(translate("current_task_badge", self.language))
+            if row.thread_id == selected_id:
+                badges.append(translate("selected_task_badge", self.language))
+            if badges:
+                status = f"{status} · {' · '.join(badges)}"
             activity = row.last_activity.astimezone().strftime("%m-%d %H:%M:%S") if row.last_activity else "—"
             self.sessions_tree.insert(
                 "", "end", iid=row.thread_id,

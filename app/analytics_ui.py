@@ -187,8 +187,8 @@ def summarize_metric(view: TrendView, metric: str) -> TrendMetricSummary:
     return TrendMetricSummary(
         metric=metric,
         current=numbers[-1] if numbers else None,
-        minimum=min(numbers) if numbers else None,
-        maximum=max(numbers) if numbers else None,
+        minimum=min(numbers) if len(numbers) >= 2 else None,
+        maximum=max(numbers) if len(numbers) >= 2 else None,
         change=(numbers[-1] - numbers[-2]) if len(numbers) >= 2 else None,
         sample_count=len(numbers),
         start_at=timestamps[0] if timestamps else None,

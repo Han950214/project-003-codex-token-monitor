@@ -6,6 +6,12 @@ Current boundary: the status center discovers multiple recent Codex Threads from
 
 关键边界：本项目不替代 AOS，不创建知识库、项目记忆或项目上下文，不扫描项目文件，也不读取或保存 Prompt、Response、消息、工具输出或 Reasoning 正文。“准备新线程”只解释数字风险、打开 Codex，并复制不含项目内容的通用手工交接模板。状态中心从 Rollout JSONL 读取安全数字元数据；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。
 
+## 产品语义收口第 1 步
+
+- `current_session`始终跟随完整刷新得到的最近活动任务；用户点击历史会话只更新`selected_session`，不会改变核心指标。
+- “所选时间用量”继续统计所选时间范围内全部 Thread 的规范完成响应；“选中会话”只展示用户正在查看的 Thread。
+- 趋势只消费本地已保存的`exact`或`completed_partial`响应；不足两条时不显示折线或重复的最小值、最大值。
+
 ## Phase 3.1-D 高消耗定位与简明洞察
 
 - “用量趋势 / Usage Trends”复用 Phase 3.1-C 的范围与规范响应归并，在同一次后台历史查询中提供高消耗会话、高消耗响应和低缓存复用会话，不新增数据源、页面或主线程读取。

@@ -43,6 +43,37 @@ class MultiSessionDashboardTests(unittest.TestCase):
         self.assertEqual(snapshot.selection_mode, "pinned")
         self.assertEqual(snapshot.selected_thread_id, "a")
 
+    def test_current_session_stays_fixed_while_selected_session_changes(self):
+        current = session("a", 3, total=100)
+        historical_b = session("b", 2, total=200)
+        historical_c = session("c", 1, total=300)
+        vm = DashboardViewModel(
+            rollout_sessions_loader=lambda: RolloutSessionsResult(
+                (current, historical_b, historical_c), "a", 0, NOW,
+            ),
+            state_batch_loader=lambda _ids: {},
+        )
+
+        initial = vm.refresh()
+        self.assertEqual(initial.current_thread_id, "a")
+        self.assertEqual(initial.selected_thread_id, "a")
+
+        selected_b = vm.select_cached_thread("b")
+        self.assertEqual(selected_b.current_thread_id, "a")
+        self.assertEqual(selected_b.current_session.thread_id, "a")
+        self.assertEqual(selected_b.selected_thread_id, "b")
+        self.assertEqual(selected_b.selected_session.thread_id, "b")
+        self.assertEqual(present_dashboard(selected_b, False).telemetry_current_total, "100")
+
+        selected_c = vm.select_cached_thread("c")
+        self.assertEqual(selected_c.current_thread_id, "a")
+        self.assertEqual(selected_c.selected_thread_id, "c")
+
+        automatic = vm.set_auto_follow()
+        self.assertEqual(automatic.selection_mode, "auto")
+        self.assertEqual(automatic.current_thread_id, "a")
+        self.assertEqual(automatic.selected_thread_id, "a")
+
     def test_batch_state_loader_is_called_once_and_aligned_to_selected_thread(self):
         state = Mock(return_value={"a": CodexThreadMetadata("a", 1, 2, "gpt", "openai", 100), "b": CodexThreadMetadata("b", 1, 2, "gpt", "openai", 999)})
         vm = DashboardViewModel(rollout_sessions_loader=lambda: RolloutSessionsResult((session("a", 1), session("b", 0, total=90)), "a", 0, NOW), state_batch_loader=state, title_batch_loader=lambda: {"a": "Alpha", "b": "Beta"})

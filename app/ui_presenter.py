@@ -90,12 +90,13 @@ def present_dashboard(
             previous, data_status=DataStatus.REFRESHING, status_tone=UiTone.FRESH,
             status_message="Refreshing", auto_refresh=format_auto_refresh(auto_refresh_enabled),
         )
+    current_session = snapshot.current_session or snapshot.selected_session
     instruction = instruction_usage(snapshot)
-    status = display_session_status(snapshot.selected_session, instruction)
+    status = display_session_status(current_session, instruction)
     data_status, tone = _data_status(status)
     cumulative = (
-        snapshot.selected_session.thread_cumulative_usage
-        if snapshot.selected_session else snapshot.rollout.thread_cumulative_usage
+        current_session.thread_cumulative_usage
+        if current_session else snapshot.rollout.thread_cumulative_usage
     )
     latest = _latest_metrics(instruction, status, cumulative)
     current, cache = _telemetry_current(instruction, cumulative)
@@ -105,7 +106,7 @@ def present_dashboard(
     )
     model_calls = "—" if instruction is None or (instruction.usage is None and instruction.model_calls == 0) else str(instruction.model_calls)
     sources = (
-        SourceDisplay("Data Source", "Local Codex", UiTone.FRESH if snapshot.selected_session else UiTone.UNKNOWN),
+        SourceDisplay("Data Source", "Local Codex", UiTone.FRESH if current_session else UiTone.UNKNOWN),
         SourceDisplay("Current Task", status, tone),
         SourceDisplay("Model Calls", model_calls, tone),
         SourceDisplay("Task Elapsed", _duration(instruction.duration_ms, instruction.in_progress) if instruction else "—", tone),
@@ -114,7 +115,7 @@ def present_dashboard(
     recent = tuple(_recent_row(item) for item in snapshot.recent_sessions)
     return DashboardPresentation(
         data_status, tone, _status_message(status), latest, sources,
-        _format_time(snapshot.selected_session.observed_at if snapshot.selected_session else snapshot.rollout.observed_at),
+        _format_time(current_session.observed_at if current_session else snapshot.rollout.observed_at),
         _format_time(snapshot.sessions_result.refreshed_at if snapshot.sessions_result.sessions else snapshot.rollout.refreshed_at),
         format_auto_refresh(auto_refresh_enabled), recent, current, cache, session_total, usage_scope,
     )

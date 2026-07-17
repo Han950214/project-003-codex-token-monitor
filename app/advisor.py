@@ -156,13 +156,16 @@ def build_advisor_input(
     quota_history_samples: Iterable[object] = (),
 ) -> AdvisorInput:
     now = now or datetime.now(timezone.utc)
-    selected = snapshot.selected_session if snapshot is not None else None
-    instruction = selected.instruction if selected is not None else None
+    current = (
+        getattr(snapshot, "current_session", None) or snapshot.selected_session
+        if snapshot is not None else None
+    )
+    instruction = current.instruction if current is not None else None
     usage = instruction.usage if instruction is not None else None
-    cumulative = selected.thread_cumulative_usage if selected is not None else None
+    cumulative = current.thread_cumulative_usage if current is not None else None
     refreshed_at = snapshot.sessions_result.refreshed_at if snapshot is not None else None
     age = None if refreshed_at is None else max(0, round((now - refreshed_at).total_seconds()))
-    data_available = bool(selected is not None and selected.status != "unavailable" and usage is not None)
+    data_available = bool(current is not None and current.status != "unavailable" and usage is not None)
     five_hour = quota.five_hour
     weekly = quota.weekly
     return AdvisorInput(
@@ -175,16 +178,16 @@ def build_advisor_input(
         weekly_remaining_percent=(
             weekly.remaining_percent if weekly.available and not weekly.stale else None
         ),
-        turn_count=getattr(selected, "turn_count", None) if selected is not None else None,
+        turn_count=getattr(current, "turn_count", None) if current is not None else None,
         instruction_input_tokens=usage.input_tokens if usage is not None else None,
         instruction_total_tokens=usage.total_tokens if usage is not None else None,
         cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
         session_total_tokens=cumulative.total_tokens if cumulative is not None else None,
-        session_status=("unavailable" if selected is None else selected.status),
+        session_status=("unavailable" if current is None else current.status),
         observed_at=now,
-        thread_safe_id=(getattr(selected, "thread_id", None) if selected is not None else None),
+        thread_safe_id=(getattr(current, "thread_id", None) if current is not None else None),
         history_samples=tuple(history_samples),
-        source_observed_at=(getattr(selected, "observed_at", None) if selected is not None else refreshed_at),
+        source_observed_at=(getattr(current, "observed_at", None) if current is not None else refreshed_at),
         five_hour_observed_at=five_hour.observed_at,
         weekly_observed_at=weekly.observed_at,
         quota_history_samples=tuple(quota_history_samples),

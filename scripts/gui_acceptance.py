@@ -29,14 +29,17 @@ if str(REPO_ROOT) not in sys.path:
 from app.advisor import AdvisorInput, AdvisorResult, evaluate_advice  # noqa: E402
 from app.analytics_ui import TrendView, trend_view_from_query  # noqa: E402
 from app.codex_rollout import (  # noqa: E402
-    InstructionUsage, TokenUsage, make_response_safe_id,
+    CodexSessionUsage, InstructionUsage, RolloutSessionsResult,
+    RolloutUsageResult, TokenUsage, make_response_safe_id,
 )
+from app.dashboard import DashboardSnapshot  # noqa: E402
 from app.history import (  # noqa: E402
     HistoryObservation,
     HistoryQueryResult,
     UsageHistoryStore,
 )
 from app.i18n import translate  # noqa: E402
+from app.metrics import SessionSummary  # noqa: E402
 from app.paths import DATA_DIR_ENV, ui_settings_path  # noqa: E402
 from app.quota import CodexQuotaSnapshot, QuotaKind, QuotaWindow  # noqa: E402
 from app.ui_settings import save_language  # noqa: E402
@@ -45,11 +48,12 @@ from app.usage_summary import (  # noqa: E402
     UsageWindowKind,
     unavailable_usage_summary,
 )
+from app.ui_presenter import present_dashboard  # noqa: E402
 
 
 GEOMETRIES = ("980x660", "1440x900")
 SCALES = (1.0, 1.25, 1.5)
-PAGES = ("overview", "usage_trends", "recommendations")
+PAGES = ("overview", "session_detail", "usage_trends", "recommendations")
 RANGES = (7, 30, 90)
 SCENARIOS = (
     "token_quota_independence",
@@ -64,6 +68,9 @@ SCENARIOS = (
     "observed_usage_in_progress",
     "observed_usage_empty",
     "observed_usage_unavailable",
+    "semantic_current_selected_same",
+    "semantic_current_selected_history",
+    "semantic_selected_one_saved",
 )
 QA_THREAD_ID = "qa-thread-001"
 QA_INSIGHT_THREAD_IDS = (
@@ -92,6 +99,8 @@ class ScenarioResult:
     current_observed_at: datetime
     usage_summary: ObservedUsageSummary
     selected_session: object | None = None
+    current_session: object | None = None
+    recent_sessions: tuple[object, ...] = ()
 
 
 class _SafeQaQuotaProvider:
@@ -152,6 +161,9 @@ def _validated_screenshot_path(path: Path) -> Path:
 def _capture_window(root: ctk.CTk, target: Path) -> None:
     root.attributes("-topmost", True)
     root.lift()
+    root.focus_force()
+    root.event_generate("<Escape>")
+    root.event_generate("<Escape>")
     root.update_idletasks()
     left = root.winfo_rootx()
     top = root.winfo_rooty()
@@ -228,6 +240,39 @@ def _token_observation(
         five_hour_source="codex_app_server" if quota_available else "unknown",
         five_hour_available=quota_available,
         five_hour_stale=False,
+    )
+
+
+def _semantic_session(
+    thread_id: str,
+    label: str,
+    observed_at: datetime,
+    *,
+    status: str,
+    total_tokens: int,
+    session_total_tokens: int,
+    turn_count: int,
+) -> CodexSessionUsage:
+    input_tokens = total_tokens * 3 // 5
+    output_tokens = total_tokens - input_tokens
+    usage = TokenUsage(
+        input_tokens, input_tokens // 2, output_tokens,
+        output_tokens // 3, total_tokens,
+    )
+    cumulative_input = session_total_tokens * 3 // 5
+    cumulative_output = session_total_tokens - cumulative_input
+    cumulative = TokenUsage(
+        cumulative_input, cumulative_input // 2, cumulative_output,
+        cumulative_output // 3, session_total_tokens,
+    )
+    instruction = InstructionUsage(
+        f"qa-turn-{thread_id}", status, usage, 1, None, 0, 0, 0,
+        status == "exact", status == "in_progress",
+    )
+    return CodexSessionUsage(
+        thread_id, label, "qa_safe_label", f"qa-{thread_id}.jsonl",
+        instruction, cumulative, observed_at, observed_at, status,
+        turn_count=turn_count, full_title=label,
     )
 
 
@@ -328,6 +373,8 @@ def build_scenario(
     if not store.initialize():
         raise RuntimeError(store.last_error or "gui_acceptance_history_initialize_failed")
     selected_session: object | None = None
+    current_session: object | None = None
+    recent_sessions: tuple[object, ...] = ()
 
     if name == "token_quota_independence":
         token_at = current - timedelta(minutes=10)
@@ -542,6 +589,49 @@ def build_scenario(
             turn_count=8,
         )
 
+    elif name in {
+        "semantic_current_selected_same",
+        "semantic_current_selected_history",
+        "semantic_selected_one_saved",
+    }:
+        current_session = _semantic_session(
+            "qa-current-A", "安全会话 A", current,
+            status="in_progress", total_tokens=1_200,
+            session_total_tokens=9_000, turn_count=12,
+        )
+        history_session = _semantic_session(
+            "qa-history-B", "安全会话 B", current - timedelta(minutes=8),
+            status="exact", total_tokens=2_400,
+            session_total_tokens=18_000, turn_count=18,
+        )
+        recent_sessions = (current_session, history_session)
+        selected_session = (
+            current_session
+            if name == "semantic_current_selected_same" else history_session
+        )
+        completed_count = (
+            0 if name == "semantic_current_selected_same"
+            else 1 if name == "semantic_selected_one_saved" else 2
+        )
+        outcomes = tuple(store.record(_token_observation(
+            sampled_at=current - timedelta(minutes=completed_count - index),
+            source_observed_at=current - timedelta(minutes=completed_count - index),
+            thread_safe_id=history_session.thread_id,
+            response_safe_id=f"qa-history-response-{index}",
+            input_tokens=1_200 + index * 300,
+            output_tokens=400 + index * 100,
+            total_tokens=1_600 + index * 400,
+            cached_tokens=600 + index * 150,
+            reasoning_tokens=120 + index * 30,
+            session_total_tokens=18_000,
+            turn_count=18,
+        )) for index in range(completed_count))
+        before = after = store.query(
+            range_days, selected_session.thread_id, now=current,
+        )
+        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
+        group, metric, page = "tokens", "total", "overview"
+
     else:  # observed_usage_empty / observed_usage_unavailable
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
         advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
@@ -575,6 +665,8 @@ def build_scenario(
         current_observed_at=current,
         usage_summary=usage_summary,
         selected_session=selected_session,
+        current_session=current_session,
+        recent_sessions=recent_sessions,
     )
 
 
@@ -626,24 +718,68 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
             observed_at=scenario.current_observed_at,
             source="qa_safe_numbers",
         )
-        dashboard.snapshot = (
-            SimpleNamespace(
-                selected_session=scenario.selected_session,
-                recent_sessions=(scenario.selected_session,),
-                selected_thread_id=scenario.selected_session.thread_id,
-                sessions_result=SimpleNamespace(
-                    refreshed_at=scenario.current_observed_at,
-                ),
+        if scenario.current_session is not None and scenario.selected_session is not None:
+            selected = scenario.selected_session
+            current_session = scenario.current_session
+            recent_sessions = tuple(scenario.recent_sessions)
+            sessions_result = RolloutSessionsResult(
+                recent_sessions, current_session.thread_id,
+                sum(item.status == "in_progress" for item in recent_sessions),
+                scenario.current_observed_at,
             )
-            if scenario.selected_session is not None else None
-        )
+            rollout = RolloutUsageResult(
+                selected.rollout_filename, selected.thread_id,
+                selected.instruction, True, selected.thread_cumulative_usage,
+                selected.observed_at, scenario.current_observed_at,
+                selected.turn_count,
+            )
+            selection_mode = (
+                "auto" if selected.thread_id == current_session.thread_id
+                else "pinned"
+            )
+            dashboard.snapshot = DashboardSnapshot(
+                (), SessionSummary(0, 0, 0, 0, 0, 0, 0, 0, 0),
+                rollout, None, False,
+                sessions_result=sessions_result,
+                recent_sessions=recent_sessions,
+                selected_session=selected,
+                selection_mode=selection_mode,
+                selected_thread_id=selected.thread_id,
+                current_session=current_session,
+                current_thread_id=current_session.thread_id,
+            )
+            dashboard.view_model._last_snapshot = dashboard.snapshot
+            dashboard.view_model.current_thread_id = current_session.thread_id
+            dashboard.view_model.selection_mode = selection_mode
+            dashboard.view_model.selected_thread_id = selected.thread_id
+            dashboard.presentation = present_dashboard(dashboard.snapshot, False)
+        else:
+            dashboard.snapshot = (
+                SimpleNamespace(
+                    selected_session=scenario.selected_session,
+                    current_session=scenario.selected_session,
+                    recent_sessions=(scenario.selected_session,),
+                    selected_thread_id=scenario.selected_session.thread_id,
+                    current_thread_id=scenario.selected_session.thread_id,
+                    sessions_result=SimpleNamespace(
+                        refreshed_at=scenario.current_observed_at,
+                    ),
+                )
+                if scenario.selected_session is not None else None
+            )
         dashboard.quota_snapshot = CodexQuotaSnapshot(
             five,
             weekly,
             scenario.current_observed_at,
             "normal",
         )
+        if scenario.current_session is not None:
+            dashboard._apply_presentation(dashboard.presentation)  # noqa: SLF001
         dashboard._render_safe_overview()  # noqa: SLF001 - production QA path
+        if scenario.current_session is not None:
+            dashboard._render_status_recent(dashboard.presentation)  # noqa: SLF001
+            dashboard._render_sessions(dashboard.presentation)  # noqa: SLF001
+            dashboard._render_trends()  # noqa: SLF001
     dashboard.show_page(page)
 
 
@@ -663,6 +799,22 @@ def _show_trend_tooltip(dashboard: object, point_index: int) -> None:
     if tooltip is not None:
         tooltip.lift()
         tooltip.update_idletasks()
+
+
+def _click_recent_title(dashboard: object, index: int) -> None:
+    """Exercise the visible title region of a recent-session card."""
+    row = dashboard.status_recent_rows[index]
+    thread_id = row["thread_id"]
+    title_label = row["title_label"]
+    visible_target = getattr(title_label, "_label", title_label)
+    visible_target.event_generate("<Button-1>")
+    if getattr(dashboard.snapshot, "selected_thread_id", None) != thread_id:
+        raise RuntimeError(
+            "Recent-session title click did not change the selection: "
+            f"expected={thread_id!r}, selected="
+            f"{getattr(dashboard.snapshot, 'selected_thread_id', None)!r}, "
+            f"cached={getattr(dashboard.view_model, 'selected_thread_id', None)!r}"
+        )
 
 
 def _scroll_trends_to_end(dashboard: object) -> None:
@@ -753,6 +905,7 @@ def main() -> None:
         choices=tuple(kind.value for kind in UsageWindowKind),
     )
     parser.add_argument("--cycle-observed-windows", action="store_true")
+    parser.add_argument("--click-recent-index", choices=range(5), type=int)
     parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--auto-close-ms", type=int, default=0)
     args = parser.parse_args()
@@ -828,6 +981,13 @@ def main() -> None:
                 )
             if args.cycle_observed_windows:
                 root.after(250, lambda: _cycle_observed_windows(dashboard))
+            if args.click_recent_index is not None:
+                root.after(
+                    250,
+                    lambda: _click_recent_title(
+                        dashboard, args.click_recent_index,
+                    ),
+                )
             if screenshot_path is not None:
                 delay = (
                     1000
@@ -839,6 +999,9 @@ def main() -> None:
         root.after(1200, stabilize_case)
     if args.auto_close_ms > 0:
         def close_case() -> None:
+            # Prevent the real Dashboard's Unmap handler from entering widget
+            # mode while this deterministic QA process is being destroyed.
+            dashboard._widget_mode = True  # noqa: SLF001 - QA-only shutdown guard
             dashboard.close()
         root.after(args.auto_close_ms, close_case)
 
