@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from enum import Enum
 from typing import Iterable
@@ -102,6 +102,64 @@ class FreshnessInfo:
 
 
 @dataclass(frozen=True)
+class HighUsageThread:
+    thread_safe_id: str
+    safe_thread_label: str
+    total_tokens: int
+    input_tokens: int | None
+    output_tokens: int | None
+    cached_tokens: int | None
+    reasoning_tokens: int | None
+    cache_reuse: float | None
+    completed_response_count: int
+    first_observed_at: datetime
+    last_observed_at: datetime
+    coverage_status: str
+
+
+@dataclass(frozen=True)
+class HighUsageResponse:
+    response_safe_id: str
+    thread_safe_id: str
+    safe_thread_label: str
+    total_tokens: int
+    input_tokens: int | None
+    output_tokens: int | None
+    cached_tokens: int | None
+    reasoning_tokens: int | None
+    cache_reuse: float | None
+    observed_at: datetime
+    coverage_status: str
+
+
+@dataclass(frozen=True)
+class LowCacheReuseThread:
+    thread_safe_id: str
+    safe_thread_label: str
+    cache_reuse: float
+    valid_input_tokens: int
+    valid_cached_tokens: int
+    valid_response_count: int
+    first_observed_at: datetime
+    last_observed_at: datetime
+    coverage_status: str
+
+
+@dataclass(frozen=True)
+class UsageInsightsResult:
+    range_id: UsageWindowKind
+    range_start: datetime
+    range_end: datetime
+    generated_at: datetime
+    source_available: bool
+    coverage_status: CoverageState
+    coverage_messages: tuple[CoverageMessage, ...]
+    high_usage_threads: tuple[HighUsageThread, ...] = ()
+    high_usage_responses: tuple[HighUsageResponse, ...] = ()
+    low_cache_reuse_threads: tuple[LowCacheReuseThread, ...] = ()
+
+
+@dataclass(frozen=True)
 class ObservedUsageRecord:
     """One safe local row projected for response-level aggregation."""
 
@@ -160,6 +218,7 @@ class ObservedUsageSummary:
     last_reliable_observed_at: datetime | None
     coverage: CoverageInfo
     freshness: FreshnessInfo
+    insights: UsageInsightsResult
     error_code: str | None = None
 
     @property
@@ -334,6 +393,286 @@ class _SummaryAccumulator:
         )
 
 
+@dataclass
+class _ThreadUsageAccumulator:
+    metrics: dict[str, _MetricAccumulator] = field(
+        default_factory=lambda: {
+            name: _MetricAccumulator() for name in _METRIC_NAMES
+        },
+    )
+    completed_response_count: int = 0
+    first: datetime | None = None
+    last: datetime | None = None
+    ranked_cache_input_sum: int = 0
+    ranked_cache_cached_sum: int = 0
+    ranked_cache_pair_count: int = 0
+    cache_input_sum: int = 0
+    cache_cached_sum: int = 0
+    cache_pair_count: int = 0
+    cache_first: datetime | None = None
+    cache_last: datetime | None = None
+    cache_partial: bool = False
+    partial: bool = False
+
+    def add_high(
+        self,
+        record: ObservedUsageRecord,
+        states: dict[str, tuple[str, int | None]],
+    ) -> None:
+        observed_at = record.source_observed_at
+        assert observed_at is not None
+        for name, (state, value) in states.items():
+            self.metrics[name].add(state, value)
+        self.completed_response_count += 1
+        self.first = observed_at if self.first is None else min(self.first, observed_at)
+        self.last = observed_at if self.last is None else max(self.last, observed_at)
+        input_state, input_value = states["input_tokens"]
+        cached_state, cached_value = states["cached_tokens"]
+        if (
+            input_state == cached_state == "eligible"
+            and input_value is not None
+            and cached_value is not None
+            and input_value > 0
+        ):
+            self.ranked_cache_input_sum += input_value
+            self.ranked_cache_cached_sum += cached_value
+            self.ranked_cache_pair_count += 1
+        self.partial = self.partial or (
+            record.source_status.casefold() == _PARTIAL_TERMINAL_STATUS
+            or any(state != "eligible" for state, _value in states.values())
+        )
+
+    def add_cache(
+        self,
+        record: ObservedUsageRecord,
+        states: dict[str, tuple[str, int | None]],
+    ) -> None:
+        observed_at = record.source_observed_at
+        assert observed_at is not None
+        input_state, input_value = states["input_tokens"]
+        cached_state, cached_value = states["cached_tokens"]
+        if (
+            input_state == cached_state == "eligible"
+            and input_value is not None
+            and cached_value is not None
+            and input_value > 0
+        ):
+            self.cache_input_sum += input_value
+            self.cache_cached_sum += cached_value
+            self.cache_pair_count += 1
+            self.cache_first = (
+                observed_at if self.cache_first is None
+                else min(self.cache_first, observed_at)
+            )
+            self.cache_last = (
+                observed_at if self.cache_last is None
+                else max(self.cache_last, observed_at)
+            )
+        elif input_state != "eligible" or cached_state != "eligible":
+            self.cache_partial = True
+        if record.source_status.casefold() == _PARTIAL_TERMINAL_STATUS:
+            self.cache_partial = True
+
+    def freeze(self, thread_safe_id: str) -> HighUsageThread:
+        assert self.first is not None and self.last is not None
+        metrics = {name: item.freeze() for name, item in self.metrics.items()}
+        total = metrics["total_tokens"].value
+        assert total is not None
+        cache_reuse = (
+            self.ranked_cache_cached_sum / self.ranked_cache_input_sum
+            if self.ranked_cache_pair_count and self.ranked_cache_input_sum > 0
+            else None
+        )
+        return HighUsageThread(
+            thread_safe_id=thread_safe_id,
+            safe_thread_label="",
+            total_tokens=total,
+            input_tokens=metrics["input_tokens"].value,
+            output_tokens=metrics["output_tokens"].value,
+            cached_tokens=metrics["cached_tokens"].value,
+            reasoning_tokens=metrics["reasoning_tokens"].value,
+            cache_reuse=cache_reuse,
+            completed_response_count=self.completed_response_count,
+            first_observed_at=self.first,
+            last_observed_at=self.last,
+            coverage_status=(
+                CoverageState.PARTIAL.value
+                if self.partial else CoverageState.COMPLETE_FOR_LOCAL_HISTORY.value
+            ),
+        )
+
+    def freeze_low_cache(self, thread_safe_id: str) -> LowCacheReuseThread | None:
+        if (
+            not self.cache_pair_count
+            or self.cache_input_sum <= 0
+            or self.cache_first is None
+            or self.cache_last is None
+        ):
+            return None
+        return LowCacheReuseThread(
+            thread_safe_id=thread_safe_id,
+            safe_thread_label="",
+            cache_reuse=self.cache_cached_sum / self.cache_input_sum,
+            valid_input_tokens=self.cache_input_sum,
+            valid_cached_tokens=self.cache_cached_sum,
+            valid_response_count=self.cache_pair_count,
+            first_observed_at=self.cache_first,
+            last_observed_at=self.cache_last,
+            coverage_status=(
+                CoverageState.PARTIAL.value
+                if self.cache_partial
+                else CoverageState.COMPLETE_FOR_LOCAL_HISTORY.value
+            ),
+        )
+
+
+@dataclass
+class _UsageInsightsAccumulator:
+    threads: dict[str, _ThreadUsageAccumulator] = field(default_factory=dict)
+    responses: list[HighUsageResponse] = field(default_factory=list)
+
+    def add(self, record: ObservedUsageRecord) -> None:
+        assert record.thread_safe_id is not None
+        assert record.response_safe_id is not None
+        assert record.source_observed_at is not None
+        states = _normalized_metric_states(record)
+        thread = self.threads.setdefault(
+            record.thread_safe_id,
+            _ThreadUsageAccumulator(),
+        )
+        thread.add_cache(record, states)
+        total_state, total_value = states["total_tokens"]
+        if total_state != "eligible" or total_value is None:
+            return
+        thread.add_high(record, states)
+        input_state, input_value = states["input_tokens"]
+        cached_state, cached_value = states["cached_tokens"]
+        cache_reuse = (
+            cached_value / input_value
+            if input_state == cached_state == "eligible"
+            and input_value is not None
+            and cached_value is not None
+            and input_value > 0
+            else None
+        )
+        partial = (
+            record.source_status.casefold() == _PARTIAL_TERMINAL_STATUS
+            or any(state != "eligible" for state, _value in states.values())
+        )
+        self.responses.append(HighUsageResponse(
+            response_safe_id=record.response_safe_id,
+            thread_safe_id=record.thread_safe_id,
+            safe_thread_label="",
+            total_tokens=total_value,
+            input_tokens=input_value if input_state == "eligible" else None,
+            output_tokens=(
+                states["output_tokens"][1]
+                if states["output_tokens"][0] == "eligible" else None
+            ),
+            cached_tokens=cached_value if cached_state == "eligible" else None,
+            reasoning_tokens=(
+                states["reasoning_tokens"][1]
+                if states["reasoning_tokens"][0] == "eligible" else None
+            ),
+            cache_reuse=cache_reuse,
+            observed_at=record.source_observed_at,
+            coverage_status=(
+                CoverageState.PARTIAL.value
+                if partial else CoverageState.COMPLETE_FOR_LOCAL_HISTORY.value
+            ),
+        ))
+        self.responses.sort(key=_high_response_sort_key)
+        del self.responses[5:]
+
+    def freeze(
+        self,
+        bounds: UsageWindowBounds,
+        generated_at: datetime,
+        coverage: CoverageInfo,
+    ) -> UsageInsightsResult:
+        top_threads: list[HighUsageThread] = []
+        low_cache_threads: list[LowCacheReuseThread] = []
+        for thread_safe_id, accumulator in self.threads.items():
+            if accumulator.completed_response_count:
+                top_threads.append(accumulator.freeze(thread_safe_id))
+                top_threads.sort(key=_high_thread_sort_key)
+                del top_threads[5:]
+            low_cache = accumulator.freeze_low_cache(thread_safe_id)
+            if low_cache is not None:
+                low_cache_threads.append(low_cache)
+                low_cache_threads.sort(key=_low_cache_sort_key)
+                del low_cache_threads[3:]
+        thread_ids = {
+            item.thread_safe_id
+            for item in (*top_threads, *self.responses, *low_cache_threads)
+        }
+        labels = safe_digest_labels(thread_ids)
+        return UsageInsightsResult(
+            range_id=bounds.scope,
+            range_start=bounds.start_utc,
+            range_end=bounds.end_utc,
+            generated_at=generated_at,
+            source_available=coverage.state is not CoverageState.UNAVAILABLE,
+            coverage_status=coverage.state,
+            coverage_messages=coverage.messages,
+            high_usage_threads=tuple(
+                replace(item, safe_thread_label=labels[item.thread_safe_id])
+                for item in top_threads
+            ),
+            high_usage_responses=tuple(
+                replace(item, safe_thread_label=labels[item.thread_safe_id])
+                for item in self.responses
+            ),
+            low_cache_reuse_threads=tuple(
+                replace(item, safe_thread_label=labels[item.thread_safe_id])
+                for item in low_cache_threads
+            ),
+        )
+
+
+def _high_thread_sort_key(item: HighUsageThread) -> tuple[object, ...]:
+    return (-item.total_tokens, -item.last_observed_at.timestamp(), item.thread_safe_id)
+
+
+def _high_response_sort_key(item: HighUsageResponse) -> tuple[object, ...]:
+    return (-item.total_tokens, -item.observed_at.timestamp(), item.response_safe_id)
+
+
+def _low_cache_sort_key(item: LowCacheReuseThread) -> tuple[object, ...]:
+    return (item.cache_reuse, -item.valid_input_tokens, item.thread_safe_id)
+
+
+def safe_digest_labels(values: Iterable[str]) -> dict[str, str]:
+    """Return deterministic digest suffix labels without exposing full safe IDs."""
+
+    identifiers = sorted(set(values))
+    digests = {
+        value: (value.split(":", 1)[1] if ":" in value else value)
+        for value in identifiers
+    }
+    lengths = {value: 6 for value in identifiers}
+    while True:
+        groups: dict[str, list[str]] = {}
+        for value in identifiers:
+            label = digests[value][-lengths[value]:].upper()
+            groups.setdefault(label, []).append(value)
+        collisions = [group for group in groups.values() if len(group) > 1]
+        if not collisions:
+            break
+        changed = False
+        for group in collisions:
+            for value in group:
+                if lengths[value] < 12:
+                    lengths[value] += 2
+                    changed = True
+        if not changed:
+            break
+    return {
+        value: digests[value][-lengths[value]:].upper()
+        for value in identifiers
+    }
+
+
 def aggregate_observed_usage(
     records: Iterable[ObservedUsageRecord],
     scope: UsageWindowKind | str,
@@ -417,6 +756,7 @@ def aggregate_observed_usage(
         else iter(_deduplicate_records(identified(), bounds.start_utc))
     )
     accumulator = _SummaryAccumulator()
+    insights_accumulator = _UsageInsightsAccumulator()
     unresolved_in_progress = 0
     for lifecycle in canonical:
         unresolved_in_progress += lifecycle.unresolved_in_progress_observation_count
@@ -426,6 +766,7 @@ def aggregate_observed_usage(
         observed_at = record.source_observed_at
         if observed_at is not None and bounds.start_utc <= observed_at <= bounds.end_utc:
             accumulator.add(record)
+            insights_accumulator.add(record)
 
     metrics = accumulator.frozen_metrics()
     cache_reuse = accumulator.frozen_cache_reuse()
@@ -543,6 +884,7 @@ def aggregate_observed_usage(
         messages=tuple(messages),
     )
     freshness = FreshnessInfo(freshness_state, accumulator.last)
+    insights = insights_accumulator.freeze(bounds, bounds.end_utc, coverage)
     return ObservedUsageSummary(
         bounds.scope,
         bounds.start_utc,
@@ -561,6 +903,7 @@ def aggregate_observed_usage(
         accumulator.last,
         coverage,
         freshness,
+        insights,
     )
 
 
@@ -582,6 +925,15 @@ def unavailable_usage_summary(
         messages=(CoverageMessage("history_unavailable"),),
     )
     freshness = FreshnessInfo(FreshnessState.UNAVAILABLE)
+    insights = UsageInsightsResult(
+        range_id=bounds.scope,
+        range_start=bounds.start_utc,
+        range_end=bounds.end_utc,
+        generated_at=bounds.end_utc,
+        source_available=False,
+        coverage_status=CoverageState.UNAVAILABLE,
+        coverage_messages=coverage.messages,
+    )
     return ObservedUsageSummary(
         bounds.scope,
         bounds.start_utc,
@@ -600,6 +952,7 @@ def unavailable_usage_summary(
         None,
         coverage,
         freshness,
+        insights,
         error_code,
     )
 

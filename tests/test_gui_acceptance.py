@@ -19,12 +19,14 @@ from scripts.gui_acceptance import (
     SCALES,
     SCENARIOS,
     _apply_scenario,
+    _cycle_observed_windows,
     _change_observed_window,
     _geometry_for_scale,
     _isolated_data_root,
     _scroll_overview_to_quota,
     _scroll_overview_to_usage,
     _scroll_trends_to_end,
+    _scroll_trends_to_insights,
     _show_trend_tooltip,
     build_scenario,
 )
@@ -78,6 +80,33 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
 
         menu.set.assert_called_once_with("Today")
         dashboard._change_usage_window.assert_called_once_with("Today")
+
+    def test_range_cycle_uses_all_four_existing_window_options_in_order(self):
+        labels = {
+            "Today": UsageWindowKind.TODAY,
+            "Last 5 hours": UsageWindowKind.ROLLING_5H,
+            "Last 7 days": UsageWindowKind.ROLLING_7D,
+            "Last 30 days": UsageWindowKind.ROLLING_30D,
+        }
+        dashboard = SimpleNamespace(
+            usage_window_labels=labels,
+            observed_usage_window_menu=Mock(),
+            _change_usage_window=Mock(),
+        )
+
+        _cycle_observed_windows(dashboard)
+
+        self.assertEqual(
+            [call.args[0] for call in dashboard._change_usage_window.call_args_list],
+            list(labels),
+        )
+
+    def test_usage_insights_scroll_hook_requires_real_card_container(self):
+        dashboard = SimpleNamespace(
+            usage_insights_card=SimpleNamespace(master=None),
+        )
+        with self.assertRaisesRegex(RuntimeError, "Usage insights"):
+            _scroll_trends_to_insights(dashboard)
 
     def test_launcher_requires_an_isolated_system_temp_directory(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -351,7 +380,27 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             with self.subTest(name=name):
                 scenario = self._scenario(name)
                 self.assertEqual(scenario.usage_summary.coverage_state, state)
-                self.assertEqual(scenario.default_page, "overview")
+                self.assertEqual(scenario.default_page, "usage_trends")
+
+    def test_usage_insights_scenarios_cover_full_partial_empty_and_unavailable(self):
+        complete = self._scenario("observed_usage_complete").usage_summary.insights
+        partial = self._scenario("observed_usage_partial").usage_summary.insights
+        empty = self._scenario("observed_usage_empty").usage_summary.insights
+        unavailable = self._scenario("observed_usage_unavailable").usage_summary.insights
+
+        self.assertEqual(len(complete.high_usage_threads), 5)
+        self.assertEqual(len(complete.high_usage_responses), 5)
+        self.assertEqual(len(complete.low_cache_reuse_threads), 3)
+        self.assertTrue({"AAABCDEF", "BBABCDEF"}.issubset(
+            {item.safe_thread_label for item in complete.high_usage_threads},
+        ))
+        self.assertEqual(partial.coverage_status.value, "partial")
+        self.assertEqual(len(partial.high_usage_responses), 1)
+        self.assertEqual(empty.high_usage_threads, ())
+        self.assertEqual(empty.high_usage_responses, ())
+        self.assertFalse(unavailable.source_available)
+        self.assertEqual(unavailable.high_usage_threads, ())
+        self.assertEqual(unavailable.high_usage_responses, ())
 
     def test_in_progress_scenario_keeps_live_current_response_and_no_completed_total(self):
         scenario = self._scenario("observed_usage_in_progress")

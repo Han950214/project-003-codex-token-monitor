@@ -67,10 +67,9 @@ _UTC_TEXT_GLOB = "????-??-??T??:??:??.??????Z"
 _USAGE_SUMMARY_COLUMNS = (
     "id", "sampled_at_utc", "source_observed_at_utc", "thread_safe_id",
     "response_safe_id", "model_safe_id", "source_type", "source_status",
-    "source_available", "token_stale", "token_stale_reason", "input_tokens",
+    "source_available", "token_stale", "input_tokens",
     "output_tokens", "total_tokens", "cached_tokens", "reasoning_tokens",
-    "session_total_tokens", "is_derived", "legacy_unknown_time",
-    "sample_fingerprint",
+    "is_derived", "legacy_unknown_time",
 )
 
 
@@ -1004,20 +1003,17 @@ def _observed_usage_record_from_row(row: sqlite3.Row) -> ObservedUsageRecord:
         source_status=str(row["source_status"] or "unavailable"),
         source_available=bool(row["source_available"]),
         token_stale=bool(row["token_stale"]),
-        token_stale_reason=(
-            row["token_stale_reason"]
-            if isinstance(row["token_stale_reason"], str) else None
-        ),
+        token_stale_reason=None,
         input_tokens=row["input_tokens"],
         output_tokens=row["output_tokens"],
         total_tokens=row["total_tokens"],
         cached_tokens=row["cached_tokens"],
         reasoning_tokens=row["reasoning_tokens"],
-        session_total_tokens=row["session_total_tokens"],
+        session_total_tokens=None,
         is_derived=bool(row["is_derived"]),
         legacy_unknown_time=bool(row["legacy_unknown_time"]),
         observed_time_invalid=observed_invalid,
-        stored_fingerprint=str(row["sample_fingerprint"] or ""),
+        stored_fingerprint="",
         sample_id=int(row["id"]),
     )
 

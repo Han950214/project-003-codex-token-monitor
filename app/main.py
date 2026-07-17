@@ -55,6 +55,7 @@ from app.ui_format import (
     format_full_token_count, metric_columns_for_width,
 )
 from app.trend_chart import TrendCanvas, TrendPoint, TrendTooltipLabels
+from app.usage_insights_ui import build_usage_insights_view
 from app.ui_icons import CircularProgress, Sparkline, create_icon
 from app.ui_settings import (
     LanguageController, load_auto_refresh_enabled,
@@ -156,6 +157,7 @@ class Dashboard:
         self.trend_group = "tokens"
         self.trend_metric = "total"
         self.usage_window_kind = UsageWindowKind.TODAY
+        self.usage_insights_expanded = {"threads": False, "responses": False}
         self.observed_usage_summary: ObservedUsageSummary = unavailable_usage_summary(
             self.usage_window_kind,
             as_of_utc=datetime.now(timezone.utc),
@@ -1547,7 +1549,7 @@ class Dashboard:
         self.trend_chart.grid_remove()
 
         metrics = self._section_card(page)
-        metrics.grid(row=3, column=0, sticky="ew")
+        metrics.grid(row=3, column=0, sticky="ew", pady=(0, SPACE_3))
         metrics.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="trend_metric")
         self.trend_metric_vars = {
             key: tk.StringVar(master=self.root, value="—")
@@ -1568,6 +1570,148 @@ class Dashboard:
             ).grid(row=1, column=0, padx=SPACE_2, pady=(0, SPACE_2))
         self.trend_metrics_host = metrics
         self._layout_trend_metrics(1000)
+
+        self.usage_insights_card = self._build_usage_insights_card(page)
+        self.usage_insights_card.grid(row=4, column=0, sticky="ew")
+
+    def _build_usage_insights_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
+        card = self._section_card(parent)
+        card.grid_columnconfigure(0, weight=1)
+        header = ctk.CTkFrame(card, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_3, SPACE_1))
+        header.grid_columnconfigure(0, weight=1)
+        self.usage_insights_title_var = tk.StringVar(master=self.root, value="")
+        ctk.CTkLabel(
+            header,
+            textvariable=self.usage_insights_title_var,
+            font=SECTION_TITLE,
+            text_color=COLORS.primary_text,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        self.usage_insights_range_var = tk.StringVar(master=self.root, value="")
+        self.usage_insights_range_label = ctk.CTkLabel(
+            header,
+            textvariable=self.usage_insights_range_var,
+            font=CAPTION,
+            text_color=COLORS.accent,
+            fg_color=COLORS.accent_soft,
+            corner_radius=8,
+            padx=8,
+        )
+        self.usage_insights_range_label.grid(row=0, column=1, padx=(SPACE_3, 0))
+        self.usage_insights_state_var = tk.StringVar(master=self.root, value="")
+        self.usage_insights_state_label = ctk.CTkLabel(
+            card,
+            textvariable=self.usage_insights_state_var,
+            font=CAPTION,
+            text_color=COLORS.secondary_text,
+            anchor="w",
+            justify="left",
+        )
+        self.usage_insights_state_label.grid(
+            row=1, column=0, sticky="ew", padx=SPACE_4, pady=(0, SPACE_2),
+        )
+
+        self.usage_insights_sections: dict[str, dict[str, object]] = {}
+        for section_row, key in enumerate(("threads", "responses", "cache"), start=2):
+            group = ctk.CTkFrame(
+                card,
+                fg_color=COLORS.raised_surface,
+                corner_radius=CONTROL_RADIUS,
+                border_width=1,
+                border_color=COLORS.border,
+            )
+            group.grid(
+                row=section_row, column=0, sticky="ew",
+                padx=SPACE_3, pady=(0, SPACE_2),
+            )
+            group.grid_columnconfigure(0, weight=1)
+            section_header = ctk.CTkFrame(group, fg_color="transparent")
+            section_header.grid(
+                row=0, column=0, sticky="ew", padx=SPACE_3, pady=(SPACE_2, SPACE_1),
+            )
+            section_header.grid_columnconfigure(0, weight=1)
+            title_var = tk.StringVar(master=self.root, value="")
+            ctk.CTkLabel(
+                section_header,
+                textvariable=title_var,
+                font=BODY_STRONG,
+                text_color=COLORS.primary_text,
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew")
+            toggle = ctk.CTkButton(
+                section_header,
+                text="",
+                width=92,
+                height=26,
+                fg_color="transparent",
+                hover_color=COLORS.accent_soft,
+                text_color=COLORS.accent,
+                font=CAPTION,
+                command=lambda group_key=key: self._toggle_usage_insights_group(group_key),
+            )
+            toggle.grid(row=0, column=1, padx=(SPACE_2, 0))
+            rows: list[dict[str, object]] = []
+            for index in range(5 if key != "cache" else 3):
+                row_frame = ctk.CTkFrame(group, fg_color="transparent")
+                row_frame.grid(
+                    row=index + 1, column=0, sticky="ew",
+                    padx=SPACE_3, pady=(SPACE_1, SPACE_2),
+                )
+                row_frame.grid_columnconfigure(0, weight=1)
+                title = tk.StringVar(master=self.root, value="")
+                primary = tk.StringVar(master=self.root, value="")
+                details = tk.StringVar(master=self.root, value="")
+                coverage = tk.StringVar(master=self.root, value="")
+                ctk.CTkLabel(
+                    row_frame,
+                    textvariable=title,
+                    font=BODY_STRONG,
+                    text_color=COLORS.primary_text,
+                    anchor="w",
+                ).grid(row=0, column=0, sticky="ew")
+                ctk.CTkLabel(
+                    row_frame,
+                    textvariable=primary,
+                    font=BODY_STRONG,
+                    text_color=COLORS.accent,
+                    anchor="e",
+                ).grid(row=0, column=1, sticky="e", padx=(SPACE_3, 0))
+                details_label = ctk.CTkLabel(
+                    row_frame,
+                    textvariable=details,
+                    font=CAPTION,
+                    text_color=COLORS.secondary_text,
+                    anchor="w",
+                    justify="left",
+                )
+                details_label.grid(row=1, column=0, sticky="ew", pady=(SPACE_1, 0))
+                coverage_label = ctk.CTkLabel(
+                    row_frame,
+                    textvariable=coverage,
+                    font=CAPTION,
+                    text_color=COLORS.real,
+                    anchor="e",
+                )
+                coverage_label.grid(
+                    row=1, column=1, sticky="e", padx=(SPACE_3, 0), pady=(SPACE_1, 0),
+                )
+                rows.append({
+                    "frame": row_frame,
+                    "title": title,
+                    "primary": primary,
+                    "details": details,
+                    "details_label": details_label,
+                    "coverage": coverage,
+                    "coverage_label": coverage_label,
+                })
+            self.usage_insights_sections[key] = {
+                "frame": group,
+                "title": title_var,
+                "toggle": toggle,
+                "rows": rows,
+            }
+        return card
 
     def _layout_trend_metrics(self, content_width: int) -> None:
         columns = 4 if content_width >= 1_000 else 2
@@ -2146,6 +2290,7 @@ class Dashboard:
             self._render_observed_usage()
             self._render_trends()
             self._render_recommendations()
+        self._render_usage_insights()
         self._render_diagnostics()
         if hasattr(self, "mini_widget") and self.mini_widget.visible:
             self.mini_widget.update(
@@ -2484,6 +2629,7 @@ class Dashboard:
             local_timezone=None,
             error_code="history_query_pending",
         )
+        self._render_usage_insights()
         self.history_error = None
         request = (
             generation,
@@ -2549,6 +2695,7 @@ class Dashboard:
         if self.snapshot is not None:
             self.advisor_result = self._evaluate_advisor()
         self._render_observed_usage()
+        self._render_usage_insights()
         self._render_trends()
         self._render_advisor()
         self._render_recommendations()
@@ -2650,6 +2797,11 @@ class Dashboard:
             wrap = max(220, content_width - 64)
             self.observed_usage_coverage_label.configure(wraplength=wrap)
             self.observed_usage_disclaimer.configure(wraplength=wrap)
+        if hasattr(self, "usage_insights_sections"):
+            wrap = max(220, content_width - 280)
+            for section in self.usage_insights_sections.values():
+                for row in section["rows"]:
+                    row["details_label"].configure(wraplength=wrap)
 
     def _on_root_unmap(self, event: object) -> None:
         if (
@@ -2806,6 +2958,7 @@ class Dashboard:
         self._render_sessions(presentation, render_session_rows=render_session_rows)
         self._render_advisor()
         self._render_observed_usage()
+        self._render_usage_insights()
         self._render_safe_overview()
         self._render_status_recent(presentation)
         self._render_trends()
@@ -2886,6 +3039,13 @@ class Dashboard:
         self.usage_window_kind = scope
         self._schedule_trend_query()
         self._render_observed_usage()
+        self._render_usage_insights()
+
+    def _toggle_usage_insights_group(self, group: str) -> None:
+        if group not in self.usage_insights_expanded:
+            return
+        self.usage_insights_expanded[group] = not self.usage_insights_expanded[group]
+        self._render_usage_insights()
 
     def _change_trend_metric(self, label: str) -> None:
         metric = self.trend_metric_labels.get(label)
@@ -3253,6 +3413,62 @@ class Dashboard:
             translate("advisor_rules_body", self.language),
             parent=self.root,
         )
+
+    def _render_usage_insights(self) -> None:
+        if not hasattr(self, "usage_insights_sections"):
+            return
+        view = build_usage_insights_view(
+            self.observed_usage_summary.insights,
+            self.language,
+            expanded_threads=self.usage_insights_expanded["threads"],
+            expanded_responses=self.usage_insights_expanded["responses"],
+        )
+        self.usage_insights_title_var.set(view.title)
+        self.usage_insights_range_var.set(view.range_label)
+        self.usage_insights_state_var.set(view.state_text)
+        state_colors = {
+            "available": COLORS.real,
+            "partial": COLORS.orange,
+            "empty": COLORS.unknown,
+            "unavailable": COLORS.error,
+        }
+        self.usage_insights_state_label.configure(
+            text_color=state_colors[view.state_kind],
+        )
+        if view.state_text:
+            self.usage_insights_state_label.grid()
+        else:
+            self.usage_insights_state_label.grid_remove()
+
+        partial_text = translate("usage_insights_row_partial", self.language)
+        for section_view in view.sections:
+            section = self.usage_insights_sections[section_view.key]
+            section["title"].set(section_view.title)
+            section["toggle"].configure(text=section_view.toggle_text)
+            if section_view.can_expand:
+                section["toggle"].grid()
+            else:
+                section["toggle"].grid_remove()
+            for row_widget in section["rows"]:
+                for key in ("title", "primary", "details", "coverage"):
+                    row_widget[key].set("")
+                row_widget["frame"].grid_remove()
+            for row_widget, row_view in zip(section["rows"], section_view.rows):
+                row_widget["title"].set(row_view.title)
+                row_widget["primary"].set(row_view.primary)
+                row_widget["details"].set(row_view.details)
+                row_widget["coverage"].set(row_view.coverage)
+                row_widget["coverage_label"].configure(
+                    text_color=(
+                        COLORS.orange
+                        if row_view.coverage == partial_text else COLORS.real
+                    ),
+                )
+                row_widget["frame"].grid()
+            if section_view.rows:
+                section["frame"].grid()
+            else:
+                section["frame"].grid_remove()
 
     def _render_observed_usage(self) -> None:
         if not hasattr(self, "observed_usage_metric_widgets"):

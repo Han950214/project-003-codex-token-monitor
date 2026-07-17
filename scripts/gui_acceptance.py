@@ -66,6 +66,13 @@ SCENARIOS = (
     "observed_usage_unavailable",
 )
 QA_THREAD_ID = "qa-thread-001"
+QA_INSIGHT_THREAD_IDS = (
+    "sha256:" + "1" * 56 + "aaabcdef",
+    "sha256:" + "2" * 56 + "bbabcdef",
+    "sha256:" + "3" * 64,
+    "sha256:" + "4" * 64,
+    "sha256:" + "5" * 64,
+)
 
 
 @dataclass(frozen=True)
@@ -169,6 +176,7 @@ def _token_observation(
     source_observed_at: datetime,
     source_type: str = "dashboard",
     source_status: str = "exact",
+    thread_safe_id: str = QA_THREAD_ID,
     response_safe_id: str | None = None,
     stale: bool = False,
     input_tokens: int | None = 1_200,
@@ -187,9 +195,9 @@ def _token_observation(
         sampled_at=sampled_at,
         source_observed_at=source_observed_at,
         quota_observed_at=five_hour_last_seen_at,
-        thread_safe_id=QA_THREAD_ID,
+        thread_safe_id=thread_safe_id,
         response_safe_id=make_response_safe_id(
-            QA_THREAD_ID,
+            thread_safe_id,
             response_safe_id or (
                 f"qa-response-{int(source_observed_at.timestamp() * 1_000_000)}"
             ),
@@ -450,22 +458,33 @@ def build_scenario(
         outcomes = (inserted_mini, inserted_dashboard)
 
     elif name == "observed_usage_complete":
-        outcomes = tuple(store.record(_token_observation(
+        retained_before_window = store.record(_token_observation(
+            sampled_at=current - timedelta(hours=6),
+            source_observed_at=current - timedelta(hours=6),
+            thread_safe_id=QA_THREAD_ID,
+            response_safe_id="qa-before-window",
+            input_tokens=80,
+            output_tokens=20,
+            total_tokens=100,
+            cached_tokens=40,
+            reasoning_tokens=10,
+        ))
+        outcomes = (retained_before_window,) + tuple(store.record(_token_observation(
             sampled_at=observed,
             source_observed_at=observed,
+            thread_safe_id=QA_INSIGHT_THREAD_IDS[index],
+            response_safe_id=f"qa-insight-response-{index}",
             input_tokens=1_000 + index * 100,
-            output_tokens=200,
-            total_tokens=1_200 + index * 100,
-            cached_tokens=500,
-            reasoning_tokens=80,
-        )) for index, observed in enumerate((
-            current - timedelta(hours=6),
-            current - timedelta(hours=2),
-            current - timedelta(minutes=1),
-        )))
+            output_tokens=200 + index * 50,
+            total_tokens=1_200 + index * 150,
+            cached_tokens=100 + index * 100,
+            reasoning_tokens=80 + index * 10,
+        )) for index, observed in enumerate(
+            (current - timedelta(minutes=5 + index) for index in range(5))
+        ))
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
         advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
-        group, metric, page = "tokens", "total", "overview"
+        group, metric, page = "tokens", "total", "usage_trends"
 
     elif name == "observed_usage_partial":
         partial = _token_observation(
@@ -480,7 +499,7 @@ def build_scenario(
         outcomes = (store.record(partial),)
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
         advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
-        group, metric, page = "tokens", "total", "overview"
+        group, metric, page = "tokens", "total", "usage_trends"
 
     elif name in {"observed_usage_resolved", "observed_usage_in_progress"}:
         response = "qa-response-in-progress"
@@ -503,7 +522,7 @@ def build_scenario(
         )) for observed, status, total in lifecycle_rows)
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
         advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
-        group, metric, page = "tokens", "total", "overview"
+        group, metric, page = "tokens", "total", "usage_trends"
         resolved = name == "observed_usage_resolved"
         instruction = InstructionUsage(
             response,
@@ -526,7 +545,7 @@ def build_scenario(
     else:  # observed_usage_empty / observed_usage_unavailable
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
         advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
-        group, metric, page = "tokens", "total", "overview"
+        group, metric, page = "tokens", "total", "usage_trends"
         outcomes = ()
 
     usage_summary = store.summarize_usage(
@@ -585,6 +604,8 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
             translate("observed_usage_rolling_5h", dashboard.language)
         )
     dashboard._render_observed_usage()  # noqa: SLF001 - QA launcher
+    if hasattr(dashboard, "_render_usage_insights"):
+        dashboard._render_usage_insights()  # noqa: SLF001 - QA launcher
     dashboard._render_trends()  # noqa: SLF001 - QA launcher
     dashboard._render_advisor()  # noqa: SLF001 - QA launcher
     dashboard._render_recommendations()  # noqa: SLF001 - QA launcher
@@ -654,6 +675,30 @@ def _scroll_trends_to_end(dashboard: object) -> None:
     page._parent_canvas.yview_moveto(1.0)  # noqa: SLF001 - QA-only scroll hook
 
 
+def _scroll_trends_to_insights(dashboard: object) -> None:
+    """Align the usage-insights card with the top of the visible scroll area."""
+    card = dashboard.usage_insights_card
+    page = getattr(card, "master", None)
+    if page is None or not hasattr(page, "_parent_canvas"):
+        raise RuntimeError("Usage insights scroll container is unavailable")
+    canvas = page._parent_canvas  # noqa: SLF001 - QA-only scroll hook
+    canvas.update_idletasks()
+    scroll_region = canvas.bbox("all")
+    if scroll_region is None:
+        raise RuntimeError("Usage insights scroll region is unavailable")
+    total_height = max(1, scroll_region[3] - scroll_region[1])
+    viewport_height = max(1, canvas.winfo_height())
+    denominator = max(1, total_height - viewport_height)
+    current_offset = canvas.canvasy(0)
+    scaling_getter = getattr(card, "_get_widget_scaling", None)
+    widget_scaling = scaling_getter() if callable(scaling_getter) else 1.0
+    relative_card_y = (
+        card.winfo_rooty() - canvas.winfo_rooty()
+    ) / max(0.1, float(widget_scaling))
+    target_offset = current_offset + relative_card_y - 8
+    canvas.yview_moveto(min(1.0, max(0.0, target_offset / denominator)))
+
+
 def _scroll_overview_to_usage(dashboard: object) -> None:
     """Center the observed-usage card for deterministic overview screenshots."""
     page = dashboard.status_page
@@ -679,6 +724,16 @@ def _change_observed_window(dashboard: object, value: str) -> None:
     dashboard._change_usage_window(label)  # noqa: SLF001 - QA-only interaction hook
 
 
+def _cycle_observed_windows(dashboard: object) -> None:
+    for kind in (
+        UsageWindowKind.TODAY,
+        UsageWindowKind.ROLLING_5H,
+        UsageWindowKind.ROLLING_7D,
+        UsageWindowKind.ROLLING_30D,
+    ):
+        _change_observed_window(dashboard, kind.value)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--geometry", choices=GEOMETRIES, required=True)
@@ -690,12 +745,14 @@ def main() -> None:
     parser.add_argument("--metric", choices=("five_hour", "weekly"))
     parser.add_argument("--tooltip-index", choices=(0, 1, 2), type=int)
     parser.add_argument("--scroll-end", action="store_true")
+    parser.add_argument("--scroll-insights", action="store_true")
     parser.add_argument("--scroll-overview-usage", action="store_true")
     parser.add_argument("--scroll-overview-quota", action="store_true")
     parser.add_argument(
         "--observed-window",
         choices=tuple(kind.value for kind in UsageWindowKind),
     )
+    parser.add_argument("--cycle-observed-windows", action="store_true")
     parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--auto-close-ms", type=int, default=0)
     args = parser.parse_args()
@@ -758,6 +815,8 @@ def main() -> None:
                 root.after(250, lambda: _show_trend_tooltip(dashboard, args.tooltip_index))
             if args.scroll_end:
                 root.after(250, lambda: _scroll_trends_to_end(dashboard))
+            if args.scroll_insights:
+                root.after(250, lambda: _scroll_trends_to_insights(dashboard))
             if args.scroll_overview_usage:
                 root.after(250, lambda: _scroll_overview_to_usage(dashboard))
             if args.scroll_overview_quota:
@@ -767,8 +826,15 @@ def main() -> None:
                     250,
                     lambda: _change_observed_window(dashboard, args.observed_window),
                 )
+            if args.cycle_observed_windows:
+                root.after(250, lambda: _cycle_observed_windows(dashboard))
             if screenshot_path is not None:
-                root.after(500, lambda: _capture_window(root, screenshot_path))
+                delay = (
+                    1000
+                    if args.cycle_observed_windows or args.scroll_insights
+                    else 500
+                )
+                root.after(delay, lambda: _capture_window(root, screenshot_path))
 
         root.after(1200, stabilize_case)
     if args.auto_close_ms > 0:

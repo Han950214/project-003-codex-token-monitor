@@ -802,6 +802,291 @@ class UsageAggregationTests(unittest.TestCase):
         self.assertEqual(result.observed_response_count, 0)
 
 
+class UsageInsightsAggregationTests(unittest.TestCase):
+    def test_high_usage_rankings_reuse_canonical_terminal_once(self):
+        response_a = "shared-response"
+        records = (
+            usage_record(
+                at=NOW - timedelta(minutes=8), thread="thread-a",
+                response=response_a, status="in_progress", total_tokens=9_000,
+                input_tokens=8_000, output_tokens=1_000, sample_id=1,
+            ),
+            usage_record(
+                at=NOW - timedelta(minutes=7), thread="thread-a",
+                response=response_a, status="completed_partial", total_tokens=400,
+                input_tokens=300, output_tokens=100, sample_id=2,
+            ),
+            usage_record(
+                at=NOW - timedelta(minutes=9), thread="thread-a",
+                response=response_a, status="exact", total_tokens=300,
+                input_tokens=200, output_tokens=100,
+                session_total_tokens=999_999, sample_id=3,
+            ),
+            usage_record(
+                at=NOW - timedelta(minutes=5), thread="thread-a",
+                response="second-a", total_tokens=200,
+                input_tokens=120, output_tokens=80,
+                session_total_tokens=888_888, sample_id=4,
+            ),
+            usage_record(
+                at=NOW - timedelta(minutes=4), thread="thread-b",
+                response="only-b", total_tokens=450,
+                input_tokens=300, output_tokens=150,
+                session_total_tokens=777_777, sample_id=5,
+            ),
+        )
+
+        insights = summarize(records).insights
+
+        self.assertEqual(
+            [(item.thread_safe_id, item.total_tokens, item.completed_response_count)
+             for item in insights.high_usage_threads],
+            [("thread-a", 500, 2), ("thread-b", 450, 1)],
+        )
+        self.assertEqual(
+            [item.total_tokens for item in insights.high_usage_responses],
+            [450, 300, 200],
+        )
+        self.assertEqual(
+            len({item.response_safe_id for item in insights.high_usage_responses}),
+            3,
+        )
+        self.assertNotEqual(insights.high_usage_responses[1].total_tokens, 400)
+
+    def test_high_usage_sort_is_stable_when_input_order_changes(self):
+        records = tuple(
+            usage_record(
+                at=NOW - timedelta(minutes=10),
+                thread=f"thread-{suffix}", response=f"response-{suffix}",
+                total_tokens=100, input_tokens=70, output_tokens=30,
+                sample_id=index,
+            )
+            for index, suffix in enumerate(("c", "a", "b"), start=1)
+        )
+
+        forward = summarize(records).insights
+        reverse = summarize(tuple(reversed(records))).insights
+
+        self.assertEqual(forward, reverse)
+        self.assertEqual(
+            [item.thread_safe_id for item in forward.high_usage_threads],
+            ["thread-a", "thread-b", "thread-c"],
+        )
+
+    def test_low_cache_reuse_is_weighted_and_missing_is_not_zero(self):
+        records = (
+            usage_record(
+                thread="thread-weighted", response="small", sample_id=1,
+                input_tokens=100, output_tokens=20, total_tokens=120,
+                cached_tokens=100,
+            ),
+            usage_record(
+                thread="thread-weighted", response="large", sample_id=2,
+                input_tokens=900, output_tokens=100, total_tokens=1_000,
+                cached_tokens=0,
+            ),
+            usage_record(
+                thread="thread-weighted", response="missing-cache", sample_id=3,
+                input_tokens=10_000, output_tokens=10, total_tokens=10_010,
+                cached_tokens=None,
+            ),
+            usage_record(
+                thread="thread-zero-input", response="zero", sample_id=4,
+                input_tokens=0, output_tokens=20, total_tokens=20,
+                cached_tokens=0,
+            ),
+            usage_record(
+                thread="thread-five-percent", response="five", sample_id=5,
+                input_tokens=200, output_tokens=20, total_tokens=220,
+                cached_tokens=10,
+            ),
+            usage_record(
+                thread="thread-twenty-percent", response="twenty", sample_id=6,
+                input_tokens=100, output_tokens=20, total_tokens=120,
+                cached_tokens=20,
+            ),
+            usage_record(
+                thread="thread-thirty-percent", response="thirty", sample_id=7,
+                input_tokens=100, output_tokens=20, total_tokens=120,
+                cached_tokens=30,
+            ),
+        )
+
+        items = summarize(records).insights.low_cache_reuse_threads
+
+        self.assertEqual(len(items), 3)
+        self.assertEqual(
+            [item.thread_safe_id for item in items],
+            ["thread-five-percent", "thread-weighted", "thread-twenty-percent"],
+        )
+        weighted = items[1]
+        self.assertAlmostEqual(weighted.cache_reuse, 100 / 1_000)
+        self.assertEqual(weighted.valid_input_tokens, 1_000)
+        self.assertEqual(weighted.valid_cached_tokens, 100)
+        self.assertEqual(weighted.valid_response_count, 2)
+        self.assertEqual(weighted.coverage_status, CoverageState.PARTIAL.value)
+        self.assertNotIn("thread-zero-input", {item.thread_safe_id for item in items})
+
+    def test_safe_thread_label_uses_digest_suffix_and_expands_collision(self):
+        first = "sha256:" + "1" * 56 + "aaABCDEF"
+        second = "sha256:" + "2" * 56 + "bbABCDEF"
+        records = (
+            usage_record(thread=first, response="one", sample_id=1),
+            usage_record(thread=second, response="two", sample_id=2),
+        )
+
+        items = summarize(records).insights.high_usage_threads
+
+        self.assertEqual(
+            {item.safe_thread_label for item in items},
+            {"AAABCDEF", "BBABCDEF"},
+        )
+        rendered = " ".join(item.safe_thread_label for item in items)
+        self.assertNotIn("sha256:", rendered)
+        self.assertNotIn(first, rendered)
+        self.assertNotIn(second, rendered)
+
+    def test_low_cache_ranking_does_not_require_total_tokens(self):
+        records = (
+            usage_record(
+                thread="thread-cache-only", response="cache-only", sample_id=1,
+                input_tokens=400, output_tokens=None, total_tokens=None,
+                cached_tokens=20, reasoning_tokens=None,
+                status="completed_partial",
+            ),
+            usage_record(
+                thread="thread-no-pair", response="no-pair", sample_id=2,
+                input_tokens=400, output_tokens=None, total_tokens=None,
+                cached_tokens=None, reasoning_tokens=None,
+                status="completed_partial",
+            ),
+        )
+
+        insights = summarize(records).insights
+
+        self.assertEqual(insights.high_usage_threads, ())
+        self.assertEqual(insights.high_usage_responses, ())
+        self.assertEqual(len(insights.low_cache_reuse_threads), 1)
+        item = insights.low_cache_reuse_threads[0]
+        self.assertEqual(item.thread_safe_id, "thread-cache-only")
+        self.assertAlmostEqual(item.cache_reuse, 0.05)
+        self.assertEqual(item.coverage_status, CoverageState.PARTIAL.value)
+
+    def test_high_usage_cache_reuse_excludes_responses_without_valid_total(self):
+        records = (
+            usage_record(
+                thread="thread-mixed", response="ranked", sample_id=1,
+                input_tokens=100, output_tokens=20, total_tokens=120,
+                cached_tokens=50,
+            ),
+            usage_record(
+                thread="thread-mixed", response="cache-only", sample_id=2,
+                input_tokens=900, output_tokens=None, total_tokens=None,
+                cached_tokens=0, reasoning_tokens=None,
+                status="completed_partial",
+            ),
+        )
+
+        insights = summarize(records).insights
+
+        high = insights.high_usage_threads[0]
+        self.assertEqual(high.completed_response_count, 1)
+        self.assertEqual(high.total_tokens, 120)
+        self.assertAlmostEqual(high.cache_reuse, 0.5)
+        low_cache = insights.low_cache_reuse_threads[0]
+        self.assertEqual(low_cache.valid_response_count, 2)
+        self.assertAlmostEqual(low_cache.cache_reuse, 0.05)
+
+    def test_old_v3_and_in_progress_are_excluded_but_partial_terminal_ranks(self):
+        legacy = usage_record(
+            thread="thread-legacy", response="legacy", total_tokens=9_000,
+            input_tokens=8_000, output_tokens=1_000, sample_id=1,
+        )
+        object.__setattr__(legacy, "response_safe_id", None)
+        records = (
+            legacy,
+            usage_record(
+                thread="thread-progress", response="progress",
+                status="in_progress", total_tokens=8_000,
+                input_tokens=7_000, output_tokens=1_000, sample_id=2,
+            ),
+            usage_record(
+                thread="thread-partial", response="partial",
+                status="completed_partial", total_tokens=70,
+                input_tokens=50, output_tokens=20, cached_tokens=None,
+                reasoning_tokens=None, sample_id=3,
+            ),
+        )
+
+        insights = summarize(records).insights
+
+        self.assertEqual(insights.coverage_status, CoverageState.PARTIAL)
+        self.assertEqual(
+            [item.thread_safe_id for item in insights.high_usage_threads],
+            ["thread-partial"],
+        )
+        self.assertEqual(len(insights.high_usage_responses), 1)
+        self.assertEqual(
+            insights.high_usage_responses[0].coverage_status,
+            CoverageState.PARTIAL.value,
+        )
+
+    def test_high_usage_top_five_and_all_existing_window_boundaries(self):
+        for scope in UsageWindowKind:
+            with self.subTest(scope=scope):
+                bounds = usage_window_bounds(
+                    scope, as_of_utc=NOW, local_timezone=timezone.utc,
+                )
+                boundary_records = (
+                    usage_record(
+                        at=bounds.start_utc, thread="thread-start",
+                        response=f"{scope.value}-start", total_tokens=10,
+                        input_tokens=6, output_tokens=4, sample_id=1,
+                    ),
+                    usage_record(
+                        at=bounds.end_utc, thread="thread-end",
+                        response=f"{scope.value}-end", total_tokens=20,
+                        input_tokens=12, output_tokens=8, sample_id=2,
+                    ),
+                    usage_record(
+                        at=bounds.start_utc - timedelta(microseconds=1),
+                        thread="thread-before", response=f"{scope.value}-before",
+                        total_tokens=30, input_tokens=18, output_tokens=12,
+                        sample_id=3,
+                    ),
+                    usage_record(
+                        at=bounds.end_utc + timedelta(microseconds=1),
+                        thread="thread-after", response=f"{scope.value}-after",
+                        total_tokens=40, input_tokens=24, output_tokens=16,
+                        sample_id=4,
+                    ),
+                )
+                result = summarize(boundary_records, scope)
+                self.assertEqual(result.insights.range_id, scope)
+                self.assertEqual(result.insights.range_start, bounds.start_utc)
+                self.assertEqual(result.insights.range_end, bounds.end_utc)
+                self.assertEqual(
+                    [item.thread_safe_id for item in result.insights.high_usage_threads],
+                    ["thread-end", "thread-start"],
+                )
+
+        records = tuple(
+            usage_record(
+                thread=f"thread-{index}", response=f"response-{index}",
+                total_tokens=index * 10, input_tokens=index * 6,
+                output_tokens=index * 4, sample_id=index,
+            )
+            for index in range(1, 8)
+        )
+        insights = summarize(records).insights
+        self.assertEqual(len(insights.high_usage_threads), 5)
+        self.assertEqual(len(insights.high_usage_responses), 5)
+        self.assertEqual(
+            [item.total_tokens for item in insights.high_usage_responses],
+            [70, 60, 50, 40, 30],
+        )
+
+
 class UsageHistorySummaryStoreTests(unittest.TestCase):
     def make_store(self, directory: str) -> UsageHistoryStore:
         return UsageHistoryStore(
@@ -1207,6 +1492,43 @@ class UsageHistorySummaryStoreTests(unittest.TestCase):
         self.assertNotIn(".fetchall()", source)
         self.assertIn("fetchmany(512)", source)
         self.assertIn("records_grouped_by_response=True", source)
+
+    def test_strict_usage_projection_does_not_read_session_total_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            self.assertTrue(store.record(self.observation(
+                at=NOW - timedelta(minutes=1),
+                session_total_tokens=999_999,
+            )))
+
+            def connect_without_session_total() -> sqlite3.Connection:
+                connection = sqlite3.connect(store.path)
+                connection.row_factory = sqlite3.Row
+
+                def authorize(
+                    action: int,
+                    _table: str | None,
+                    column: str | None,
+                    _database: str | None,
+                    _trigger: str | None,
+                ) -> int:
+                    if action == sqlite3.SQLITE_READ and column == "session_total_tokens":
+                        return sqlite3.SQLITE_DENY
+                    return sqlite3.SQLITE_OK
+
+                connection.set_authorizer(authorize)
+                return connection
+
+            store._connect = connect_without_session_total
+            result = store.summarize_usage(
+                UsageWindowKind.ROLLING_5H,
+                as_of_utc=NOW,
+                local_timezone=timezone.utc,
+            )
+
+            self.assertTrue(result.insights.source_available)
+            self.assertEqual(result.insights.high_usage_threads[0].total_tokens, 120)
+            self.assertEqual(result.insights.high_usage_responses[0].total_tokens, 120)
 
     def test_unavailable_store_returns_non_crashing_unavailable_summary(self):
         with tempfile.TemporaryDirectory() as directory:

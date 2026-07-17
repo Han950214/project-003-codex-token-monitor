@@ -6,6 +6,13 @@ Current boundary: the status center discovers multiple recent Codex Threads from
 
 关键边界：本项目不替代 AOS，不创建知识库、项目记忆或项目上下文，不扫描项目文件，也不读取或保存 Prompt、Response、消息、工具输出或 Reasoning 正文。“准备新线程”只解释数字风险、打开 Codex，并复制不含项目内容的通用手工交接模板。状态中心从 Rollout JSONL 读取安全数字元数据；`logs_2.sqlite` 仅保留为 legacy adapter。只读取 Reasoning Token 数量，不读取 Reasoning 内容。
 
+## Phase 3.1-D 高消耗定位与简明洞察
+
+- “用量趋势 / Usage Trends”复用 Phase 3.1-C 的范围与规范响应归并，在同一次后台历史查询中提供高消耗会话、高消耗响应和低缓存复用会话，不新增数据源、页面或主线程读取。
+- 高消耗会话与响应默认显示前三项，可在本地展开到前五项；低缓存复用固定显示前三项。排序结果只展示安全短标签和数值，不展示完整 Thread ID、响应身份、Prompt、标题、项目名或路径。
+- 缓存复用按会话有效 Input 与 Cached 数字加权计算；缺失 Cached 或 Input 为零的响应不参与比率。完整、有限、部分、无观测和不可用状态沿用已观测用量的覆盖说明，旧 v3 Token 行仍不进入严格排名。
+- 30 天 200,000 条规范响应、20,000 个会话的单次查询与聚合保持有界字段投影、`fetchmany` 和流式归并；界面只消费结果 DTO，不在 Tk 主线程重新查询、排序或去重。应用版本仍为 `0.1.0`。
+
 ## Phase 3.1-C 全局真实用量汇总与范围澄清
 
 - “当前指令 / Current response”继续使用最新可靠响应观测；“当前会话 / Current session”继续使用当前 Thread 权威累计数字，二者不从历史窗口反推。
