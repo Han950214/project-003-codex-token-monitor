@@ -351,10 +351,11 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
 
     def test_core_metric_layout_uses_wide_medium_and_narrow_columns(self):
         cases = {
-            1100: ((0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5)),
-            1000: ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)),
-            800: ((0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)),
-            320: ((0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0)),
+            1100: ((0, 0), (0, 1), (0, 2), (0, 3)),
+            1000: ((0, 0), (0, 1), (0, 2), (0, 3)),
+            800: ((0, 0), (0, 1), (0, 2), (0, 3)),
+            719: ((0, 0), (0, 1), (1, 0), (1, 1)),
+            320: ((0, 0), (1, 0), (2, 0), (3, 0)),
         }
         for width, expected in cases.items():
             with self.subTest(width=width):
@@ -394,12 +395,15 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
         usage_widths = []
         dashboard._layout_core_metrics = core_widths.append
         dashboard._layout_observed_usage = usage_widths.append
+        dashboard.snapshot = SimpleNamespace(
+            selection_mode="pinned", selected_session=object(),
+        )
 
         Dashboard._apply_status_layout(dashboard, 1_400)
 
         self.assertEqual(
             tuple(card.grid_calls[-1][1]["column"] for card in cards),
-            (0, 0, 0, 0, 1, 0, 1, 0),
+            (0, 0, 0, 1, 0, 0, 1, 0),
         )
         self.assertEqual(
             tuple(card.grid_calls[-1][1].get("columnspan", 1) for card in cards),
@@ -520,6 +524,24 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
                         logical_width - sidebar_width - (main_module.SPACE_4 * 2),
                     )],
                 )
+
+    def test_selected_card_reflow_uses_scaled_width_after_sidebar(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.root = FakeRoot(1_375, window_scaling=1.25)
+        dashboard._sidebar_collapsed = False
+
+        logical_width = Dashboard._logical_window_width(dashboard)
+        content_width = Dashboard._dashboard_content_width(
+            dashboard, logical_width,
+        )
+
+        self.assertEqual(logical_width, 1_100)
+        self.assertEqual(
+            content_width,
+            1_100 - 184 - (main_module.SPACE_4 * 2),
+        )
+        render_source = inspect.getsource(Dashboard._render_safe_overview)
+        self.assertIn("self._dashboard_content_width(window_width)", render_source)
 
     def test_recent_task_selection_pins_cached_snapshot_without_leaving_status_center(self):
         snapshot = object()
@@ -724,7 +746,7 @@ class Phase3AdvisorTests(unittest.TestCase):
         ))
         self.assertEqual(result.primary.status, "data_unavailable")
 
-    def test_view_quota_primary_action_routes_to_current_task_detail(self):
+    def test_view_quota_primary_action_routes_to_live_quota_overview(self):
         dashboard = object.__new__(Dashboard)
         dashboard.advisor_result = SimpleNamespace(
             primary=SimpleNamespace(primary_action="view_quota"),
@@ -734,7 +756,46 @@ class Phase3AdvisorTests(unittest.TestCase):
 
         Dashboard._execute_primary_action(dashboard)
 
-        self.assertEqual(pages, ["session_detail"])
+        self.assertEqual(pages, ["overview"])
+
+    def test_dashboard_advisor_uses_same_resolved_running_activity_as_ui_scope(self):
+        completed = SimpleNamespace(
+            thread_id="completed", instruction=InstructionUsage(
+                "done", "exact", TokenUsage(10, 2, 3, 0, 13), 1,
+                None, 0, 0, 0, True, False,
+            ),
+            thread_cumulative_usage=TokenUsage(10, 2, 3, 0, 13),
+            observed_at=NOW, status="exact", turn_count=1,
+        )
+        running = SimpleNamespace(
+            thread_id="running", instruction=InstructionUsage(
+                "live", "in_progress", TokenUsage(20, 4, 5, 0, 25), 1,
+                None, 0, 0, 0, False, True,
+            ),
+            thread_cumulative_usage=TokenUsage(20, 4, 5, 0, 25),
+            observed_at=NOW, status="in_progress", turn_count=2,
+        )
+        dashboard = object.__new__(Dashboard)
+        dashboard.snapshot = SimpleNamespace(
+            current_session=completed,
+            current_thread_id=completed.thread_id,
+            selected_session=completed,
+            selected_thread_id=completed.thread_id,
+            recent_sessions=(completed, running),
+            selection_mode="auto",
+            sessions_result=SimpleNamespace(refreshed_at=NOW),
+        )
+        dashboard.quota_snapshot = CodexQuotaSnapshot.unavailable(observed_at=NOW)
+        dashboard.trend_view = SimpleNamespace(samples=(), quota_samples=())
+        marker = object()
+        with (
+            patch.object(main_module, "build_advisor_input", return_value=marker) as build,
+            patch.object(main_module, "evaluate_advice", return_value=marker),
+        ):
+            self.assertIs(Dashboard._evaluate_advisor(dashboard), marker)
+
+        advisor_snapshot = build.call_args.args[0]
+        self.assertIs(advisor_snapshot.current_session, running)
 
     def test_stale_data_is_data_unavailable_status(self):
         result = evaluate_advice(advisor_input(data_age_seconds=round(DATA_STALE_AFTER.total_seconds()) + 1))
@@ -1027,7 +1088,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         source = inspect.getsource(Dashboard._build_status_advice)
         self.assertEqual(source.count("self.primary_action_button ="), 1)
 
-    def test_overview_builds_six_metrics_five_recent_and_four_quick_actions(self):
+    def test_overview_builds_four_non_quota_metrics_and_one_live_quota_region(self):
         dashboard = object.__new__(Dashboard)
         dashboard.root = object()
         dashboard.core_metric_widgets = []
@@ -1060,7 +1121,10 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             tuple(item["semantic"] for item in dashboard.core_metric_widgets),
             CORE_METRICS,
         )
-        self.assertEqual(len(dashboard.core_metric_widgets), 6)
+        self.assertEqual(len(dashboard.core_metric_widgets), 4)
+        self.assertFalse({
+            "five_hour_quota", "weekly_quota",
+        } & set(CORE_METRICS))
         self.assertTrue(all(
             item["card"].options["width"] == 128
             for item in dashboard.core_metric_widgets
@@ -1071,7 +1135,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         ))
         self.assertEqual(set(dashboard.quota_window_widgets), {"five", "week"})
         self.assertEqual(len(dashboard.quick_action_buttons), 4)
-        self.assertEqual(len(dashboard.status_recent_rows), 5)
+        self.assertEqual(len(dashboard.status_recent_rows), 3)
 
     def test_recent_task_text_regions_select_their_row(self):
         class ClickBindingWidget(FakeWidget):
@@ -1125,7 +1189,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         expected = {
             "core_metrics_current_active": ("当前运行任务", "Current active task"),
             "core_metrics_most_recent": ("最近活动任务", "Most recently active task"),
-            "observed_usage_title": ("所选时间用量", "Usage in selected period"),
+            "observed_usage_title": ("全部会话用量", "All-session usage"),
             "session_detail_title": ("选中会话", "Selected session"),
             "selected_session_cumulative": ("会话累计", "Session cumulative"),
             "selected_task_badge": ("已选中", "Selected"),
@@ -1155,6 +1219,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             selected_session=selected,
             selected_thread_id="B",
             recent_sessions=(current, selected),
+            selection_mode="pinned",
         )
         dashboard.quota_snapshot = CodexQuotaSnapshot.unavailable(observed_at=NOW)
         dashboard.simple_quota_vars = {
@@ -1202,7 +1267,11 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
 
         core = {item["semantic"]: item["value"].get() for item in dashboard.core_metric_widgets}
         self.assertEqual(core, {"current_turn": "100", "session_total": "1.0K"})
-        self.assertEqual(dashboard.simple_task_vars["title"].get(), "Session B")
+        selected_title = dashboard.simple_task_vars["title"].get()
+        self.assertIn("Historical session", selected_title)
+        self.assertIn("4 turns", selected_title)
+        self.assertIn("Anonymous code", selected_title)
+        self.assertNotIn("Session B", selected_title)
         self.assertEqual(dashboard.task_detail_vars["total"].get(), "200")
         self.assertEqual(dashboard.task_detail_vars["session"].get(), "2,000")
         self.assertEqual(dashboard.core_metrics_scope_var.get(), "Current active task")
@@ -1214,21 +1283,29 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             selected_session=selected_c,
             selected_thread_id="C",
             recent_sessions=(current, selected, selected_c),
+            selection_mode="pinned",
         )
 
         Dashboard._render_safe_overview(dashboard)
 
         core = {item["semantic"]: item["value"].get() for item in dashboard.core_metric_widgets}
         self.assertEqual(core, {"current_turn": "100", "session_total": "1.0K"})
-        self.assertEqual(dashboard.simple_task_vars["title"].get(), "Session C")
+        selected_title = dashboard.simple_task_vars["title"].get()
+        self.assertIn("Historical session", selected_title)
+        self.assertIn("Anonymous code", selected_title)
+        self.assertNotIn("Session C", selected_title)
         self.assertEqual(dashboard.task_detail_vars["total"].get(), "300")
         self.assertEqual(dashboard.task_detail_vars["session"].get(), "3,000")
 
     def test_recent_rows_distinguish_current_and_selected_badges(self):
         dashboard = object.__new__(Dashboard)
         dashboard.language = "en"
+        current = self._semantic_session("A", 100, 1_000, status="in_progress")
+        selected = self._semantic_session("B", 200, 2_000)
         dashboard.snapshot = SimpleNamespace(
-            current_thread_id="A", selected_thread_id="B",
+            current_session=current, current_thread_id="A",
+            selected_session=selected, selected_thread_id="B",
+            recent_sessions=(current, selected), selection_mode="pinned",
         )
         dashboard.status_recent_rows = []
         for _ in range(2):
@@ -1242,6 +1319,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             thread_id=thread_id, display_title=f"Session {thread_id}",
             full_title=f"Session {thread_id}", last_activity=NOW,
             thread_total_tokens=100, status="exact", turn_count=4,
+            title_source="safe timestamp fallback",
         ) for thread_id in ("A", "B"))
 
         Dashboard._render_status_recent(
@@ -1250,13 +1328,90 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
 
         self.assertEqual(dashboard.status_recent_rows[0]["current"].get(), "Current")
         self.assertEqual(dashboard.status_recent_rows[1]["current"].get(), "Selected")
+        self.assertIn("Running now", dashboard.status_recent_rows[0]["title"].get())
+        self.assertIn("Viewing", dashboard.status_recent_rows[1]["title"].get())
+        self.assertEqual(
+            dashboard.status_recent_rows[1]["title"].get().count("Viewing"), 1,
+        )
+        self.assertIn("Anonymous code", dashboard.status_recent_rows[0]["detail"].get())
+        self.assertNotIn("Session A", dashboard.status_recent_rows[0]["title"].get())
+
+    def test_mini_widget_uses_content_free_session_label(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.language = "en"
+        current = self._semantic_session("current-private-id", 100, 1_000, status="in_progress")
+        selected = replace(
+            self._semantic_session("selected-private-id", 200, 2_000),
+            display_title="Sensitive app-server title",
+            full_title="Sensitive full app-server title",
+        )
+        dashboard.snapshot = SimpleNamespace(
+            current_session=current,
+            current_thread_id=current.thread_id,
+            selected_session=selected,
+            selected_thread_id=selected.thread_id,
+            recent_sessions=(current, selected),
+            selection_mode="pinned",
+        )
+        dashboard._widget_thread_id = selected.thread_id
+
+        cached = Dashboard._cached_mini_snapshot(selected)
+        refreshed = Dashboard._safe_mini_snapshot(
+            dashboard,
+            replace(
+                cached,
+                title="Sensitive refreshed title",
+                full_title="Sensitive refreshed full title",
+            ),
+        )
+
+        self.assertIn("Historical session", refreshed.title)
+        self.assertIn("Viewing", refreshed.title)
+        self.assertIn("Anonymous code", refreshed.title)
+        self.assertEqual(refreshed.full_title, refreshed.title)
+        self.assertNotIn("Sensitive", refreshed.title)
+        self.assertNotIn(selected.thread_id, refreshed.title)
+        enter_source = inspect.getsource(Dashboard._enter_widget_mode)
+        self.assertIn("self._safe_mini_snapshot(", enter_source)
+
+    def test_saved_quota_samples_remain_usable_when_live_window_is_unavailable(self):
+        observed = datetime.now(timezone.utc)
+        quota_samples = tuple(
+            SimpleNamespace(
+                five_hour_observed_at=observed - timedelta(minutes=offset),
+                five_hour_available=True,
+                five_hour_used_percent=value,
+            )
+            for offset, value in ((2, 30.0), (1, 35.0))
+        )
+        view = TrendView(
+            7,
+            "available",
+            (),
+            observed,
+            quota_samples=quota_samples,
+            five_hour_last_seen_at=observed,
+            five_hour_available=False,
+        )
+
+        self.assertEqual(
+            Dashboard._trend_metric_quality(view, "five_hour", 2),
+            "available",
+        )
 
     def test_trend_preview_has_distinct_zero_one_and_two_sample_states(self):
         dashboard = object.__new__(Dashboard)
         dashboard.language = "en"
         dashboard.trend_metric = "total"
         dashboard.snapshot = SimpleNamespace(
-            selected_session=SimpleNamespace(turn_count=18),
+            current_session=None,
+            recent_sessions=(),
+            selected_session=SimpleNamespace(
+                thread_id="selected", turn_count=18,
+                status="exact", instruction=None,
+            ),
+            selected_thread_id="selected",
+            selection_mode="pinned",
         )
         dashboard.trend_quality_var = FakeVar()
         dashboard.trend_quality_message_var = FakeVar()
@@ -1292,12 +1447,15 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             )
             for index in range(2)
         )
+        dashboard.global_history_view = TrendView(
+            90, "available", samples, samples[-1].source_observed_at,
+        )
 
         dashboard.trend_view = TrendView(7, "empty", (), None)
         Dashboard._render_trends(dashboard)
-        self.assertEqual(
-            dashboard.trend_preview_message_var.get(),
-            "No saved completed responses exist in the current range.",
+        self.assertIn(
+            "selected session has no matching history",
+            dashboard.trend_quality_message_var.get(),
         )
         self.assertEqual(dashboard.trend_metric_vars["minimum"].get(), "—")
         self.assertEqual(dashboard.trend_metric_vars["maximum"].get(), "—")

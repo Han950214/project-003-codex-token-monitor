@@ -3,10 +3,15 @@ from __future__ import annotations
 import inspect
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock
 
+from app.codex_rollout import make_thread_safe_id
 from app.main import Dashboard
-from app.usage_insights_ui import build_usage_insights_view
+from app.usage_insights_ui import (
+    build_usage_insights_view,
+    find_session_thread_id,
+)
 from app.usage_summary import (
     CoverageState,
     HighUsageResponse,
@@ -108,6 +113,7 @@ class UsageInsightsPresentationTests(unittest.TestCase):
         self.assertTrue(collapsed.sections[1].can_expand)
         self.assertFalse(collapsed.sections[2].can_expand)
         self.assertEqual(collapsed.range_label, "Last 5 hours")
+        self.assertEqual(collapsed.scope_label, "All sessions")
 
     def test_rendered_text_is_bilingual_and_contains_no_full_safe_id(self):
         item = result(coverage=CoverageState.PARTIAL)
@@ -121,10 +127,10 @@ class UsageInsightsPresentationTests(unittest.TestCase):
         chinese_text = repr(chinese)
 
         self.assertIn("Highest usage sessions", english_text)
-        self.assertIn("Instruction", english_text)
+        self.assertIn("Completed response", english_text)
         self.assertIn("Some records have partial coverage", english_text)
         self.assertIn("高消耗会话", chinese_text)
-        self.assertIn("指令", chinese_text)
+        self.assertIn("已完成响应", chinese_text)
         self.assertIn("部分记录覆盖有限", chinese_text)
         for thread in item.high_usage_threads:
             self.assertNotIn(thread.thread_safe_id, english_text)
@@ -165,6 +171,51 @@ class UsageInsightsPresentationTests(unittest.TestCase):
         for view in (empty_view, pending_view, unavailable_view):
             self.assertTrue(all(not section.rows for section in view.sections))
 
+    def test_consumption_rank_uses_role_time_and_anonymous_code_as_secondary(self):
+        view = build_usage_insights_view(
+            result(item_count=1), "en",
+            expanded_threads=False, expanded_responses=False,
+        )
+        thread_row = view.sections[0].rows[0]
+        response_row = view.sections[1].rows[0]
+
+        self.assertEqual((thread_row.kind, thread_row.rank), ("thread", 1))
+        self.assertIn("Usage rank No. 1", thread_row.title)
+        self.assertIn("Last completed", thread_row.title)
+        self.assertIn("completed responses", thread_row.details)
+        self.assertIn("Anonymous code 000000", thread_row.details)
+        self.assertNotIn(thread_row.thread_safe_id, repr(thread_row))
+
+        self.assertEqual((response_row.kind, response_row.rank), ("response", 1))
+        self.assertIn("Usage rank No. 1", response_row.title)
+        self.assertIn("Response completed", response_row.title)
+        self.assertIn("Round unknown", response_row.details)
+        self.assertIn("Anonymous code 000000", response_row.details)
+        self.assertEqual(
+            response_row.thread_safe_id,
+            result(item_count=1).high_usage_responses[0].thread_safe_id,
+        )
+
+    def test_safe_ranking_identity_maps_only_to_an_in_memory_session(self):
+        raw_id = "thread-alpha"
+        safe_id = make_thread_safe_id(raw_id)
+        sessions = (
+            SimpleNamespace(thread_id="thread-beta"),
+            SimpleNamespace(thread_id=raw_id),
+        )
+
+        self.assertEqual(find_session_thread_id(safe_id, sessions), raw_id)
+        self.assertIsNone(
+            find_session_thread_id(
+                safe_id, (SimpleNamespace(thread_id=safe_id),),
+            ),
+        )
+        self.assertIsNone(
+            find_session_thread_id(
+                make_thread_safe_id("missing"), sessions,
+            ),
+        )
+
 
 class UsageInsightsDashboardContractTests(unittest.TestCase):
     def test_existing_trends_page_owns_card_and_shared_range_refresh(self):
@@ -195,6 +246,95 @@ class UsageInsightsDashboardContractTests(unittest.TestCase):
         Dashboard._toggle_usage_insights_group(dashboard, "cache")
         self.assertNotIn("cache", dashboard.usage_insights_expanded)
         self.assertEqual(dashboard._render_usage_insights.call_count, 1)
+
+    def test_ranking_location_selects_only_the_belonging_session(self):
+        raw_id = "thread-alpha"
+        selected_snapshot = object()
+        dashboard = Dashboard.__new__(Dashboard)
+        dashboard.language = "en"
+        dashboard.usage_insights_sections = {
+            "responses": {"rows": [{
+                "thread_safe_id": make_thread_safe_id(raw_id),
+                "kind": "response", "rank": 2,
+            }]},
+        }
+        dashboard.snapshot = SimpleNamespace(
+            recent_sessions=(SimpleNamespace(thread_id=raw_id),),
+        )
+        dashboard.view_model = Mock()
+        dashboard.view_model.select_cached_thread.return_value = selected_snapshot
+        dashboard._apply_cached_snapshot = Mock()
+        dashboard.task_detail_viewing_var = Mock()
+        dashboard.show_page = Mock()
+
+        Dashboard._locate_usage_insight(dashboard, "responses", 0)
+
+        dashboard.view_model.select_cached_thread.assert_called_once_with(raw_id)
+        dashboard._apply_cached_snapshot.assert_called_once_with(selected_snapshot)
+        dashboard.show_page.assert_called_once_with("session_detail")
+        origin = dashboard.task_detail_viewing_var.set.call_args.args[0]
+        self.assertIn("response usage ranking", origin)
+        self.assertIn("No. 2", origin)
+
+    def test_ranking_location_reuses_pinned_session_outside_recent_list(self):
+        raw_id = "thread-pinned-outside-recent"
+        pinned = SimpleNamespace(thread_id=raw_id, status="exact")
+        recent = SimpleNamespace(thread_id="thread-recent", status="exact")
+        snapshot = SimpleNamespace(
+            current_session=recent,
+            selected_session=pinned,
+            recent_sessions=(recent,),
+            selection_mode="pinned",
+        )
+        dashboard = Dashboard.__new__(Dashboard)
+        dashboard.language = "en"
+        dashboard.usage_insights_sections = {
+            "threads": {"rows": [{
+                "thread_safe_id": make_thread_safe_id(raw_id),
+                "kind": "thread", "rank": 3,
+            }]},
+        }
+        dashboard.snapshot = snapshot
+        dashboard.view_model = Mock()
+        dashboard.view_model.select_cached_thread.return_value = None
+        dashboard._apply_cached_snapshot = Mock()
+        dashboard.task_detail_viewing_var = Mock()
+        dashboard.show_page = Mock()
+
+        Dashboard._locate_usage_insight(dashboard, "threads", 0)
+
+        dashboard.view_model.select_cached_thread.assert_called_once_with(raw_id)
+        dashboard._apply_cached_snapshot.assert_called_once_with(snapshot)
+        dashboard.show_page.assert_called_once_with("session_detail")
+
+    def test_ranking_location_failure_stays_on_page_with_expand_fallback(self):
+        dashboard = Dashboard.__new__(Dashboard)
+        dashboard.language = "en"
+        dashboard.usage_insights_sections = {
+            "threads": {"rows": [{
+                "thread_safe_id": make_thread_safe_id("missing"),
+                "kind": "thread", "rank": 1,
+            }]},
+        }
+        dashboard.snapshot = SimpleNamespace(
+            recent_sessions=(SimpleNamespace(thread_id="loaded"),),
+        )
+        dashboard.view_model = Mock()
+        dashboard.usage_insights_state_var = Mock()
+        dashboard.usage_insights_state_label = Mock()
+        dashboard.usage_insights_primary_button = Mock()
+        dashboard.usage_insights_fallback_button = Mock()
+        dashboard.show_page = Mock()
+
+        Dashboard._locate_usage_insight(dashboard, "threads", 0)
+
+        dashboard.view_model.select_cached_thread.assert_not_called()
+        dashboard.show_page.assert_not_called()
+        message = dashboard.usage_insights_state_var.set.call_args.args[0]
+        self.assertIn("Unable to locate this session", message)
+        self.assertIn("no session is switched", message)
+        dashboard.usage_insights_primary_button.grid.assert_called_once_with()
+        dashboard.usage_insights_fallback_button.grid.assert_called_once_with()
 
 
 if __name__ == "__main__":

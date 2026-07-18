@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from app.codex_rollout import make_thread_safe_id
 from app.i18n import translate
 from app.ui_format import format_compact_token_count
 from app.usage_summary import CoverageState, UsageInsightsResult, UsageWindowKind
@@ -23,6 +24,9 @@ class UsageInsightRowView:
     primary: str
     details: str
     coverage: str
+    kind: str = ""
+    rank: int = 0
+    thread_safe_id: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,7 @@ class UsageInsightSectionView:
 @dataclass(frozen=True)
 class UsageInsightsView:
     title: str
+    scope_label: str
     range_label: str
     state_kind: str
     state_text: str
@@ -79,16 +84,16 @@ def build_usage_insights_view(
     thread_limit = 5 if expanded_threads else 3
     response_limit = 5 if expanded_responses else 3
     thread_rows = tuple(
-        _thread_row(item, language)
-        for item in result.high_usage_threads[:thread_limit]
+        _thread_row(item, rank, language)
+        for rank, item in enumerate(result.high_usage_threads[:thread_limit], 1)
     ) if available and has_rows else ()
     response_rows = tuple(
         _response_row(item, rank, language)
         for rank, item in enumerate(result.high_usage_responses[:response_limit], 1)
     ) if available and has_rows else ()
     cache_rows = tuple(
-        _cache_row(item, language)
-        for item in result.low_cache_reuse_threads[:3]
+        _cache_row(item, rank, language)
+        for rank, item in enumerate(result.low_cache_reuse_threads[:3], 1)
     ) if available and has_rows else ()
     sections = (
         _section(
@@ -106,6 +111,7 @@ def build_usage_insights_view(
     )
     return UsageInsightsView(
         title=translate("usage_insights_title", language),
+        scope_label=translate("all_sessions_scope", language),
         range_label=translate(_RANGE_LABEL_KEYS[result.range_id], language),
         state_kind=state_kind,
         state_text=state_text,
@@ -134,12 +140,12 @@ def _section(
     )
 
 
-def _thread_row(item: object, language: str) -> UsageInsightRowView:
+def _thread_row(item: object, rank: int, language: str) -> UsageInsightRowView:
     metrics = _metrics(item, language)
     return UsageInsightRowView(
         title=translate(
-            "usage_insights_session_label", language,
-            label=item.safe_thread_label, time=_time(item.last_observed_at),
+            "usage_insights_thread_rank_label", language,
+            rank=rank, time=_time(item.last_observed_at),
         ),
         primary=translate(
             "usage_insights_total_cache", language,
@@ -148,8 +154,12 @@ def _thread_row(item: object, language: str) -> UsageInsightRowView:
         details=translate(
             "usage_insights_thread_summary", language,
             metrics=metrics, count=item.completed_response_count,
+            label=item.safe_thread_label,
         ),
         coverage=_coverage(item.coverage_status, language),
+        kind="thread",
+        rank=rank,
+        thread_safe_id=item.thread_safe_id,
     )
 
 
@@ -157,7 +167,7 @@ def _response_row(item: object, rank: int, language: str) -> UsageInsightRowView
     metrics = _metrics(item, language)
     return UsageInsightRowView(
         title=translate(
-            "usage_insights_instruction_label", language,
+            "usage_insights_response_rank_label", language,
             time=_time(item.observed_at), rank=rank,
         ),
         primary=translate(
@@ -169,14 +179,17 @@ def _response_row(item: object, rank: int, language: str) -> UsageInsightRowView
             metrics=metrics, label=item.safe_thread_label,
         ),
         coverage=_coverage(item.coverage_status, language),
+        kind="response",
+        rank=rank,
+        thread_safe_id=item.thread_safe_id,
     )
 
 
-def _cache_row(item: object, language: str) -> UsageInsightRowView:
+def _cache_row(item: object, rank: int, language: str) -> UsageInsightRowView:
     return UsageInsightRowView(
         title=translate(
-            "usage_insights_session_label", language,
-            label=item.safe_thread_label, time=_time(item.last_observed_at),
+            "usage_insights_cache_rank_label", language,
+            rank=rank, time=_time(item.last_observed_at),
         ),
         primary=translate(
             "usage_insights_cache_only", language,
@@ -186,9 +199,12 @@ def _cache_row(item: object, language: str) -> UsageInsightRowView:
             "usage_insights_cache_summary", language,
             input=_tokens(item.valid_input_tokens),
             cached=_tokens(item.valid_cached_tokens),
-            count=item.valid_response_count,
+            count=item.valid_response_count, label=item.safe_thread_label,
         ),
         coverage=_coverage(item.coverage_status, language),
+        kind="cache",
+        rank=rank,
+        thread_safe_id=item.thread_safe_id,
     )
 
 
@@ -221,3 +237,20 @@ def _coverage(value: str, language: str) -> str:
         else "usage_insights_row_complete",
         language,
     )
+
+
+def find_session_thread_id(
+    thread_safe_id: str | None,
+    sessions: object,
+) -> str | None:
+    """Resolve one safe ranking identity against the current in-memory sessions."""
+
+    if not isinstance(thread_safe_id, str) or not thread_safe_id:
+        return None
+    for session in sessions:
+        raw_thread_id = getattr(session, "thread_id", None)
+        if not isinstance(raw_thread_id, str) or not raw_thread_id:
+            continue
+        if make_thread_safe_id(raw_thread_id) == thread_safe_id:
+            return raw_thread_id
+    return None

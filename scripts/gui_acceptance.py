@@ -31,6 +31,7 @@ from app.analytics_ui import TrendView, trend_view_from_query  # noqa: E402
 from app.codex_rollout import (  # noqa: E402
     CodexSessionUsage, InstructionUsage, RolloutSessionsResult,
     RolloutUsageResult, TokenUsage, make_response_safe_id,
+    make_thread_safe_id,
 )
 from app.dashboard import DashboardSnapshot  # noqa: E402
 from app.history import (  # noqa: E402
@@ -48,7 +49,10 @@ from app.usage_summary import (  # noqa: E402
     UsageWindowKind,
     unavailable_usage_summary,
 )
-from app.ui_presenter import present_dashboard  # noqa: E402
+from app.ui_presenter import (  # noqa: E402
+    HistoryEmptyState, build_history_state_view, build_quota_state_view,
+    build_ui_scope_contract, classify_quota_availability, present_dashboard,
+)
 
 
 GEOMETRIES = ("980x660", "1440x900")
@@ -98,6 +102,8 @@ class ScenarioResult:
     record_results: tuple[bool, ...]
     current_observed_at: datetime
     usage_summary: ObservedUsageSummary
+    selected_history_view: TrendView
+    global_history_view: TrendView
     selected_session: object | None = None
     current_session: object | None = None
     recent_sessions: tuple[object, ...] = ()
@@ -614,10 +620,14 @@ def build_scenario(
             else 1 if name == "semantic_selected_one_saved" else 2
         )
         outcomes = tuple(store.record(_token_observation(
-            sampled_at=current - timedelta(minutes=completed_count - index),
-            source_observed_at=current - timedelta(minutes=completed_count - index),
-            thread_safe_id=history_session.thread_id,
-            response_safe_id=f"qa-history-response-{index}",
+            sampled_at=(observed := current - timedelta(
+                minutes=completed_count - index,
+            )),
+            source_observed_at=observed,
+            thread_safe_id=make_thread_safe_id(history_session.thread_id),
+            response_safe_id=make_response_safe_id(
+                history_session.thread_id, f"qa-history-response-{index}",
+            ),
             input_tokens=1_200 + index * 300,
             output_tokens=400 + index * 100,
             total_tokens=1_600 + index * 400,
@@ -625,6 +635,9 @@ def build_scenario(
             reasoning_tokens=120 + index * 30,
             session_total_tokens=18_000,
             turn_count=18,
+            five_hour_remaining=60.0 - index,
+            five_hour_observed_at=observed,
+            five_hour_last_seen_at=observed,
         )) for index in range(completed_count))
         before = after = store.query(
             range_days, selected_session.thread_id, now=current,
@@ -651,6 +664,16 @@ def build_scenario(
             error_code="qa_history_unavailable",
         )
 
+    selected_history_filter = getattr(
+        selected_session, "thread_id", QA_THREAD_ID,
+    )
+    selected_history_view = trend_view_from_query(store.query(
+        90, selected_history_filter, now=current,
+    ))
+    global_history_view = trend_view_from_query(store.query(
+        90, None, now=current,
+    ))
+
     return ScenarioResult(
         name=name,
         store=store,
@@ -664,6 +687,8 @@ def build_scenario(
         record_results=outcomes,
         current_observed_at=current,
         usage_summary=usage_summary,
+        selected_history_view=selected_history_view,
+        global_history_view=global_history_view,
         selected_session=selected_session,
         current_session=current_session,
         recent_sessions=recent_sessions,
@@ -675,6 +700,8 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
 
     dashboard.trend_range_days = scenario.after.range_days
     dashboard.trend_view = scenario.trend_view
+    dashboard.selected_history_view = scenario.selected_history_view
+    dashboard.global_history_view = scenario.global_history_view
     dashboard.history_error = scenario.after.error_code
     dashboard.trend_group = scenario.trend_group
     dashboard.trend_metric = scenario.trend_metric
@@ -781,6 +808,272 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
             dashboard._render_sessions(dashboard.presentation)  # noqa: SLF001
             dashboard._render_trends()  # noqa: SLF001
     dashboard.show_page(page)
+
+
+def _assert_e1_state_widgets(
+    dashboard: object, scenario: ScenarioResult,
+) -> dict[str, bool]:
+    """Exercise actionable empty/quota contracts through real widgets."""
+
+    checks: dict[str, bool] = {}
+    saved_trend = dashboard.trend_view
+    saved_selected_history = dashboard.selected_history_view
+    saved_global_history = dashboard.global_history_view
+    saved_group = dashboard.trend_group
+    saved_metric = dashboard.trend_metric
+    saved_backfill = dashboard.history_backfill_status
+    saved_quota = dashboard.quota_snapshot
+
+    dashboard.show_page("usage_trends")
+    dashboard.trend_group = "tokens"
+    dashboard.trend_metric = "total"
+    dashboard.history_backfill_status = "idle"
+    dashboard.trend_view = TrendView(
+        7, "empty", (), scenario.current_observed_at,
+        queried_at=scenario.current_observed_at,
+    )
+    dashboard.selected_history_view = TrendView(
+        90, "empty", (), scenario.current_observed_at,
+        queried_at=scenario.current_observed_at,
+    )
+    dashboard.global_history_view = saved_global_history
+    dashboard._render_trends()  # noqa: SLF001 - real-widget state contract
+    history_view = build_history_state_view(
+        HistoryEmptyState.SELECTED_NO_HISTORY,
+    )
+    history_message = dashboard.trend_quality_message_var.get()
+    checks["history_empty_widget_reason_and_actions"] = bool(
+        dashboard.trend_quality_var.get()
+        == translate(history_view.title_key, dashboard.language)
+        and translate(history_view.reason_key, dashboard.language)
+        in history_message
+        and translate(history_view.realtime_impact_key, dashboard.language)
+        in history_message
+        and dashboard.trend_empty_action_kind
+        == history_view.primary_action.kind
+        and dashboard.trend_empty_fallback_kind
+        == history_view.fallback_action.kind
+        and dashboard.trend_metric_vars["current"].get() == "—"
+    )
+
+    available_quota = saved_quota
+    unavailable_five = QuotaWindow.unavailable(
+        QuotaKind.FIVE_HOUR,
+        scenario.current_observed_at,
+        "qa_safe_numbers",
+    )
+    unavailable_weekly = QuotaWindow.unavailable(
+        QuotaKind.WEEKLY,
+        scenario.current_observed_at,
+        "qa_safe_numbers",
+    )
+    no_live = CodexQuotaSnapshot(
+        unavailable_five,
+        unavailable_weekly,
+        scenario.current_observed_at,
+        "unavailable",
+    )
+    weekly_only = CodexQuotaSnapshot(
+        unavailable_five,
+        available_quota.weekly,
+        scenario.current_observed_at,
+        "partial",
+    )
+    stale_live = CodexQuotaSnapshot(
+        available_quota.five_hour.as_stale("qa_acceptance_stale"),
+        available_quota.weekly,
+        scenario.current_observed_at,
+        "stale",
+    )
+    no_history = TrendView(
+        90, "empty", (), scenario.current_observed_at,
+        queried_at=scenario.current_observed_at,
+    )
+    failed_history = TrendView(
+        90, "unavailable", (), None,
+        error_code="qa_history_unavailable",
+        queried_at=scenario.current_observed_at,
+    )
+    quota_cases = (
+        ("live_and_history", available_quota, saved_global_history, True),
+        ("live_only", available_quota, no_history, True),
+        ("history_only", no_live, saved_global_history, True),
+        ("weekly_only", weekly_only, no_history, True),
+        ("stale_live", stale_live, no_history, True),
+        ("unavailable", no_live, no_history, True),
+        ("unavailable", no_live, failed_history, False),
+    )
+    for index, (expected_state, quota, history, source_available) in enumerate(
+        quota_cases,
+    ):
+        dashboard.quota_snapshot = quota
+        dashboard.global_history_view = history
+        dashboard._render_safe_overview()  # noqa: SLF001 - real-widget matrix
+        contract = classify_quota_availability(
+            quota.five_hour.available,
+            quota.weekly.available,
+            bool(history.quota_samples),
+            quota.five_hour.stale or quota.weekly.stale,
+            history_source_available=source_available,
+        )
+        state_view = build_quota_state_view(contract)
+        message = dashboard.quota_availability_var.get()
+        checks[f"quota_widget_case_{index}_{expected_state}"] = bool(
+            contract.state.value == expected_state
+            and dashboard.quota_state_title_var.get()
+            == translate(state_view.title_key, dashboard.language)
+            and translate(state_view.reason_key, dashboard.language) in message
+            and translate(state_view.realtime_impact_key, dashboard.language)
+            in message
+            and dashboard.quota_primary_action_kind
+            == state_view.primary_action.kind
+            and dashboard.quota_fallback_action_kind
+            == (state_view.fallback_action.kind if state_view.fallback_action else "")
+        )
+
+    dashboard.trend_view = saved_trend
+    dashboard.selected_history_view = saved_selected_history
+    dashboard.global_history_view = saved_global_history
+    dashboard.trend_group = saved_group
+    dashboard.trend_metric = saved_metric
+    dashboard.history_backfill_status = saved_backfill
+    dashboard.quota_snapshot = saved_quota
+    dashboard._render_safe_overview()  # noqa: SLF001 - restore acceptance state
+    dashboard._render_trends()  # noqa: SLF001 - restore acceptance state
+    return checks
+
+
+def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
+    """Verify E1 user-visible semantics against the real widget tree."""
+
+    if scenario.name != "semantic_current_selected_history":
+        raise RuntimeError("E1 assertions require semantic_current_selected_history")
+    dashboard.root.update_idletasks()
+    checks: dict[str, bool] = {}
+    contract = build_ui_scope_contract(dashboard.snapshot)
+    checks["explicit_current_activity"] = (
+        contract.activity_scope.value == "current_activity"
+        and contract.activity_thread_id == scenario.current_session.thread_id
+    )
+    checks["pinned_selection_separate"] = (
+        contract.selected_is_pinned
+        and not contract.selected_is_activity
+        and contract.selected_thread_id == scenario.selected_session.thread_id
+    )
+    checks["advisor_scope_visible"] = translate(
+        "ui_scope_current_activity", dashboard.language,
+    ) in dashboard.status_meta_var.get()
+    semantics = tuple(
+        item["semantic"] for item in dashboard.core_metric_widgets
+    )
+    checks["four_non_quota_metrics"] = (
+        len(semantics) == 4
+        and "five_hour_quota" not in semantics
+        and "weekly_quota" not in semantics
+    )
+    checks["current_numbers_not_selected"] = (
+        dashboard.core_metric_widgets[0]["value"].get()
+        != dashboard.simple_task_vars["instruction"].get()
+    )
+    checks["single_live_quota_region"] = (
+        dashboard.quota_snapshot.five_hour.available
+        and dashboard.quota_snapshot.weekly.available
+        and bool(dashboard.quota_availability_var.get())
+    )
+    checks["quota_history_action"] = (
+        dashboard.quota_detail_button.cget("text")
+        == translate("view_local_quota_history", dashboard.language)
+    )
+    checks["global_summary_scope"] = translate(
+        "all_sessions_scope", dashboard.language,
+    ) in dashboard.observed_usage_coverage_var.get()
+    checks["global_ranking_scope"] = translate(
+        "all_sessions_scope", dashboard.language,
+    ) in dashboard.usage_insights_range_var.get()
+    checks["selected_card_visible"] = dashboard.task_summary_card.winfo_ismapped()
+    visible_advice_children = tuple(
+        child for child in dashboard.status_advice_card.winfo_children()
+        if child.winfo_ismapped()
+    )
+    advice_height = dashboard.status_advice_card.winfo_height()
+    advice_content_bottom = max(
+        child.winfo_y() + child.winfo_height()
+        for child in visible_advice_children
+    )
+    advice_blank_tail = advice_height - advice_content_bottom
+    checks["compact_advice_card"] = advice_blank_tail <= 48
+    visible_core_cards = tuple(
+        item["card"] for item in dashboard.core_metric_widgets
+        if item["card"].winfo_ismapped()
+    )
+    core_right = max(
+        card.winfo_x() + card.winfo_width() for card in visible_core_cards
+    )
+    checks["core_metrics_fill_row"] = (
+        dashboard.core_cards_frame.winfo_width() - core_right <= 16
+    )
+    checks["six_primary_navigation_items"] = tuple(
+        dashboard.nav_buttons
+    ) == (
+        "overview", "sessions", "usage_trends",
+        "recommendations", "tools", "settings",
+    )
+    checks["recommendations_page_preserved"] = len(
+        dashboard.recommendation_cards,
+    ) == 5
+    checks.update(_assert_e1_state_widgets(dashboard, scenario))
+    ranking_rows = dashboard.usage_insights_sections["threads"]["rows"]
+    visible_ranking = next((
+        row for row in ranking_rows if row["thread_safe_id"] is not None
+    ), None)
+    ranking_text = "" if visible_ranking is None else " ".join((
+        visible_ranking["title"].get(), visible_ranking["details"].get(),
+    ))
+    checks["ranking_is_explicit_and_safe"] = bool(
+        visible_ranking is not None
+        and "#1" not in ranking_text
+        and translate("locate_session", dashboard.language)
+        == visible_ranking["locate_button"].cget("text")
+        and scenario.current_session.thread_id not in ranking_text
+        and scenario.selected_session.thread_id not in ranking_text
+    )
+    if visible_ranking is not None:
+        dashboard.show_page("usage_trends")
+        visible_ranking["locate_button"].invoke()
+        dashboard.root.update_idletasks()
+        expected_origin = translate(
+            "ranking_session_origin",
+            dashboard.language,
+            kind=translate("ranking_session_kind", dashboard.language),
+            rank=visible_ranking["rank"] or "—",
+        )
+        checks["ranking_visible_action_locates_session"] = bool(
+            dashboard.current_nav_page == "session_detail"
+            and dashboard.snapshot.selected_thread_id
+            == scenario.selected_session.thread_id
+            and dashboard.task_detail_viewing_var.get() == expected_origin
+        )
+    else:
+        checks["ranking_visible_action_locates_session"] = False
+    dashboard.show_page("overview")
+    dashboard.quota_detail_button.invoke()
+    dashboard.root.update_idletasks()
+    checks["quota_visible_action_routes_history"] = bool(
+        dashboard.current_nav_page == "usage_trends"
+        and dashboard.trend_group == "quota"
+    )
+    dashboard.show_page("recommendations")
+    dashboard._execute_ui_action("view_quota")  # noqa: SLF001 - QA action path
+    checks["quota_action_routes_overview"] = dashboard.current_nav_page == "overview"
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise RuntimeError(f"E1 GUI acceptance failed: {', '.join(failed)}")
+    print(
+        "E1_GUI_ACCEPTANCE_OK "
+        f"checks={len(checks)} scenario={scenario.name} language={dashboard.language} "
+        f"advice_height={advice_height} advice_blank_tail={advice_blank_tail}",
+        flush=True,
+    )
 
 
 def _show_trend_tooltip(dashboard: object, point_index: int) -> None:
@@ -905,7 +1198,8 @@ def main() -> None:
         choices=tuple(kind.value for kind in UsageWindowKind),
     )
     parser.add_argument("--cycle-observed-windows", action="store_true")
-    parser.add_argument("--click-recent-index", choices=range(5), type=int)
+    parser.add_argument("--click-recent-index", choices=range(3), type=int)
+    parser.add_argument("--assert-e1", action="store_true")
     parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--auto-close-ms", type=int, default=0)
     args = parser.parse_args()
@@ -964,6 +1258,9 @@ def main() -> None:
 
         def stabilize_case() -> None:
             _apply_scenario(dashboard, scenario, args.page or scenario.default_page)
+            root.update_idletasks()
+            if args.assert_e1:
+                _assert_e1_dashboard(dashboard, scenario)
             if args.tooltip_index is not None:
                 root.after(250, lambda: _show_trend_tooltip(dashboard, args.tooltip_index))
             if args.scroll_end:
