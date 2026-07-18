@@ -159,7 +159,7 @@ class UsageInsightsResult:
     low_cache_reuse_threads: tuple[LowCacheReuseThread, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ObservedUsageRecord:
     """One safe local row projected for response-level aggregation."""
 
@@ -189,6 +189,8 @@ class ObservedUsageRecord:
         for field_name in ("source_observed_at", "recorded_at"):
             value = getattr(self, field_name)
             if value is None:
+                continue
+            if value.tzinfo is timezone.utc:
                 continue
             if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError(f"{field_name}_timezone_required")
@@ -332,7 +334,7 @@ class _SummaryAccumulator:
     cache_invalid: int = 0
     response_count: int = 0
     covered_thread_count: int = 0
-    last_thread_id: str | None = None
+    covered_thread_ids: set[str] = field(default_factory=set)
     thread_eligible: int = 0
     thread_missing: int = 0
     first: datetime | None = None
@@ -341,10 +343,13 @@ class _SummaryAccumulator:
     latest_stale: bool = False
     partial_terminal_count: int = 0
 
-    def add(self, record: ObservedUsageRecord) -> None:
+    def add(
+        self,
+        record: ObservedUsageRecord,
+        states: dict[str, tuple[str, int | None]],
+    ) -> None:
         observed_at = record.source_observed_at
         assert observed_at is not None
-        states = _normalized_metric_states(record)
         for name, (state, item) in states.items():
             self.metrics[name].add(state, item)
         input_state, input_value = states["input_tokens"]
@@ -359,14 +364,11 @@ class _SummaryAccumulator:
             self.cached_sum += cached_value
             self.cache_eligible += 1
         self.response_count += 1
-        if _valid_safe_identifier(record.thread_safe_id):
-            assert record.thread_safe_id is not None
-            if record.thread_safe_id != self.last_thread_id:
-                self.covered_thread_count += 1
-                self.last_thread_id = record.thread_safe_id
-            self.thread_eligible += 1
-        else:
-            self.thread_missing += 1
+        assert record.thread_safe_id is not None
+        if record.thread_safe_id not in self.covered_thread_ids:
+            self.covered_thread_ids.add(record.thread_safe_id)
+            self.covered_thread_count += 1
+        self.thread_eligible += 1
         self.first = observed_at if self.first is None else min(self.first, observed_at)
         self.last = observed_at if self.last is None else max(self.last, observed_at)
         latest_key = (observed_at, record.sample_id)
@@ -414,49 +416,24 @@ class _ThreadUsageAccumulator:
     cache_partial: bool = False
     partial: bool = False
 
-    def add_high(
+    def add(
         self,
         record: ObservedUsageRecord,
         states: dict[str, tuple[str, int | None]],
+        *,
+        include_high_usage: bool,
     ) -> None:
         observed_at = record.source_observed_at
         assert observed_at is not None
-        for name, (state, value) in states.items():
-            self.metrics[name].add(state, value)
-        self.completed_response_count += 1
-        self.first = observed_at if self.first is None else min(self.first, observed_at)
-        self.last = observed_at if self.last is None else max(self.last, observed_at)
         input_state, input_value = states["input_tokens"]
         cached_state, cached_value = states["cached_tokens"]
-        if (
+        cache_pair_eligible = (
             input_state == cached_state == "eligible"
             and input_value is not None
             and cached_value is not None
             and input_value > 0
-        ):
-            self.ranked_cache_input_sum += input_value
-            self.ranked_cache_cached_sum += cached_value
-            self.ranked_cache_pair_count += 1
-        self.partial = self.partial or (
-            record.source_status.casefold() == _PARTIAL_TERMINAL_STATUS
-            or any(state != "eligible" for state, _value in states.values())
         )
-
-    def add_cache(
-        self,
-        record: ObservedUsageRecord,
-        states: dict[str, tuple[str, int | None]],
-    ) -> None:
-        observed_at = record.source_observed_at
-        assert observed_at is not None
-        input_state, input_value = states["input_tokens"]
-        cached_state, cached_value = states["cached_tokens"]
-        if (
-            input_state == cached_state == "eligible"
-            and input_value is not None
-            and cached_value is not None
-            and input_value > 0
-        ):
+        if cache_pair_eligible:
             self.cache_input_sum += input_value
             self.cache_cached_sum += cached_value
             self.cache_pair_count += 1
@@ -470,8 +447,27 @@ class _ThreadUsageAccumulator:
             )
         elif input_state != "eligible" or cached_state != "eligible":
             self.cache_partial = True
-        if record.source_status.casefold() == _PARTIAL_TERMINAL_STATUS:
+        partial_terminal = (
+            record.source_status.casefold() == _PARTIAL_TERMINAL_STATUS
+        )
+        if partial_terminal:
             self.cache_partial = True
+        if not include_high_usage:
+            return
+        for name, (state, value) in states.items():
+            self.metrics[name].add(state, value)
+        self.completed_response_count += 1
+        self.first = observed_at if self.first is None else min(self.first, observed_at)
+        self.last = observed_at if self.last is None else max(self.last, observed_at)
+        if (
+            cache_pair_eligible
+        ):
+            self.ranked_cache_input_sum += input_value
+            self.ranked_cache_cached_sum += cached_value
+            self.ranked_cache_pair_count += 1
+        self.partial = self.partial or partial_terminal or any(
+            state != "eligible" for state, _value in states.values()
+        )
 
     def freeze(self, thread_safe_id: str) -> HighUsageThread:
         assert self.first is not None and self.last is not None
@@ -531,20 +527,36 @@ class _UsageInsightsAccumulator:
     threads: dict[str, _ThreadUsageAccumulator] = field(default_factory=dict)
     responses: list[HighUsageResponse] = field(default_factory=list)
 
-    def add(self, record: ObservedUsageRecord) -> None:
+    def add(
+        self,
+        record: ObservedUsageRecord,
+        states: dict[str, tuple[str, int | None]],
+    ) -> None:
         assert record.thread_safe_id is not None
         assert record.response_safe_id is not None
         assert record.source_observed_at is not None
-        states = _normalized_metric_states(record)
-        thread = self.threads.setdefault(
-            record.thread_safe_id,
-            _ThreadUsageAccumulator(),
-        )
-        thread.add_cache(record, states)
+        thread = self.threads.get(record.thread_safe_id)
+        if thread is None:
+            thread = _ThreadUsageAccumulator()
+            self.threads[record.thread_safe_id] = thread
         total_state, total_value = states["total_tokens"]
-        if total_state != "eligible" or total_value is None:
+        total_eligible = total_state == "eligible" and total_value is not None
+        thread.add(record, states, include_high_usage=total_eligible)
+        if not total_eligible:
             return
-        thread.add_high(record, states)
+        assert total_value is not None
+        if len(self.responses) >= 5:
+            cutoff = self.responses[-1]
+            if total_value < cutoff.total_tokens:
+                return
+            if total_value == cutoff.total_tokens:
+                if record.source_observed_at < cutoff.observed_at:
+                    return
+                if (
+                    record.source_observed_at == cutoff.observed_at
+                    and record.response_safe_id >= cutoff.response_safe_id
+                ):
+                    return
         input_state, input_value = states["input_tokens"]
         cached_state, cached_value = states["cached_tokens"]
         cache_reuse = (
@@ -559,7 +571,7 @@ class _UsageInsightsAccumulator:
             record.source_status.casefold() == _PARTIAL_TERMINAL_STATUS
             or any(state != "eligible" for state, _value in states.values())
         )
-        self.responses.append(HighUsageResponse(
+        candidate = HighUsageResponse(
             response_safe_id=record.response_safe_id,
             thread_safe_id=record.thread_safe_id,
             safe_thread_label="",
@@ -580,9 +592,13 @@ class _UsageInsightsAccumulator:
                 CoverageState.PARTIAL.value
                 if partial else CoverageState.COMPLETE_FOR_LOCAL_HISTORY.value
             ),
-        ))
-        self.responses.sort(key=_high_response_sort_key)
-        del self.responses[5:]
+        )
+        if len(self.responses) < 5:
+            self.responses.append(candidate)
+            self.responses.sort(key=_high_response_sort_key)
+        else:
+            self.responses[-1] = candidate
+            self.responses.sort(key=_high_response_sort_key)
 
     def freeze(
         self,
@@ -765,8 +781,9 @@ def aggregate_observed_usage(
             continue
         observed_at = record.source_observed_at
         if observed_at is not None and bounds.start_utc <= observed_at <= bounds.end_utc:
-            accumulator.add(record)
-            insights_accumulator.add(record)
+            states = _normalized_metric_states(record)
+            accumulator.add(record, states)
+            insights_accumulator.add(record, states)
 
     metrics = accumulator.frozen_metrics()
     cache_reuse = accumulator.frozen_cache_reuse()

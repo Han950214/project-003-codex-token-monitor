@@ -1486,7 +1486,7 @@ class UsageHistorySummaryStoreTests(unittest.TestCase):
 
         self.assertEqual(source.count("connection.execute("), 1)
         self.assertIn("_USAGE_SUMMARY_COLUMNS", source)
-        self.assertIn("ORDER BY thread_safe_id, response_safe_id", source)
+        self.assertIn("ORDER BY response_safe_id, thread_safe_id", source)
         self.assertNotIn("SELECT *", source)
         self.assertNotIn("last_seen_at_utc >=", source)
         self.assertNotIn(".fetchall()", source)

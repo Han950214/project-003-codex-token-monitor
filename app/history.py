@@ -18,6 +18,7 @@ from app.codex_rollout import (
     ResponseUsageCandidate,
     SafeRolloutScanMetadata,
     make_response_safe_id,
+    make_thread_safe_id,
 )
 from app.paths import history_db_path
 from app.usage_summary import (
@@ -144,7 +145,15 @@ class HistoryObservation:
             "weekly_last_seen_at", "weekly_reset_at",
         ):
             object.__setattr__(self, name, _aware_utc(getattr(self, name), name))
-        object.__setattr__(self, "thread_safe_id", _safe_identifier(self.thread_safe_id))
+        object.__setattr__(
+            self,
+            "thread_safe_id",
+            (
+                _safe_identifier(self.thread_safe_id)
+                if isinstance(self, HistorySample)
+                else _persisted_thread_safe_identifier(self.thread_safe_id)
+            ),
+        )
         object.__setattr__(
             self, "response_safe_id", _safe_response_identifier(self.response_safe_id),
         )
@@ -234,7 +243,7 @@ class HistoryObservation:
                 if source_session is not None else snapshot.rollout.observed_at
             ),
             quota_observed_at=quota.refreshed_at,
-            thread_safe_id=thread_id,
+            thread_safe_id=_persisted_thread_safe_identifier(thread_id),
             response_safe_id=make_response_safe_id(
                 thread_id, instruction.turn_id if instruction is not None else None,
             ),
@@ -293,7 +302,7 @@ class HistoryObservation:
             sampled_at=sampled_at or _utc_now(),
             source_observed_at=mini.observed_at,
             quota_observed_at=quota.refreshed_at,
-            thread_safe_id=thread_safe_id,
+            thread_safe_id=_persisted_thread_safe_identifier(thread_safe_id),
             response_safe_id=mini.response_safe_id,
             model_safe_id=model_safe_id,
             source_type="mini",
@@ -745,9 +754,28 @@ class UsageHistoryStore:
                     None if thread_safe_id is None
                     else _safe_identifier(thread_safe_id)
                 )
-                rows = _bounded_token_rows(connection, cutoff, safe_thread)
+                thread_aliases: tuple[str, ...] | None = None
+                if safe_thread is not None:
+                    hashed_thread = (
+                        safe_thread
+                        if _RESPONSE_SAFE_IDENTIFIER.fullmatch(safe_thread)
+                        else make_thread_safe_id(safe_thread)
+                    )
+                    thread_aliases = tuple(dict.fromkeys(
+                        item
+                        for item in (safe_thread, hashed_thread)
+                        if item is not None
+                    ))
+                rows = _bounded_token_rows(
+                    connection,
+                    cutoff,
+                    thread_aliases,
+                )
                 quota_rows = _bounded_quota_rows(connection)
-            samples = _thread_token_samples(rows)[-MAX_TREND_QUERY_ROWS:]
+            samples = _thread_token_samples(
+                rows,
+                canonical_thread_safe_id=safe_thread,
+            )[-MAX_TREND_QUERY_ROWS:]
             quota = _global_quota_projection(quota_rows, cutoff_at)
             self.last_error = None
             return _query_result(range_days, samples, quota, now)
@@ -782,10 +810,11 @@ class UsageHistoryStore:
             )
         try:
             with closing(self._connect()) as connection:
+                connection.row_factory = None
                 cursor = connection.execute(
                     f"SELECT {', '.join(_USAGE_SUMMARY_COLUMNS)} FROM {_TABLE} "
                     f"WHERE {_RESPONSE_PAYLOAD_PREDICATE} "
-                    "ORDER BY thread_safe_id, response_safe_id, "
+                    "ORDER BY response_safe_id, thread_safe_id, "
                     "source_observed_at_utc, sampled_at_utc, id",
                 )
 
@@ -795,7 +824,20 @@ class UsageHistoryStore:
                         if not batch:
                             return
                         for row in batch:
-                            yield _observed_usage_record_from_row(row)
+                            record = _observed_usage_record_from_row(row)
+                            if (
+                                record.thread_safe_id is not None
+                                and not _RESPONSE_SAFE_IDENTIFIER.fullmatch(
+                                    record.thread_safe_id
+                                )
+                            ):
+                                record = replace(
+                                    record,
+                                    thread_safe_id=make_thread_safe_id(
+                                        record.thread_safe_id
+                                    ),
+                                )
+                            yield record
 
                 summary = aggregate_observed_usage(
                     records(),
@@ -988,6 +1030,19 @@ class UsageHistoryStore:
                 f"ON {_TABLE}(thread_safe_id, response_safe_id, "
                 "source_observed_at_utc, sampled_at_utc, id)"
             )
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_response_identity "
+                f"ON {_TABLE}(response_safe_id, thread_safe_id, "
+                "source_observed_at_utc, sampled_at_utc, id)"
+            )
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_response_summary_v4 "
+                f"ON {_TABLE}(response_safe_id, thread_safe_id, "
+                "source_observed_at_utc, sampled_at_utc, id, model_safe_id, "
+                "source_type, source_status, source_available, token_stale, "
+                "input_tokens, output_tokens, total_tokens, cached_tokens, "
+                "reasoning_tokens, is_derived, legacy_unknown_time)"
+            )
             for prefix in ("five_hour", "weekly"):
                 connection.execute(
                     f"CREATE INDEX IF NOT EXISTS ix_{_TABLE}_{prefix}_event "
@@ -1069,6 +1124,10 @@ def _history_observation_from_candidate(
 ) -> HistoryObservation:
     if not isinstance(candidate, ResponseUsageCandidate):
         raise TypeError("response_usage_candidate_required")
+    if not _RESPONSE_SAFE_IDENTIFIER.fullmatch(candidate.thread_safe_id):
+        raise ValueError("thread_safe_id_invalid")
+    if not _RESPONSE_SAFE_IDENTIFIER.fullmatch(candidate.response_safe_id):
+        raise ValueError("response_safe_id_invalid")
     return HistoryObservation(
         sampled_at=sampled_at,
         source_observed_at=candidate.completion_time_utc,
@@ -1234,38 +1293,37 @@ def _sample_from_row(row: sqlite3.Row) -> HistorySample:
     )
 
 
-def _observed_usage_record_from_row(row: sqlite3.Row) -> ObservedUsageRecord:
-    observed_at, observed_invalid = _parse_utc_safely(row["source_observed_at_utc"])
-    recorded_at = _parse_utc_safely(row["sampled_at_utc"])[0]
+def _observed_usage_record_from_row(row: tuple[object, ...]) -> ObservedUsageRecord:
+    observed_at, observed_invalid = _parse_utc_safely(row[2])
+    recorded_at = _parse_utc_safely(row[1])[0]
     return ObservedUsageRecord(
         source_observed_at=observed_at,
         recorded_at=recorded_at,
         thread_safe_id=(
-            row["thread_safe_id"] if isinstance(row["thread_safe_id"], str) else None
+            row[3] if isinstance(row[3], str) else None
         ),
         response_safe_id=(
-            row["response_safe_id"]
-            if isinstance(row["response_safe_id"], str) else None
+            row[4] if isinstance(row[4], str) else None
         ),
         model_safe_id=(
-            row["model_safe_id"] if isinstance(row["model_safe_id"], str) else None
+            row[5] if isinstance(row[5], str) else None
         ),
-        source_type=str(row["source_type"] or "unknown"),
-        source_status=str(row["source_status"] or "unavailable"),
-        source_available=bool(row["source_available"]),
-        token_stale=bool(row["token_stale"]),
+        source_type=str(row[6] or "unknown"),
+        source_status=str(row[7] or "unavailable"),
+        source_available=bool(row[8]),
+        token_stale=bool(row[9]),
         token_stale_reason=None,
-        input_tokens=row["input_tokens"],
-        output_tokens=row["output_tokens"],
-        total_tokens=row["total_tokens"],
-        cached_tokens=row["cached_tokens"],
-        reasoning_tokens=row["reasoning_tokens"],
+        input_tokens=row[10],
+        output_tokens=row[11],
+        total_tokens=row[12],
+        cached_tokens=row[13],
+        reasoning_tokens=row[14],
         session_total_tokens=None,
-        is_derived=bool(row["is_derived"]),
-        legacy_unknown_time=bool(row["legacy_unknown_time"]),
+        is_derived=bool(row[15]),
+        legacy_unknown_time=bool(row[16]),
         observed_time_invalid=observed_invalid,
         stored_fingerprint="",
-        sample_id=int(row["id"]),
+        sample_id=int(row[0]),
     )
 
 
@@ -1275,7 +1333,11 @@ _TOKEN_FIELDS = (
 )
 
 
-def _thread_token_samples(rows: list[sqlite3.Row]) -> tuple[HistorySample, ...]:
+def _thread_token_samples(
+    rows: list[sqlite3.Row],
+    *,
+    canonical_thread_safe_id: str | None = None,
+) -> tuple[HistorySample, ...]:
     """Project combined rows into deterministic Thread Token observations."""
 
     groups: dict[tuple[object, ...], list[HistorySample]] = {}
@@ -1284,6 +1346,11 @@ def _thread_token_samples(rows: list[sqlite3.Row]) -> tuple[HistorySample, ...]:
         if sample.legacy_unknown_time or sample.source_observed_at is None:
             continue
         token = _token_only(sample)
+        if canonical_thread_safe_id is not None:
+            token = replace(
+                token,
+                thread_safe_id=canonical_thread_safe_id,
+            )
         key = (
             token.thread_safe_id,
             token.response_safe_id
@@ -1312,13 +1379,21 @@ def _thread_token_samples(rows: list[sqlite3.Row]) -> tuple[HistorySample, ...]:
 def _bounded_token_rows(
     connection: sqlite3.Connection,
     cutoff: str,
-    thread_safe_id: str | None,
+    thread_safe_ids: tuple[str, ...] | None,
 ) -> list[sqlite3.Row]:
     """Return bounded canonical v4 winners plus bounded legacy candidates."""
 
-    thread_clause = "" if thread_safe_id is None else "AND thread_safe_id IS ? "
+    thread_clause = (
+        ""
+        if thread_safe_ids is None
+        else "AND thread_safe_id IN ("
+        + ", ".join("?" for _item in thread_safe_ids)
+        + ") "
+    )
     common_parameters: tuple[object, ...] = (
-        (cutoff,) if thread_safe_id is None else (cutoff, thread_safe_id)
+        (cutoff,)
+        if thread_safe_ids is None
+        else (cutoff, *thread_safe_ids)
     )
     lifecycle_rank = (
         "CASE source_status WHEN 'exact' THEN 3 "
@@ -1985,7 +2060,9 @@ def _parse_utc(value: object) -> datetime | None:
         return None
     if not isinstance(value, str):
         raise ValueError("stored_datetime_invalid")
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is timezone.utc:
+        return parsed
     return _aware_utc(parsed, "stored_datetime")
 
 
@@ -2006,6 +2083,13 @@ def _safe_identifier(value: str | None) -> str | None:
         return normalized
     digest = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _persisted_thread_safe_identifier(value: str | None) -> str | None:
+    normalized = _safe_identifier(value)
+    if normalized is None or _RESPONSE_SAFE_IDENTIFIER.fullmatch(normalized):
+        return normalized
+    return make_thread_safe_id(normalized)
 
 
 def _safe_response_identifier(value: str | None) -> str | None:

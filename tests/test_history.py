@@ -8,7 +8,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.codex_rollout import InstructionUsage, TokenUsage, make_response_safe_id
+from app.codex_rollout import (
+    InstructionUsage,
+    TokenUsage,
+    make_response_safe_id,
+    make_thread_safe_id,
+)
 from app.analytics_ui import metric_samples, trend_view_from_query
 from app.dashboard import MiniThreadSnapshot
 from app.history import (
@@ -186,6 +191,10 @@ class HistorySchemaTests(unittest.TestCase):
             self.assertIn("response_safe_id", columns)
             self.assertIn("ux_usage_history_samples_fingerprint", indexes)
             self.assertIn("ix_usage_history_samples_response_observed", indexes)
+            self.assertIn(
+                "ix_usage_history_samples_response_summary_v4",
+                indexes,
+            )
 
     def test_v3_migration_adds_nullable_response_identity_without_guessing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -226,6 +235,10 @@ class HistorySchemaTests(unittest.TestCase):
             self.assertEqual(version, 4)
             self.assertEqual(row, (None, 321, "legacy-fingerprint"))
             self.assertIn("ix_usage_history_samples_response_observed", indexes)
+            self.assertIn(
+                "ix_usage_history_samples_response_summary_v4",
+                indexes,
+            )
 
     def test_existing_database_and_unrelated_data_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -566,7 +579,7 @@ class HistoryObservationTests(unittest.TestCase):
             snapshot, quota(), sampled_at=NOW,
         )
 
-        self.assertEqual(item.thread_safe_id, current.thread_id)
+        self.assertEqual(item.thread_safe_id, make_thread_safe_id(current.thread_id))
         self.assertEqual(
             item.response_safe_id,
             make_response_safe_id(current.thread_id, "turn-current"),
@@ -633,7 +646,7 @@ class HistoryObservationTests(unittest.TestCase):
             (100, 40, 5),
         )
         self.assertEqual((item.session_total_tokens, item.turn_count), (999, 4))
-        self.assertEqual(item.thread_safe_id, "thread-1")
+        self.assertEqual(item.thread_safe_id, make_thread_safe_id("thread-1"))
         self.assertEqual(
             item.response_safe_id, make_response_safe_id("thread-1", "turn-1"),
         )
@@ -648,6 +661,7 @@ class HistoryObservationTests(unittest.TestCase):
         )
         self.assertEqual((item.total_tokens, item.session_total_tokens), (120, 999))
         self.assertIsNone(item.input_tokens)
+        self.assertEqual(item.thread_safe_id, make_thread_safe_id("thread-1"))
         self.assertEqual(
             item.response_safe_id, make_response_safe_id("thread-1", "turn-1"),
         )
@@ -701,6 +715,12 @@ class HistoryObservationTests(unittest.TestCase):
         item = observation(thread=r"C:\Users\name\secret project")
         self.assertTrue(item.thread_safe_id.startswith("sha256:"))
         self.assertNotIn("secret", item.thread_safe_id)
+
+    def test_new_observation_hashes_valid_raw_thread_identity(self):
+        raw_thread_id = "123e4567-e89b-12d3-a456-426614174088"
+        item = observation(thread=raw_thread_id)
+        self.assertEqual(item.thread_safe_id, make_thread_safe_id(raw_thread_id))
+        self.assertNotIn(raw_thread_id, repr(item))
 
     def test_response_identity_rejects_raw_turn_identifiers(self):
         with self.assertRaisesRegex(ValueError, "response_safe_id_invalid"):

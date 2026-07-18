@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
+import logging
 import os
+import re
 import sqlite3
 import tempfile
 import threading
@@ -19,7 +22,7 @@ from app.codex_rollout import (
     ResponseUsageCandidate,
     make_response_safe_id,
 )
-from app.history import UsageHistoryStore
+from app.history import HistoryObservation, UsageHistoryStore
 from app.dashboard import (
     BACKFILL_MAX_SINGLE_FILE_BYTES,
     ResponseHistoryBackfillService,
@@ -27,6 +30,7 @@ from app.dashboard import (
 )
 from app.main import Dashboard, _new_backfill_history_store
 import app.dashboard as dashboard_module
+import app.codex_rollout as rollout_module
 from scripts.verify_d2_performance import run_verification
 
 
@@ -232,6 +236,65 @@ class ResponseHistoryBackfillTests(unittest.TestCase):
         self.assertEqual(trend.sample_count, 1)
         self.assertEqual(trend.samples[0].source_status, "exact")
         self.assertEqual(summary.observed_response_count, 1)
+
+    def test_hashed_backfill_deduplicates_existing_raw_thread_observation(self):
+        raw_thread_id = "123e4567-e89b-12d3-a456-426614174077"
+        response_id = make_response_safe_id(raw_thread_id, "turn-a")
+        assert response_id is not None
+        zero = usage(0, 0, 0, 0)
+        call = usage(10, 4, 2, 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_rollout(directory, [
+                event(
+                    "token_count", last=zero, total=zero,
+                    timestamp="2026-07-18T10:00:00Z",
+                    thread_id=raw_thread_id,
+                ),
+                event(
+                    "task_started", "turn-a",
+                    timestamp="2026-07-18T10:00:01Z",
+                    thread_id=raw_thread_id,
+                ),
+                event(
+                    "token_count", "turn-a", last=call, total=call,
+                    timestamp="2026-07-18T10:00:02Z",
+                    thread_id=raw_thread_id,
+                ),
+                event(
+                    "task_complete", "turn-a",
+                    timestamp="2026-07-18T10:00:03Z",
+                    thread_id=raw_thread_id,
+                ),
+            ])
+            store = UsageHistoryStore(
+                Path(directory) / "history.sqlite3",
+                clock=lambda: NOW,
+            )
+            self.assertTrue(store.initialize(), store.last_error)
+            self.assertTrue(store.record(HistoryObservation(
+                sampled_at=NOW,
+                source_observed_at=datetime(
+                    2026, 7, 18, 10, 0, 3, tzinfo=timezone.utc,
+                ),
+                thread_safe_id=raw_thread_id,
+                response_safe_id=response_id,
+                source_type="dashboard",
+                source_status="exact",
+                source_available=True,
+                input_tokens=10,
+                output_tokens=2,
+                total_tokens=12,
+                cached_tokens=4,
+                reasoning_tokens=1,
+            )))
+            store.record_completed_batch(
+                CodexRolloutReader().read_completed_batch(path),
+            )
+            summary = store.summarize_usage("rolling_7d", as_of_utc=NOW)
+
+        self.assertEqual(summary.observed_response_count, 1)
+        self.assertEqual(summary.total_tokens.value, 12)
+        self.assertEqual(len(summary.insights.high_usage_responses), 1)
 
     def test_missing_completion_time_falls_back_only_to_trusted_snapshot_time(self):
         zero = usage(0, 0, 0, 0)
@@ -470,16 +533,133 @@ class ResponseHistoryBackfillTests(unittest.TestCase):
         self.assertFalse(reader._parse_cache)
 
     def test_cross_thread_identity_is_scoped_without_exposing_raw_ids(self):
-        first = make_response_safe_id("safe-thread-a", "same-turn")
-        second = make_response_safe_id("safe-thread-b", "same-turn")
+        raw_a = "123e4567-e89b-12d3-a456-426614174000"
+        raw_b = "123e4567-e89b-12d3-a456-426614174001"
+        zero = usage(0, 0, 0, 0)
+        call = usage(10, 4, 2, 1)
 
-        self.assertIsNotNone(first)
-        self.assertIsNotNone(second)
-        self.assertNotEqual(first, second)
-        self.assertRegex(first or "", r"^sha256:[0-9a-f]{64}$")
+        def completed(thread_id: str) -> list[dict[str, object]]:
+            return [
+                event(
+                    "token_count", last=zero, total=zero,
+                    timestamp="2026-07-18T10:00:00Z", thread_id=thread_id,
+                ),
+                event(
+                    "task_started", "same-turn",
+                    timestamp="2026-07-18T10:00:01Z", thread_id=thread_id,
+                ),
+                event(
+                    "token_count", "same-turn", last=call, total=call,
+                    timestamp="2026-07-18T10:00:02Z", thread_id=thread_id,
+                ),
+                event(
+                    "task_complete", "same-turn",
+                    timestamp="2026-07-18T10:00:03Z", thread_id=thread_id,
+                ),
+            ]
+
+        with tempfile.TemporaryDirectory() as first_directory:
+            first_path = write_rollout(first_directory, completed(raw_a))
+            first_reader = CodexRolloutReader()
+            first = first_reader.read_completed_batch(first_path).responses[0]
+            refreshed = first_reader.read_completed_batch(first_path).responses[0]
+            restarted = CodexRolloutReader().read_completed_batch(
+                first_path,
+            ).responses[0]
+        with tempfile.TemporaryDirectory() as second_directory:
+            second_path = write_rollout(second_directory, completed(raw_b))
+            second = CodexRolloutReader().read_completed_batch(
+                second_path,
+            ).responses[0]
+
+        self.assertNotEqual(first.thread_safe_id, raw_a)
+        self.assertRegex(first.thread_safe_id, r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(
+            first.thread_safe_id,
+            rollout_module.make_thread_safe_id(raw_a),
+        )
+        self.assertEqual(first.thread_safe_id, refreshed.thread_safe_id)
+        self.assertEqual(first.thread_safe_id, restarted.thread_safe_id)
+        self.assertNotEqual(first.thread_safe_id, second.thread_safe_id)
+        self.assertNotEqual(first.response_safe_id, second.response_safe_id)
+
+    def test_response_candidate_rejects_unsafe_identity_and_invalid_usage(self):
+        valid = {
+            "thread_safe_id": "sha256:" + "1" * 64,
+            "response_safe_id": "sha256:" + "2" * 64,
+            "status": "exact",
+            "completion_time_utc": NOW,
+            "observation_time_utc": NOW,
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "total_tokens": 14,
+            "cached_input_tokens": 3,
+            "reasoning_tokens": 2,
+            "trusted_call_count": 1,
+        }
+        invalid_cases = (
+            ("thread_safe_id", "123e4567-e89b-12d3-a456-426614174000"),
+            ("response_safe_id", "response-raw"),
+            ("status", "in_progress"),
+            ("input_tokens", -1),
+            ("output_tokens", True),
+            ("total_tokens", 15),
+            ("cached_input_tokens", 11),
+            ("reasoning_tokens", 5),
+            ("trusted_call_count", -1),
+        )
+
+        for field_name, value in invalid_cases:
+            with self.subTest(field_name=field_name):
+                values = {**valid, field_name: value}
+                with self.assertRaises(ValueError):
+                    ResponseUsageCandidate(**values)
+
+    def test_history_batch_rejects_candidate_bypassing_dto_validation(self):
+        valid = ResponseUsageCandidate(
+            thread_safe_id="sha256:" + "1" * 64,
+            response_safe_id="sha256:" + "2" * 64,
+            status="exact",
+            completion_time_utc=NOW,
+            observation_time_utc=NOW,
+            input_tokens=10,
+            output_tokens=4,
+            total_tokens=14,
+            cached_input_tokens=3,
+            reasoning_tokens=2,
+            trusted_call_count=1,
+        )
+        unsafe = object.__new__(ResponseUsageCandidate)
+        for item in fields(ResponseUsageCandidate):
+            object.__setattr__(unsafe, item.name, getattr(valid, item.name))
+        object.__setattr__(
+            unsafe,
+            "thread_safe_id",
+            "123e4567-e89b-12d3-a456-426614174000",
+        )
+        batch = rollout_module.CompletedResponseUsageBatch(
+            (unsafe,),
+            rollout_module.SafeRolloutScanMetadata(
+                "sha256:" + "3" * 64,
+                100,
+                1,
+                1,
+                100,
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = UsageHistoryStore(
+                Path(directory) / "history.sqlite3",
+                clock=lambda: NOW,
+            )
+            self.assertTrue(store.initialize(), store.last_error)
+            with self.assertRaisesRegex(ValueError, "thread_safe_id_invalid"):
+                store.record_completed_batch(batch)
 
     def test_privacy_sentinel_never_reaches_dto_cache_database_or_metadata(self):
         sentinel = "D2_PRIVATE_SENTINEL_7f1b"
+        raw_thread_id = "123e4567-e89b-12d3-a456-426614174099"
         zero = usage(0, 0, 0, 0)
         call = usage(10, 4, 2, 1)
         forbidden = {
@@ -489,12 +669,33 @@ class ResponseHistoryBackfillTests(unittest.TestCase):
             "raw_payload", "payload", "raw_thread_id", "raw_turn_id",
             "rollout_path",
         }
+        log_stream = io.StringIO()
+        log_handler = logging.StreamHandler(log_stream)
+        root_logger = logging.getLogger()
+        root_logger.addHandler(log_handler)
+        self.addCleanup(root_logger.removeHandler, log_handler)
         with tempfile.TemporaryDirectory() as directory:
             events = [
-                event("token_count", last=zero, total=zero, timestamp="2026-07-18T10:00:00Z"),
-                event("task_started", "turn-a", timestamp="2026-07-18T10:00:01Z"),
-                event("token_count", "turn-a", last=call, total=call, timestamp="2026-07-18T10:00:02Z"),
-                event("task_complete", "turn-a", timestamp="2026-07-18T10:00:03Z"),
+                event(
+                    "token_count", last=zero, total=zero,
+                    timestamp="2026-07-18T10:00:00Z",
+                    thread_id=raw_thread_id,
+                ),
+                event(
+                    "task_started", "turn-a",
+                    timestamp="2026-07-18T10:00:01Z",
+                    thread_id=raw_thread_id,
+                ),
+                event(
+                    "token_count", "turn-a", last=call, total=call,
+                    timestamp="2026-07-18T10:00:02Z",
+                    thread_id=raw_thread_id,
+                ),
+                event(
+                    "task_complete", "turn-a",
+                    timestamp="2026-07-18T10:00:03Z",
+                    thread_id=raw_thread_id,
+                ),
             ]
             for item in events:
                 item["content"] = sentinel
@@ -514,6 +715,11 @@ class ResponseHistoryBackfillTests(unittest.TestCase):
             self.assertTrue(store.initialize(), store.last_error)
             store.record_completed_batch(batch)
             with closing(sqlite3.connect(database)) as connection:
+                stored_thread_ids = tuple(
+                    row[0] for row in connection.execute(
+                        "SELECT thread_safe_id FROM usage_history_samples"
+                    )
+                )
                 stored_text = "\n".join(
                     str(value)
                     for row in connection.execute(
@@ -526,6 +732,7 @@ class ResponseHistoryBackfillTests(unittest.TestCase):
                     for row in connection.execute("SELECT * FROM usage_history_meta")
                     for value in row
                 )
+        root_logger.removeHandler(log_handler)
 
         dto_text = json.dumps(asdict(batch), default=str, sort_keys=True)
         cache_text = repr(reader._parse_cache)
@@ -533,6 +740,30 @@ class ResponseHistoryBackfillTests(unittest.TestCase):
         self.assertNotIn(sentinel, cache_text)
         self.assertNotIn(sentinel, stored_text)
         self.assertNotIn(sentinel, metadata_text)
+        self.assertNotIn(raw_thread_id, dto_text)
+        self.assertNotIn(raw_thread_id, cache_text)
+        self.assertNotIn(raw_thread_id, stored_text)
+        self.assertNotIn(raw_thread_id, metadata_text)
+        self.assertNotIn(raw_thread_id, log_stream.getvalue())
+        self.assertTrue(stored_thread_ids)
+        self.assertTrue(all(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+            for value in stored_thread_ids
+        ))
+        with self.assertRaises(ValueError) as error:
+            ResponseUsageCandidate(
+                thread_safe_id=raw_thread_id,
+                response_safe_id="sha256:" + "2" * 64,
+                status="exact",
+                completion_time_utc=NOW,
+                observation_time_utc=NOW,
+                input_tokens=1,
+                output_tokens=1,
+                total_tokens=2,
+                cached_input_tokens=0,
+                reasoning_tokens=0,
+            )
+        self.assertNotIn(raw_thread_id, str(error.exception))
         self.assertEqual(
             forbidden.intersection(field.name for field in fields(ResponseUsageCandidate)),
             set(),
@@ -748,6 +979,13 @@ class ResponseHistoryBackfillTests(unittest.TestCase):
         self.assertTrue(result["backfill"]["cancel_resume"])
         self.assertEqual(result["history"]["history_rows"], 200)
         self.assertEqual(result["history"]["query_plan_verdict"], "bounded_indexed")
+        self.assertTrue(
+            result["history"]["latency_tracemalloc_disabled"],
+        )
+        self.assertGreaterEqual(result["history"]["latency_run_count"], 3)
+        self.assertLessEqual(result["history"]["median_ms"], 5_000)
+        self.assertLessEqual(result["history"]["trend_median_ms"], 1_000)
+        self.assertLessEqual(result["history"]["peak_memory_mib"], 512)
 
 
 if __name__ == "__main__":

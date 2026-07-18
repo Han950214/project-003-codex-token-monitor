@@ -252,15 +252,35 @@ class RolloutReaderTests(unittest.TestCase):
         self.assertEqual(len(reader._parse_cache), 1)
 
     def test_cache_contains_only_safe_parse_dtos_and_signatures(self):
+        raw_thread_id = "123e4567-e89b-12d3-a456-426614174088"
         with tempfile.TemporaryDirectory() as directory:
-            self.write(directory, [event("token_count", last=usage(0, 0, 0, 0), total=usage(0, 0, 0, 0)), event("task_started", "t"), event("token_count", "t", usage(3, 1, 1, 0), usage(3, 1, 1, 0))])
+            self.write(directory, [
+                event(
+                    "token_count",
+                    last=usage(0, 0, 0, 0),
+                    total=usage(0, 0, 0, 0),
+                    thread_id=raw_thread_id,
+                ),
+                event("task_started", "t", thread_id=raw_thread_id),
+                event(
+                    "token_count",
+                    "t",
+                    usage(3, 1, 1, 0),
+                    usage(3, 1, 1, 0),
+                    thread_id=raw_thread_id,
+                ),
+            ])
             reader = CodexRolloutReader()
             reader.refresh_sessions(Path(directory))
+            cached_refresh = reader.refresh_sessions(Path(directory))
         entry = next(iter(reader._parse_cache.values()))
         self.assertIsInstance(entry.file_signature, tuple)
         self.assertFalse(hasattr(entry, "raw_json"))
         self.assertFalse(hasattr(entry, "payload"))
         self.assertFalse(hasattr(entry, "preview"))
+        self.assertIsNone(entry.result.thread_id)
+        self.assertNotIn(raw_thread_id, repr(reader._parse_cache))
+        self.assertEqual(cached_refresh.sessions[0].thread_id, raw_thread_id)
 
     def test_candidate_limit_and_pinned_extra_are_reported_safely(self):
         with tempfile.TemporaryDirectory() as directory:

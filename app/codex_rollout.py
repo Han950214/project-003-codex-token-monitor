@@ -16,8 +16,29 @@ from typing import Any
 CODEX_SESSIONS_DIR_ENV = "CODEX_SESSIONS_DIR"
 DEFAULT_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 _MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
+_THREAD_SAFE_ID_DOMAIN = b"codex-token-monitor:thread-safe-id:v1\0"
 _RESPONSE_SAFE_ID_DOMAIN = b"codex-token-monitor:response-safe-id:v1\0"
 _FILE_SAFE_ID_DOMAIN = b"codex-token-monitor:rollout-file-safe-id:v1\0"
+
+
+def _is_safe_hash_id(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def make_thread_safe_id(thread_id: object) -> str | None:
+    """Return a stable content-free identity for one Codex Thread."""
+
+    if not isinstance(thread_id, str) or not thread_id:
+        return None
+    digest = hashlib.sha256(
+        _THREAD_SAFE_ID_DOMAIN + thread_id.encode("utf-8"),
+    ).hexdigest()
+    return f"sha256:{digest}"
 
 
 def make_response_safe_id(thread_id: object, turn_id: object) -> str | None:
@@ -95,6 +116,31 @@ class ResponseUsageCandidate:
     trusted_call_count: int = 0
     integrity_status: str = "partial"
     safe_diagnostic_codes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not _is_safe_hash_id(self.thread_safe_id):
+            raise ValueError("thread_safe_id_invalid")
+        if not _is_safe_hash_id(self.response_safe_id):
+            raise ValueError("response_safe_id_invalid")
+        if self.status not in {"exact", "completed_partial"}:
+            raise ValueError("response_status_invalid")
+        for name in (
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_input_tokens",
+            "reasoning_tokens",
+            "trusted_call_count",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name}_invalid")
+        if self.cached_input_tokens > self.input_tokens:
+            raise ValueError("cached_input_tokens_exceed_input")
+        if self.reasoning_tokens > self.output_tokens:
+            raise ValueError("reasoning_tokens_exceed_output")
+        if self.total_tokens != self.input_tokens + self.output_tokens:
+            raise ValueError("total_tokens_inconsistent")
 
 
 @dataclass(frozen=True)
@@ -299,6 +345,7 @@ class CodexRolloutReader:
             refreshed_at,
             cancel_event=cancel_event,
             deadline=deadline,
+            require_raw_thread_id=False,
         )
         metadata = result.scan_metadata or _scan_metadata(path, 0, "unavailable")
         if reused:
@@ -323,23 +370,32 @@ class CodexRolloutReader:
         *,
         cancel_event: threading.Event | None = None,
         deadline: float | None = None,
+        require_raw_thread_id: bool = True,
     ) -> tuple[tuple[datetime, RolloutUsageResult], bool]:
         key = _cache_key(path)
         if key is None:
             return self._read(path, refreshed_at), False
         while True:
+            cached: _CachedRollout | None = None
             with self._cache_lock:
                 cached = self._parse_cache.get(key)
-                if cached is not None:
-                    return (
-                        cached.observed_at,
-                        replace(cached.result, refreshed_at=refreshed_at),
-                    ), True
-                pending = self._parse_inflight.get(key)
-                if pending is None:
-                    pending = threading.Event()
-                    self._parse_inflight[key] = pending
-                    break
+                if cached is None:
+                    pending = self._parse_inflight.get(key)
+                    if pending is None:
+                        pending = threading.Event()
+                        self._parse_inflight[key] = pending
+                        break
+            if cached is not None:
+                cached_result = replace(
+                    cached.result,
+                    refreshed_at=refreshed_at,
+                )
+                if require_raw_thread_id and cached_result.available:
+                    cached_result = replace(
+                        cached_result,
+                        thread_id=_read_thread_id_projection(path),
+                    )
+                return (cached.observed_at, cached_result), True
             while not pending.wait(0.05):
                 _raise_if_scan_interrupted(cancel_event, deadline)
         try:
@@ -377,7 +433,13 @@ class CodexRolloutReader:
                         if stale_key[0] == safe_identity and stale_key != key:
                             del self._parse_cache[stale_key]
                     self._parse_cache[key] = _CachedRollout(
-                        item[0], key[1:], replace(item[1], refreshed_at=_MIN_TIME),
+                        item[0],
+                        key[1:],
+                        replace(
+                            item[1],
+                            thread_id=None,
+                            refreshed_at=_MIN_TIME,
+                        ),
                     )
             return item, False
         finally:
@@ -646,9 +708,11 @@ def _instruction_and_completed_from_events(
             _sum_usage(call.usage for call in completed_calls)
             if completed_calls else None
         )
+        thread_safe_id = make_thread_safe_id(thread_id)
         response_safe_id = make_response_safe_id(thread_id, completed_turn_id)
         if (
             completed_usage is None
+            or thread_safe_id is None
             or response_safe_id is None
             or thread_id is None
             or not thread_identity_stable
@@ -696,7 +760,7 @@ def _instruction_and_completed_from_events(
         if completed_turn["unreconciled"]:
             diagnostics.append("usage_unreconciled")
         completed_responses.append(ResponseUsageCandidate(
-            thread_safe_id=thread_id,
+            thread_safe_id=thread_safe_id,
             response_safe_id=response_safe_id,
             status="exact" if completed_exact else "completed_partial",
             completion_time_utc=completion_time,
@@ -793,6 +857,38 @@ def _event_time(record: dict[str, Any], payload: dict[str, Any]) -> datetime | N
             return (parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed).astimezone(timezone.utc)
         except ValueError:
             pass
+    return None
+
+
+def _read_thread_id_projection(path: Path) -> str | None:
+    """Read only the transient raw Thread identity needed by current selection."""
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                payload = record.get("payload")
+                payload = payload if isinstance(payload, dict) else {}
+                thread_id = (
+                    _string(record.get("thread_id"))
+                    or _string(payload.get("thread_id"))
+                    or _string(payload.get("threadId"))
+                    or (
+                        _string(payload.get("id"))
+                        if not _string(payload.get("type")) else None
+                    )
+                )
+                if thread_id is not None:
+                    return thread_id
+    except OSError:
+        return None
     return None
 
 

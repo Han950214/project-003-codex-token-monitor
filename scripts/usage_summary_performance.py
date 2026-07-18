@@ -12,6 +12,7 @@ import tracemalloc
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 from time import perf_counter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -126,28 +127,50 @@ def run_benchmark(
                 "FROM usage_history_samples WHERE (input_tokens IS NOT NULL OR "
                 "output_tokens IS NOT NULL OR total_tokens IS NOT NULL OR "
                 "cached_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
-                "ORDER BY thread_safe_id, response_safe_id, "
+                "ORDER BY response_safe_id, thread_safe_id, "
                 "source_observed_at_utc, sampled_at_utc, id",
             ).fetchall()
         fixture_build_elapsed = perf_counter() - fixture_started
 
+        latency_runs: list[float] = []
+        summary = None
+        for _run in range(3):
+            started = perf_counter()
+            summary = store.summarize_usage(
+                UsageWindowKind.ROLLING_30D,
+                as_of_utc=as_of,
+                local_timezone=timezone.utc,
+            )
+            latency_runs.append(perf_counter() - started)
+        assert summary is not None
+
+        trend_runs: list[float] = []
+        trend = None
+        for _run in range(3):
+            trend_started = perf_counter()
+            trend = store.query(
+                30,
+                "sha256:" + f"{1:064x}",
+                now=as_of,
+            )
+            trend_runs.append(perf_counter() - trend_started)
+        assert trend is not None
+
         tracemalloc.start()
-        started = perf_counter()
-        summary = store.summarize_usage(
+        memory_summary = store.summarize_usage(
             UsageWindowKind.ROLLING_30D,
             as_of_utc=as_of,
             local_timezone=timezone.utc,
         )
-        elapsed = perf_counter() - started
         _current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
-        trend_started = perf_counter()
-        trend = store.query(
-            30,
-            "sha256:" + f"{1:064x}",
-            now=as_of,
-        )
-        trend_elapsed = perf_counter() - trend_started
+        if memory_summary.observed_response_count != rows:
+            raise AssertionError("memory_run_response_count_mismatch")
+
+    cold_run = latency_runs[0]
+    warm_run = latency_runs[-1]
+    median_run = median(latency_runs)
+    trend_median = median(trend_runs)
 
     actual_totals = {
         "input_tokens": summary.input_tokens.value,
@@ -252,18 +275,31 @@ def run_benchmark(
             ),
         )
     )
-    if elapsed > 30 or peak_mib > 512:
+    if median_run > 5 or trend_median > 1 or peak_mib > 512:
         raise AssertionError({
-            "elapsed_seconds": elapsed,
+            "median_seconds": median_run,
+            "trend_median_seconds": trend_median,
             "peak_memory_mib": peak_mib,
         })
     return {
         "rows_in_30d": rows,
         "thread_count": threads,
         "range": UsageWindowKind.ROLLING_30D.value,
-        "elapsed_seconds": round(elapsed, 6),
+        "elapsed_seconds": round(median_run, 6),
+        "cold_run_ms": round(cold_run * 1000),
+        "warm_run_ms": round(warm_run * 1000),
+        "median_ms": round(median_run * 1000),
+        "latency_runs_ms": [
+            round(item * 1000) for item in latency_runs
+        ],
+        "latency_run_count": len(latency_runs),
+        "latency_tracemalloc_disabled": True,
         "fixture_build_seconds": round(fixture_build_elapsed, 6),
-        "trend_elapsed_seconds": round(trend_elapsed, 6),
+        "trend_elapsed_seconds": round(trend_median, 6),
+        "trend_runs_ms": [
+            round(item * 1000) for item in trend_runs
+        ],
+        "trend_median_ms": round(trend_median * 1000),
         "trend_sample_count": trend.sample_count,
         "peak_memory_bytes": peak,
         "peak_memory_mib": round(peak_mib, 6),

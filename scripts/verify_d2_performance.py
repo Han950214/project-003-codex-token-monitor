@@ -235,7 +235,8 @@ def run_verification(
     query_plan_indexed = bool(
         query_plan
         and any(
-            "USING INDEX ix_usage_history_samples_response_observed" in item
+            "USING COVERING INDEX "
+            "ix_usage_history_samples_response_summary_v4" in item
             for item in query_plan
         )
         and all("USE TEMP B-TREE" not in item for item in query_plan)
@@ -251,9 +252,18 @@ def run_verification(
             "selected_time_and_rankings_ms": round(
                 float(history["elapsed_seconds"]) * 1000,
             ),
+            "cold_run_ms": history["cold_run_ms"],
+            "warm_run_ms": history["warm_run_ms"],
+            "median_ms": history["median_ms"],
+            "latency_run_count": history["latency_run_count"],
+            "latency_tracemalloc_disabled": history[
+                "latency_tracemalloc_disabled"
+            ],
             "trend_ms": round(
                 float(history["trend_elapsed_seconds"]) * 1000,
             ),
+            "trend_median_ms": history["trend_median_ms"],
+            "peak_memory_mib": history["peak_memory_mib"],
             "query_plan_verdict": (
                 "bounded_indexed"
                 if not history["unbounded_fetchall_found"]
