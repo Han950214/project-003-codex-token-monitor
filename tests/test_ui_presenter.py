@@ -292,6 +292,29 @@ class UiScopeContractTests(unittest.TestCase):
         self.assertIn("Anonymous code", label)
         self.assertNotIn("Private-looking title", label)
 
+    def test_presenter_never_exposes_thread_names_in_recent_rows(self):
+        sensitive_names = (
+            "用户Prompt：分析内部财务数据和客户名单",
+            "User prompt: analyze confidential customer records",
+        )
+        sessions = tuple(
+            replace(
+                self._session(f"safe-thread-{index}", "exact", in_progress=False),
+                display_title=name,
+                title_source="codex_app_server.thread_display_title",
+                full_title=name,
+            )
+            for index, name in enumerate(sensitive_names)
+        )
+
+        presentation = present_dashboard(replace(
+            snapshot(), current_session=sessions[0], recent_sessions=sessions,
+        ), False)
+
+        rendered = repr(presentation.recent_sessions)
+        for fragment in ("内部财务数据", "客户名单", "confidential customer records"):
+            self.assertNotIn(fragment, rendered)
+
     def test_unreconciled_usage_does_not_hide_explicit_running_lifecycle(self):
         running = self._session("running", "in_progress", in_progress=True)
         running = replace(

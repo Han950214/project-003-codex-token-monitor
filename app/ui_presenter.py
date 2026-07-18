@@ -541,12 +541,15 @@ def _recent_row(session) -> RecentSessionRow:
     hit = "—"
     if cumulative is not None and cumulative.input_tokens:
         hit = f"{cumulative.cached_input_tokens / cumulative.input_tokens * 100:.1f}%"
+    safe_title = (
+        f"Codex Session · {session.observed_at.astimezone().strftime('%m-%d %H:%M')}"
+    )
     return RecentSessionRow(
-        session.thread_id, session.display_title, session.title_source,
+        session.thread_id, safe_title, "safe timestamp metadata",
         display_session_status(session, session.instruction),
         session.observed_at, f"{cumulative.total_tokens:,}" if cumulative else "—", hit,
         getattr(session, "turn_count", 0),
-        getattr(session, "full_title", None) or session.display_title,
+        safe_title,
         cumulative.total_tokens if cumulative else None,
     )
 

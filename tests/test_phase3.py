@@ -1212,7 +1212,12 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             current,
             instruction=replace(current.instruction, unreconciled_events=1),
         )
-        selected = self._semantic_session("B", 200, 2_000)
+        selected = replace(
+            self._semantic_session("B", 200, 2_000),
+            display_title="用户Prompt：分析内部财务数据和客户名单",
+            title_source="codex_app_server.thread_display_title",
+            full_title="User prompt: analyze confidential customer records",
+        )
         dashboard.snapshot = SimpleNamespace(
             current_session=current,
             current_thread_id="A",
@@ -1272,6 +1277,15 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         self.assertIn("4 turns", selected_title)
         self.assertIn("Anonymous code", selected_title)
         self.assertNotIn("Session B", selected_title)
+        visible_values = (
+            *(variable.get() for variable in dashboard.simple_task_vars.values()),
+            dashboard.task_full_title_var.get(),
+            *(variable.get() for variable in dashboard.task_detail_vars.values()),
+            dashboard.task_detail_viewing_var.get(),
+        )
+        visible_text = " ".join(str(value) for value in visible_values)
+        for fragment in ("内部财务数据", "客户名单", "confidential customer records"):
+            self.assertNotIn(fragment, visible_text)
         self.assertEqual(dashboard.task_detail_vars["total"].get(), "200")
         self.assertEqual(dashboard.task_detail_vars["session"].get(), "2,000")
         self.assertEqual(dashboard.core_metrics_scope_var.get(), "Current active task")
@@ -1316,10 +1330,20 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
                 "button": FakeWidget(), "badge_label": FakeWidget(),
             })
         rows = tuple(SimpleNamespace(
-            thread_id=thread_id, display_title=f"Session {thread_id}",
-            full_title=f"Session {thread_id}", last_activity=NOW,
+            thread_id=thread_id,
+            display_title=(
+                "用户Prompt：分析内部财务数据和客户名单"
+                if thread_id == "A"
+                else "User prompt: analyze confidential customer records"
+            ),
+            full_title=(
+                "用户Prompt：分析内部财务数据和客户名单"
+                if thread_id == "A"
+                else "User prompt: analyze confidential customer records"
+            ),
+            last_activity=NOW,
             thread_total_tokens=100, status="exact", turn_count=4,
-            title_source="safe timestamp fallback",
+            title_source="codex_app_server.thread_display_title",
         ) for thread_id in ("A", "B"))
 
         Dashboard._render_status_recent(
@@ -1335,6 +1359,14 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         )
         self.assertIn("Anonymous code", dashboard.status_recent_rows[0]["detail"].get())
         self.assertNotIn("Session A", dashboard.status_recent_rows[0]["title"].get())
+        rendered = " ".join(
+            str(variable.get())
+            for row in dashboard.status_recent_rows
+            for key, variable in row.items()
+            if key in {"title", "full_title", "detail", "current"}
+        )
+        for fragment in ("内部财务数据", "客户名单", "confidential customer records"):
+            self.assertNotIn(fragment, rendered)
 
     def test_mini_widget_uses_content_free_session_label(self):
         dashboard = object.__new__(Dashboard)
@@ -1342,8 +1374,8 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         current = self._semantic_session("current-private-id", 100, 1_000, status="in_progress")
         selected = replace(
             self._semantic_session("selected-private-id", 200, 2_000),
-            display_title="Sensitive app-server title",
-            full_title="Sensitive full app-server title",
+            display_title="用户Prompt：分析内部财务数据和客户名单",
+            full_title="User prompt: analyze confidential customer records",
         )
         dashboard.snapshot = SimpleNamespace(
             current_session=current,
@@ -1360,8 +1392,8 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             dashboard,
             replace(
                 cached,
-                title="Sensitive refreshed title",
-                full_title="Sensitive refreshed full title",
+                title="用户Prompt：分析内部财务数据和客户名单",
+                full_title="User prompt: analyze confidential customer records",
             ),
         )
 
@@ -1369,7 +1401,9 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         self.assertIn("Viewing", refreshed.title)
         self.assertIn("Anonymous code", refreshed.title)
         self.assertEqual(refreshed.full_title, refreshed.title)
-        self.assertNotIn("Sensitive", refreshed.title)
+        for fragment in ("内部财务数据", "客户名单", "confidential customer records"):
+            self.assertNotIn(fragment, refreshed.title)
+            self.assertNotIn(fragment, refreshed.full_title)
         self.assertNotIn(selected.thread_id, refreshed.title)
         enter_source = inspect.getsource(Dashboard._enter_widget_mode)
         self.assertIn("self._safe_mini_snapshot(", enter_source)

@@ -4462,12 +4462,6 @@ class Dashboard:
                 role_key=role_key,
                 viewing=viewing,
             )
-            structured_title = (
-                getattr(session, "full_title", None) or session.display_title
-                if getattr(session, "title_source", "")
-                == "codex_app_server.thread_display_title"
-                else ""
-            )
             values = {
                 "title": ellipsize_title(safe_title, 74),
                 "status": localize_presenter_text(status, self.language),
@@ -4486,7 +4480,7 @@ class Dashboard:
                 ),
             }
             return (
-                structured_title or safe_title,
+                safe_title,
                 values, usage, cumulative, cache, status,
             )
 
@@ -4727,7 +4721,6 @@ class Dashboard:
                 widget["button"].configure(state="disabled", fg_color=COLORS.raised_surface)
                 continue
             row = presentation.recent_sessions[index]
-            full_title = row.full_title or row.display_title
             activity = (
                 row.last_activity.astimezone().strftime("%m-%d %H:%M")
                 if row.last_activity else "—"
@@ -4751,7 +4744,7 @@ class Dashboard:
                 else "ui_scope_recent_activity" if is_current
                 else "historical_session_role"
             )
-            widget["title"].set(translate(
+            safe_title = translate(
                 "safe_session_primary", self.language,
                 role=translate(role_key, self.language), time=activity,
                 turns=turns,
@@ -4759,19 +4752,14 @@ class Dashboard:
                     translate("safe_session_viewing_suffix", self.language)
                     if is_selected else ""
                 ),
-            ))
+            )
+            widget["title"].set(safe_title)
             safe_id = make_thread_safe_id(row.thread_id)
             anonymous = (
                 safe_digest_labels((safe_id,))[safe_id]
                 if safe_id is not None else "—"
             )
-            structured_title = (
-                full_title
-                if getattr(row, "title_source", "")
-                == "codex_app_server.thread_display_title"
-                else ""
-            )
-            widget["full_title"].set(structured_title or "—")
+            widget["full_title"].set(safe_title)
             detail_parts = [translate(
                 "anonymous_session_code", self.language, code=anonymous,
             ), translate(
@@ -4779,11 +4767,6 @@ class Dashboard:
                 status=localize_presenter_text(row.status, self.language),
                 total=total,
             )]
-            if structured_title:
-                detail_parts.append(translate(
-                    "structured_session_title", self.language,
-                    title=ellipsize_title(structured_title, 32),
-                ))
             widget["detail"].set(" · ".join(detail_parts))
             badges = []
             if is_current:

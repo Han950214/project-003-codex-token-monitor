@@ -49,6 +49,7 @@ from app.usage_summary import (  # noqa: E402
     UsageWindowKind,
     unavailable_usage_summary,
 )
+from app.widget_presentation import present_widget  # noqa: E402
 from app.ui_presenter import (  # noqa: E402
     HistoryEmptyState, build_history_state_view, build_quota_state_view,
     build_ui_scope_contract, classify_quota_availability, present_dashboard,
@@ -77,6 +78,13 @@ SCENARIOS = (
     "semantic_selected_one_saved",
 )
 QA_THREAD_ID = "qa-thread-001"
+QA_PRIVATE_THREAD_NAMES = (
+    "用户Prompt：分析内部财务数据和客户名单",
+    "User prompt: analyze confidential customer records",
+)
+QA_PRIVATE_FRAGMENTS = (
+    "内部财务数据", "客户名单", "confidential customer records",
+)
 QA_INSIGHT_THREAD_IDS = (
     "sha256:" + "1" * 56 + "aaabcdef",
     "sha256:" + "2" * 56 + "bbabcdef",
@@ -601,14 +609,25 @@ def build_scenario(
         "semantic_selected_one_saved",
     }:
         current_session = _semantic_session(
-            "qa-current-A", "安全会话 A", current,
+            "qa-current-A", QA_PRIVATE_THREAD_NAMES[0], current,
             status="in_progress", total_tokens=1_200,
             session_total_tokens=9_000, turn_count=12,
         )
+        current_session = replace(
+            current_session,
+            title_source="codex_app_server.thread_display_title",
+            full_title=QA_PRIVATE_THREAD_NAMES[0],
+        )
         history_session = _semantic_session(
-            "qa-history-B", "安全会话 B", current - timedelta(minutes=8),
+            "qa-history-B", QA_PRIVATE_THREAD_NAMES[1],
+            current - timedelta(minutes=8),
             status="exact", total_tokens=2_400,
             session_total_tokens=18_000, turn_count=18,
+        )
+        history_session = replace(
+            history_session,
+            title_source="codex_app_server.thread_display_title",
+            full_title=QA_PRIVATE_THREAD_NAMES[1],
         )
         recent_sessions = (current_session, history_session)
         selected_session = (
@@ -1021,6 +1040,76 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
     checks["recommendations_page_preserved"] = len(
         dashboard.recommendation_cards,
     ) == 5
+    visible_values: list[str] = []
+    for variable in (
+        dashboard.simple_status_title_var,
+        dashboard.simple_reason_var,
+        dashboard.status_meta_var,
+        dashboard.task_full_title_var,
+        dashboard.task_detail_viewing_var,
+    ):
+        visible_values.append(str(variable.get()))
+    visible_values.extend(
+        str(variable.get()) for variable in dashboard.simple_task_vars.values()
+    )
+    visible_values.extend(
+        str(variable.get()) for variable in dashboard.task_detail_vars.values()
+    )
+    for row in dashboard.status_recent_rows:
+        visible_values.extend(
+            str(row[key].get())
+            for key in ("title", "full_title", "detail", "current")
+        )
+    for item_id in dashboard.sessions_tree.get_children():
+        visible_values.extend(
+            str(value) for value in dashboard.sessions_tree.item(item_id, "values")
+        )
+    for section in dashboard.usage_insights_sections.values():
+        for row in section["rows"]:
+            visible_values.extend((
+                str(row["title"].get()), str(row["details"].get()),
+            ))
+    for card in dashboard.recommendation_cards:
+        visible_values.extend(
+            str(card[key].get())
+            for key in (
+                "title", "severity", "body", "evidence", "metadata",
+                "history", "observed",
+            )
+        )
+    saved_widget_thread_id = dashboard._widget_thread_id  # noqa: SLF001 - QA path
+    dashboard._widget_thread_id = scenario.selected_session.thread_id  # noqa: SLF001
+    mini_snapshot = dashboard._safe_mini_snapshot(  # noqa: SLF001 - QA path
+        dashboard._cached_mini_snapshot(scenario.selected_session),
+    )
+    dashboard._widget_thread_id = saved_widget_thread_id  # noqa: SLF001
+    mini_presentation = present_widget(
+        dashboard.quota_snapshot, mini_snapshot,
+        dashboard.advisor_result.primary, dashboard.language,
+    )
+    tooltip_values = (
+        dashboard.task_full_title_var.get(),
+        *(row["full_title"].get() for row in dashboard.status_recent_rows),
+        mini_presentation.task_title,
+    )
+    visible_values.extend(str(value) for value in tooltip_values)
+    visible_text = "\n".join(visible_values)
+    checks["thread_name_privacy_sentinel"] = all(
+        fragment not in visible_text for fragment in QA_PRIVATE_FRAGMENTS
+    )
+    checks["tooltip_privacy_sentinel"] = all(
+        fragment not in "\n".join(str(value) for value in tooltip_values)
+        for fragment in QA_PRIVATE_FRAGMENTS
+    )
+    safe_selected_label = dashboard.simple_task_vars["title"].get()
+    checks["safe_session_metadata_preserved"] = bool(
+        str(scenario.selected_session.turn_count) in safe_selected_label
+        and translate("historical_session_role", dashboard.language)
+        in safe_selected_label
+        and translate("anonymous_session_code", dashboard.language, code="")
+        .split(":", 1)[0].split("：", 1)[0]
+        in safe_selected_label
+    )
     checks.update(_assert_e1_state_widgets(dashboard, scenario))
     ranking_rows = dashboard.usage_insights_sections["threads"]["rows"]
     visible_ranking = next((
