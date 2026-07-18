@@ -1665,17 +1665,16 @@ class UsageSummaryUiContractTests(unittest.TestCase):
             "Last 5 hours": UsageWindowKind.ROLLING_5H,
         }
         dashboard._schedule_trend_query = Mock()
-        dashboard._render_observed_usage = Mock()
 
         Dashboard._change_usage_window(dashboard, "Last 5 hours")
 
         self.assertEqual(dashboard.usage_window_kind, UsageWindowKind.ROLLING_5H)
         dashboard._schedule_trend_query.assert_called_once_with()
-        dashboard._render_observed_usage.assert_called_once_with()
         source = inspect.getsource(Dashboard._change_usage_window)
         self.assertNotIn("view_model.refresh", source)
         self.assertNotIn("quota_provider.refresh", source)
         self.assertNotIn("_record_history", source)
+        self.assertNotIn("_render_observed_usage", source)
 
     def test_history_worker_queries_trend_and_summary_off_tk_thread(self):
         source = inspect.getsource(Dashboard._trend_query_worker_loop)

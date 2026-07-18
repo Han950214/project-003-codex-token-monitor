@@ -274,6 +274,21 @@ class Phase3ModeTests(unittest.TestCase):
         self.assertEqual(dashboard.shell_state.page, "overview")
         self.assertTrue(dashboard.page_frames["overview"].visible)
 
+    def test_dirty_page_renders_once_when_it_becomes_visible(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.current_nav_page = "sessions"
+        dashboard.presentation = object()
+        dashboard._dirty_pages = {"overview", "sessions"}
+        calls = []
+        dashboard._render_sessions = lambda value, **_kwargs: calls.append(("sessions", value))
+
+        Dashboard._render_visible_page(dashboard)
+        Dashboard._render_visible_page(dashboard)
+
+        self.assertEqual(calls, [("sessions", dashboard.presentation)])
+        self.assertNotIn("sessions", dashboard._dirty_pages)
+        self.assertIn("overview", dashboard._dirty_pages)
+
     def test_dashboard_mode_controls_are_not_built(self):
         source = inspect.getsource(Dashboard._build_header) + inspect.getsource(Dashboard._build_settings_page)
         self.assertNotIn("CTkSegmentedButton", source)
@@ -525,6 +540,41 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
                     )],
                 )
 
+    def test_repeated_resize_signature_skips_and_only_lays_out_visible_page(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.root = FakeRoot(1_180)
+        dashboard._layout_job = None
+        dashboard._sidebar_collapsed = False
+        dashboard._last_layout_signature = None
+        dashboard._layout_skip_count = 0
+        dashboard.current_nav_page = "sessions"
+        dashboard.sidebar = FakeWidget()
+        dashboard.brand_name = FakeWidget()
+        dashboard.brand_icon = FakeWidget()
+        dashboard.status_reason_label = FakeWidget()
+        dashboard.auto_switch = FakeWidget()
+        dashboard.mini_widget_button = FakeWidget()
+        dashboard.header_settings_button = FakeWidget()
+        dashboard.language_menu = FakeWidget()
+        dashboard.header_message_label = FakeWidget()
+        dashboard.history_selector = FakeWidget()
+        dashboard.view_model = QueryBomb()
+        dashboard.quota_provider = QueryBomb()
+        calls = []
+        dashboard._layout_history_controls = lambda width: calls.append(("controls", width))
+        dashboard._layout_history_columns = lambda width: calls.append(("columns", width))
+        dashboard._layout_sessions_page = lambda width: calls.append(("sessions", width))
+        dashboard._apply_status_layout = lambda width: calls.append(("overview", width))
+        dashboard._layout_tool_groups = lambda width: calls.append(("tools", width))
+        dashboard._layout_settings_groups = lambda width: calls.append(("settings", width))
+        dashboard._layout_trend_metrics = lambda width: calls.append(("trends", width))
+
+        Dashboard._apply_responsive_layout(dashboard)
+        Dashboard._apply_responsive_layout(dashboard)
+
+        self.assertEqual([name for name, _width in calls], ["controls", "columns", "sessions"])
+        self.assertEqual(dashboard._layout_skip_count, 1)
+
     def test_selected_card_reflow_uses_scaled_width_after_sidebar(self):
         dashboard = object.__new__(Dashboard)
         dashboard.root = FakeRoot(1_375, window_scaling=1.25)
@@ -652,6 +702,21 @@ class Phase3LocalVisualTests(unittest.TestCase):
         CircularProgress.set(canvas, None)
         self.assertEqual(len(canvas.arcs), 1)
         self.assertEqual(canvas.texts[-1][1]["text"], "—")
+
+    def test_high_frequency_canvases_skip_identical_values(self):
+        sparkline = FakeCanvas()
+        self.assertTrue(Sparkline.set_samples(sparkline, (10, 20, 30)))
+        self.assertTrue(Sparkline.set_samples(sparkline, (10, 20, 30)))
+        self.assertEqual(sparkline.deleted, ["all"])
+        self.assertTrue(Sparkline.set_samples(sparkline, (10, 20, 31)))
+        self.assertEqual(sparkline.deleted, ["all", "all"])
+
+        progress = FakeCanvas()
+        CircularProgress.set(progress, 63, color="#248A52")
+        CircularProgress.set(progress, 63, color="#248A52")
+        self.assertEqual(progress.deleted, ["all"])
+        CircularProgress.set(progress, 64, color="#248A52")
+        self.assertEqual(progress.deleted, ["all", "all"])
 
 
 class Phase3AdvisorTests(unittest.TestCase):

@@ -1391,7 +1391,14 @@ def main() -> None:
             dashboard.close()
         root.after(args.auto_close_ms, close_case)
 
-    root.after_idle(apply_case)
+    def apply_when_startup_refresh_idle() -> None:
+        worker = getattr(dashboard, "refresh_worker", None)
+        if worker is not None and worker.busy:
+            root.after(50, apply_when_startup_refresh_idle)
+            return
+        apply_case()
+
+    root.after_idle(apply_when_startup_refresh_idle)
     root.mainloop()
     if callback_errors:
         raise RuntimeError("GUI acceptance callback failed") from callback_errors[0]

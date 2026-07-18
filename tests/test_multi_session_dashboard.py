@@ -28,6 +28,30 @@ def session(thread_id, minute, title="Codex Session", status="exact", total=100,
 
 
 class MultiSessionDashboardTests(unittest.TestCase):
+    def test_adopting_background_snapshot_preserves_newer_pinned_selection(self):
+        initial = RolloutSessionsResult(
+            (session("a", 1), session("b", 0, total=90)), "a", 0, NOW,
+        )
+        incoming = RolloutSessionsResult(
+            (session("a", 2), session("b", 1, total=120)), "a", 0, NOW,
+        )
+        ui_model = DashboardViewModel(
+            rollout_sessions_loader=lambda: initial,
+            state_batch_loader=lambda _ids: {},
+        )
+        ui_model.refresh()
+        ui_model.select_cached_thread("b")
+        worker_snapshot = DashboardViewModel(
+            rollout_sessions_loader=lambda: incoming,
+            state_batch_loader=lambda _ids: {},
+        ).refresh()
+
+        adopted = ui_model.adopt_snapshot(worker_snapshot)
+
+        self.assertEqual(adopted.selection_mode, "pinned")
+        self.assertEqual(adopted.selected_thread_id, "b")
+        self.assertEqual(adopted.selected_session.thread_id, "b")
+        self.assertEqual(adopted.selected_session.thread_cumulative_usage.total_tokens, 120)
     def test_auto_follow_switches_to_latest_activity(self):
         results = [RolloutSessionsResult((session("a", 1), session("b", 0)), "a", 0, NOW), RolloutSessionsResult((session("b", 2), session("a", 1)), "b", 0, NOW)]
         loader = Mock(side_effect=results)

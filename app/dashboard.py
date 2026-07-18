@@ -297,6 +297,58 @@ class DashboardViewModel:
         self.selected_thread_id = thread_id
         return self._cached_snapshot(selected, "pinned")
 
+    def adopt_snapshot(self, snapshot: DashboardSnapshot) -> DashboardSnapshot:
+        """Install worker data while preserving newer Tk-owned selection state."""
+
+        selection_mode = self.selection_mode
+        selected_thread_id = self.selected_thread_id
+        previous_selected = (
+            self._last_snapshot.selected_session if self._last_snapshot is not None else None
+        )
+        self.current_thread_id = snapshot.current_thread_id
+        self.lookback_days = snapshot.lookback_days
+        for session in snapshot.recent_sessions:
+            self._known_sessions[session.thread_id] = session
+            if session.rollout_path is not None:
+                self._known_paths[session.thread_id] = session.rollout_path
+        self._last_snapshot = snapshot
+        self.selection_mode = selection_mode
+        self.selected_thread_id = selected_thread_id
+
+        if selection_mode == "auto":
+            self.selected_thread_id = None
+            current = snapshot.current_session
+            if current is not None:
+                return self._cached_snapshot(current, "auto")
+            adopted = replace(
+                snapshot, selection_mode="auto", selected_thread_id=None,
+                selected_session=None,
+            )
+            self._last_snapshot = adopted
+            return adopted
+
+        selected = next(
+            (
+                item for item in snapshot.recent_sessions
+                if item.thread_id == selected_thread_id
+            ),
+            None,
+        )
+        if (
+            selected is None
+            and previous_selected is not None
+            and previous_selected.thread_id == selected_thread_id
+        ):
+            selected = previous_selected
+        if selected is not None:
+            return self._cached_snapshot(selected, "pinned")
+        adopted = replace(
+            snapshot, selection_mode="pinned",
+            selected_thread_id=selected_thread_id, selected_session=None,
+        )
+        self._last_snapshot = adopted
+        return adopted
+
     def pin_thread(self, thread_id: str) -> bool:
         if not thread_id:
             return False

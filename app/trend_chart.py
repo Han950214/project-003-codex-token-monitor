@@ -170,16 +170,22 @@ class TrendCanvas(tk.Canvas):
         self._tooltip: tk.Toplevel | None = None
         self._tooltip_label: tk.Label | None = None
         self._redraw_after_id: str | None = None
+        self._render_signature: object | None = None
+        self._needs_redraw = True
         self._disposed = False
         self.bind("<Configure>", self._on_configure, add="+")
+        self.bind("<Map>", self._on_map, add="+")
         self.bind("<Motion>", self._on_motion, add="+")
         self.bind("<Button-1>", self._on_click, add="+")
         self.bind("<Leave>", self._on_leave, add="+")
         self.bind("<Destroy>", self._on_destroy, add="+")
 
     def set_points(self, points: Iterable[TrendPoint]) -> None:
+        updated = tuple(points)
+        if updated == self._points:
+            return
         self._hide_tooltip()
-        self._points = tuple(points)
+        self._points = updated
         self._schedule_redraw()
 
     def set_labels(
@@ -189,13 +195,23 @@ class TrendCanvas(tk.Canvas):
         source_labels: Mapping[str, str] | None = None,
         tooltip_labels: TrendTooltipLabels | None = None,
     ) -> None:
+        updated_metrics = (
+            dict(metric_labels) if metric_labels is not None else self._metric_labels
+        )
+        updated_sources = (
+            dict(source_labels) if source_labels is not None else self._source_labels
+        )
+        updated_tooltips = tooltip_labels or self._tooltip_labels
+        if (
+            updated_metrics == self._metric_labels
+            and updated_sources == self._source_labels
+            and updated_tooltips == self._tooltip_labels
+        ):
+            return
         self._hide_tooltip()
-        if metric_labels is not None:
-            self._metric_labels = dict(metric_labels)
-        if source_labels is not None:
-            self._source_labels = dict(source_labels)
-        if tooltip_labels is not None:
-            self._tooltip_labels = tooltip_labels
+        self._metric_labels = updated_metrics
+        self._source_labels = updated_sources
+        self._tooltip_labels = updated_tooltips
         self._schedule_redraw()
 
     def destroy(self) -> None:
@@ -205,8 +221,18 @@ class TrendCanvas(tk.Canvas):
     def _on_configure(self, _event: tk.Event) -> None:
         self._schedule_redraw()
 
+    def _on_map(self, _event: tk.Event | None) -> None:
+        if self._needs_redraw:
+            self._schedule_redraw()
+
     def _schedule_redraw(self) -> None:
+        self._needs_redraw = True
         if self._disposed or self._redraw_after_id is not None:
+            return
+        try:
+            if not self.winfo_viewable():
+                return
+        except tk.TclError:
             return
         self._redraw_after_id = self.after_idle(self._redraw)
 
@@ -214,8 +240,24 @@ class TrendCanvas(tk.Canvas):
         self._redraw_after_id = None
         if self._disposed:
             return
+        try:
+            if not self.winfo_viewable():
+                self._needs_redraw = True
+                return
+        except tk.TclError:
+            return
+        self._needs_redraw = False
         width = max(1, self.winfo_width())
         height = max(1, self.winfo_height())
+        signature = (
+            self._points, width, height, self._foreground, self._grid_color,
+            tuple(sorted(self._series_colors.items())),
+            tuple(sorted(self._metric_labels.items())),
+            tuple(sorted(self._source_labels.items())), self._tooltip_labels,
+        )
+        if signature == self._render_signature:
+            return
+        self._render_signature = signature
         self.delete("all")
         self._rendered_points.clear()
         grouped: dict[str, list[TrendPoint]] = defaultdict(list)

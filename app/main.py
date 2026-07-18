@@ -7,6 +7,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -30,12 +31,14 @@ from app.codex_rollout import (
 )
 from app.codex_state import configured_state_path
 from app.dashboard import (
+    DashboardSnapshot,
     DashboardViewModel,
     MiniThreadSnapshot,
     ResponseHistoryBackfillResult,
     ResponseHistoryBackfillService,
     display_session_status,
 )
+from app.refresh_worker import DashboardRefreshWorker
 from app.dashboard_mode import ALL_PAGES, AppShellState, NAVIGATION_ITEMS
 from app.desktop_widget import (
     DesktopMiniWidget, ExitChoiceDialog, WidgetTooltip, format_percent,
@@ -151,6 +154,25 @@ def _new_backfill_history_store(
     )
 
 
+@dataclass(frozen=True)
+class _RefreshRequest:
+    mode: str
+    lookback_days: int
+    selection_mode: str
+    selected_thread_id: str | None
+    widget_thread_id: str | None
+    refresh_quota: bool
+    quota_snapshot: CodexQuotaSnapshot
+
+
+@dataclass(frozen=True)
+class _RefreshPayload:
+    snapshot: DashboardSnapshot | None
+    mini_snapshot: MiniThreadSnapshot | None
+    quota_snapshot: CodexQuotaSnapshot
+    history_error: str | None
+
+
 class Dashboard:
     def __init__(
         self,
@@ -162,10 +184,10 @@ class Dashboard:
         configure_view(root)
         self.quota_provider = quota_provider or CodexAppServerQuotaProvider()
         title_loader = getattr(self.quota_provider, "refresh_thread_titles", lambda: {})
-        self.view_model = DashboardViewModel(title_batch_loader=title_loader)
+        self.view_model = DashboardViewModel()
+        self._refresh_view_model = DashboardViewModel(title_batch_loader=title_loader)
         self.history_store = history_store or UsageHistoryStore()
-        self.history_store.initialize()
-        self.history_error = self.history_store.last_error
+        self.history_error = None
         self.language_controller = LanguageController(self._apply_language, UI_SETTINGS_PATH)
         self.language = self.language_controller.language
         self.widget_display_mode = load_widget_mode(UI_SETTINGS_PATH)
@@ -241,11 +263,24 @@ class Dashboard:
         self.history_backfill_status = "idle"
         self._taskbar_iconify_scheduled = False
         self._layout_job: str | None = None
+        self._last_layout_signature: tuple[object, ...] | None = None
+        self._layout_skip_count = 0
+        self._layout_apply_count = 0
+        self._layout_debounce_count = 0
         self._sidebar_collapsed = False
+        self._dirty_pages = set(ALL_PAGES)
+        self._shown_page: str | None = None
+        self._render_session_rows = True
         self._widget_thread_id: str | None = None
         self._last_dashboard_geometry = "1280x800"
         self._mini_thread_snapshot = MiniThreadSnapshot("", None, None, "no_selection", None)
         self.quota_snapshot = CodexQuotaSnapshot.unavailable()
+        self.refresh_worker = DashboardRefreshWorker(
+            self._execute_refresh,
+            cleanup=self.quota_provider.close,
+        )
+        self._latest_refresh_generation = 0
+        self._refresh_poll_scheduled = False
 
         self.auto_refresh_var = tk.BooleanVar(master=root, value=self.shell_state.auto_refresh_enabled)
         self.data_status_var = tk.StringVar(value="")
@@ -297,7 +332,9 @@ class Dashboard:
         root.bind("<Map>", self._on_root_map, add="+")
         root.bind("<Configure>", self._on_root_configure, add="+")
         self._apply_language(self.language)
-        self.refresh()
+        self.data_status_var.set(translate("status_refreshing", self.language))
+        self.status_message_var.set(translate("message_refreshing", self.language))
+        self.root.after_idle(self.refresh)
         self.auto_refresh.set_enabled(bool(self.auto_refresh_var.get()))
         self._apply_startup_mode(load_startup_mode(UI_SETTINGS_PATH))
         self.root.after(250, self._request_history_backfill)
@@ -1205,6 +1242,18 @@ class Dashboard:
             self._apply_cached_snapshot(snapshot)
 
     def _apply_status_layout(self, content_width: int) -> None:
+        show_selected = bool(
+            getattr(self, "snapshot", None) is not None
+            and self.snapshot.selection_mode == "pinned"
+            and self.snapshot.selected_session is not None
+        )
+        mode = dashboard_layout_for_width(content_width)
+        layout_signature = (
+            mode, show_selected, metric_columns_for_width(content_width),
+        )
+        if getattr(self, "_status_layout_signature", None) == layout_signature:
+            return
+        self._status_layout_signature = layout_signature
         cards = (
             self.status_advice_card, self.core_metrics_panel,
             self.observed_usage_card,
@@ -1215,12 +1264,6 @@ class Dashboard:
         for card in cards:
             card.grid_forget()
             card.grid_propagate(True)
-        show_selected = bool(
-            getattr(self, "snapshot", None) is not None
-            and self.snapshot.selection_mode == "pinned"
-            and self.snapshot.selected_session is not None
-        )
-        mode = dashboard_layout_for_width(content_width)
         core_layout_width = content_width
         for column in range(4):
             self.status_page.grid_columnconfigure(
@@ -1513,6 +1556,10 @@ class Dashboard:
 
     def _layout_history_controls(self, content_width: int) -> None:
         """Keep history filters usable without a horizontal scrollbar."""
+        mode = "wide" if content_width >= 1150 else "compact"
+        if getattr(self, "_history_controls_layout_mode", None) == mode:
+            return
+        self._history_controls_layout_mode = mode
         controls = (
             self.task_selector_label, self.task_menu,
             self.session_search_label, self.session_search_entry,
@@ -1554,6 +1601,9 @@ class Dashboard:
 
     def _layout_sessions_page(self, content_width: int) -> None:
         show_detail = content_width >= 1_000
+        if getattr(self, "_sessions_page_show_detail", None) == show_detail:
+            return
+        self._sessions_page_show_detail = show_detail
         self.sessions_page.grid_columnconfigure(0, weight=3)
         self.sessions_page.grid_columnconfigure(1, weight=1 if show_detail else 0)
         if show_detail:
@@ -1929,6 +1979,9 @@ class Dashboard:
 
     def _layout_trend_metrics(self, content_width: int) -> None:
         columns = 4 if content_width >= 1_000 else 2
+        if getattr(self, "_trend_metric_layout_columns", None) == columns:
+            return
+        self._trend_metric_layout_columns = columns
         for column in range(4):
             self.trend_metrics_host.grid_columnconfigure(
                 column, weight=1 if column < columns else 0,
@@ -2096,6 +2149,9 @@ class Dashboard:
 
     def _layout_tool_groups(self, content_width: int) -> None:
         columns = 2 if content_width >= 900 else 1
+        if getattr(self, "_tool_group_layout_columns", None) == columns:
+            return
+        self._tool_group_layout_columns = columns
         for column in range(2):
             self.tools_page.grid_columnconfigure(
                 column, weight=1 if column < columns else 0,
@@ -2197,6 +2253,9 @@ class Dashboard:
 
     def _layout_settings_groups(self, content_width: int) -> None:
         columns = 2 if content_width >= 900 else 1
+        if getattr(self, "_settings_group_layout_columns", None) == columns:
+            return
+        self._settings_group_layout_columns = columns
         for column in range(2):
             self.settings_page.grid_columnconfigure(
                 column, weight=1 if column < columns else 0,
@@ -2499,15 +2558,10 @@ class Dashboard:
             text=f"{translate('check_updates', language)} · {translate('coming_soon', language)}",
         )
 
+        self._mark_pages_dirty(set(ALL_PAGES))
         if self.presentation is not None:
             self._apply_presentation(self.presentation)
-        else:
-            self._render_advisor()
-            self._render_observed_usage()
-            self._render_trends()
-            self._render_recommendations()
-        self._render_usage_insights()
-        self._render_diagnostics()
+        self._render_visible_page()
         if hasattr(self, "mini_widget") and self.mini_widget.visible:
             self.mini_widget.update(
                 self.quota_snapshot, self._mini_thread_snapshot, language,
@@ -2575,20 +2629,70 @@ class Dashboard:
 
     def show_page(self, page: str) -> None:
         target = page if page in ALL_PAGES else "overview"
+        previous = getattr(self, "_shown_page", None)
         self.shell_state = self.shell_state.navigate(target)
         self.current_nav_page = target
-        for item, frame in self.page_frames.items():
-            if item == target:
-                frame.grid()
-            else:
-                frame.grid_remove()
-        nav_target = "sessions" if target == "session_detail" else target
-        for item, button in self.nav_buttons.items():
-            button.configure(
-                fg_color=COLORS.accent if item == nav_target else "transparent",
-                text_color=COLORS.telemetry_text,
+        if previous is None:
+            for item, frame in self.page_frames.items():
+                if item == target:
+                    frame.grid()
+                else:
+                    frame.grid_remove()
+        if previous != target:
+            if previous is not None and previous in self.page_frames:
+                self.page_frames[previous].grid_remove()
+                self.page_frames[target].grid()
+            nav_target = "sessions" if target == "session_detail" else target
+            previous_nav = "sessions" if previous == "session_detail" else previous
+            if previous_nav in self.nav_buttons and previous_nav != nav_target:
+                self.nav_buttons[previous_nav].configure(
+                    fg_color="transparent", text_color=COLORS.telemetry_text,
+                )
+            if nav_target in self.nav_buttons:
+                self.nav_buttons[nav_target].configure(
+                    fg_color=COLORS.accent, text_color=COLORS.telemetry_text,
+                )
+            self._shown_page = target
+            self._update_page_title()
+        self._render_visible_page()
+        if hasattr(self, "root") and hasattr(self, "sidebar"):
+            self._apply_responsive_layout()
+
+    def _mark_pages_dirty(self, pages: set[str] | tuple[str, ...]) -> None:
+        dirty = getattr(self, "_dirty_pages", None)
+        if dirty is None:
+            self._dirty_pages = set(pages)
+        else:
+            dirty.update(pages)
+
+    def _render_visible_page(self) -> None:
+        page = getattr(self, "current_nav_page", "overview")
+        dirty = getattr(self, "_dirty_pages", set())
+        presentation = getattr(self, "presentation", None)
+        if page not in dirty or presentation is None:
+            return
+        if page == "overview":
+            self._render_advisor()
+            self._render_observed_usage()
+            self._render_safe_overview(target="overview")
+            self._render_status_recent(presentation)
+            self._render_trends(target="overview")
+        elif page == "sessions":
+            self._render_sessions(
+                presentation,
+                render_session_rows=getattr(self, "_render_session_rows", True),
             )
-        self._update_page_title()
+        elif page == "session_detail":
+            self._render_safe_overview(target="session_detail")
+        elif page == "usage_trends":
+            self._render_usage_insights()
+            self._render_trends(target="usage_trends")
+        elif page == "recommendations":
+            self._render_recommendations()
+        elif page == "tools":
+            self._render_diagnostics()
+        dirty.discard(page)
+        self._render_session_rows = True
 
     def _update_page_title(self) -> None:
         if hasattr(self, "page_title_var"):
@@ -2703,7 +2807,7 @@ class Dashboard:
         self._trend_query_stop.set()
         self._history_backfill_cancel.set()
         self.auto_refresh.close()
-        self.quota_provider.close()
+        self.refresh_worker.shutdown()
         self.tray.stop()
         self.settings_dialog.close()
         self.mini_widget.destroy()
@@ -2735,24 +2839,92 @@ class Dashboard:
             self._minimize_to_taskbar()
 
     def refresh(self, show_refreshing: bool = True, render_session_rows: bool = True, refresh_quota: bool = True) -> None:
-        if self._widget_mode:
-            if show_refreshing:
+        if self._closing:
+            return
+        if show_refreshing:
+            if self._widget_mode:
                 self.mini_widget.set_refreshing()
-                self.root.update_idletasks()
-            if refresh_quota:
-                self.quota_snapshot = self.quota_provider.refresh()
-            refreshed_mini = self.view_model.refresh_thread(self._widget_thread_id)
-            self._mini_thread_snapshot = self._safe_mini_snapshot(refreshed_mini)
-            try:
-                observation = HistoryObservation.from_mini(
-                    self._mini_thread_snapshot,
-                    self.quota_snapshot,
-                    self._widget_thread_id,
-                )
-            except (TypeError, ValueError):
-                self.history_error = "history_observation_invalid"
             else:
-                self._record_history(observation)
+                self.data_status_var.set(translate("status_refreshing", self.language))
+                self.status_message_var.set(translate("message_refreshing", self.language))
+                self.header_message_label.configure(text_color=COLORS.secondary_text)
+        self._render_session_rows = render_session_rows
+        request = _RefreshRequest(
+            "widget" if self._widget_mode else "dashboard",
+            self.view_model.lookback_days,
+            self.view_model.selection_mode,
+            self.view_model.selected_thread_id,
+            self._widget_thread_id,
+            refresh_quota,
+            self.quota_snapshot,
+        )
+        self._latest_refresh_generation = self.refresh_worker.submit(request)
+        self._schedule_refresh_poll()
+
+    def _execute_refresh(self, request: _RefreshRequest) -> _RefreshPayload:
+        model = self._refresh_view_model
+        model.lookback_days = request.lookback_days
+        model.selection_mode = request.selection_mode
+        model.selected_thread_id = request.selected_thread_id
+        quota = (
+            self.quota_provider.refresh()
+            if request.refresh_quota else request.quota_snapshot
+        )
+        snapshot = None
+        mini_snapshot = None
+        if request.mode == "widget":
+            mini_snapshot = model.refresh_thread(request.widget_thread_id)
+            observation = HistoryObservation.from_mini(
+                mini_snapshot, quota, request.widget_thread_id,
+            )
+        else:
+            snapshot = model.refresh()
+            observation = HistoryObservation.from_dashboard(snapshot, quota)
+        history_error = None
+        try:
+            self.history_store.record(observation)
+            history_error = self.history_store.last_error
+        except (OSError, RuntimeError, TypeError, ValueError):
+            history_error = "history_write_failed"
+        return _RefreshPayload(snapshot, mini_snapshot, quota, history_error)
+
+    def _schedule_refresh_poll(self) -> None:
+        if self._refresh_poll_scheduled or self._closing:
+            return
+        self._refresh_poll_scheduled = True
+        self.root.after(25, self._poll_refresh_results)
+
+    def _poll_refresh_results(self) -> None:
+        if self._closing:
+            self._refresh_poll_scheduled = False
+            return
+        results = self.refresh_worker.drain_results()
+        if not results and not self.refresh_worker.busy:
+            results = self.refresh_worker.drain_results()
+        candidate = None
+        for result in results:
+            if result.generation != self._latest_refresh_generation:
+                self.refresh_worker.mark_discarded()
+                continue
+            candidate = result
+        if candidate is not None:
+            if candidate.error is not None:
+                self.status_message_var.set(translate("auto_refresh_failed", self.language))
+                self.header_message_label.configure(text_color=COLORS.error)
+            elif candidate.value is not None:
+                self._apply_refresh_payload(candidate.value)
+        if self.refresh_worker.busy:
+            self.root.after(25, self._poll_refresh_results)
+        else:
+            self._refresh_poll_scheduled = False
+
+    def _apply_refresh_payload(self, payload: _RefreshPayload) -> None:
+        if self._closing:
+            return
+        self.quota_snapshot = payload.quota_snapshot
+        self.history_error = payload.history_error
+        if payload.mini_snapshot is not None:
+            self._mini_thread_snapshot = self._safe_mini_snapshot(payload.mini_snapshot)
             self.mini_widget.update(
                 self.quota_snapshot,
                 self._mini_thread_snapshot,
@@ -2760,27 +2932,21 @@ class Dashboard:
                 self.advisor_result.primary if self.advisor_result is not None else None,
             )
             return
-        if show_refreshing and self.presentation is not None and self.snapshot is not None:
-            self._apply_presentation(present_dashboard(self.snapshot, bool(self.auto_refresh_var.get()), True, self.presentation))
-            self.root.update_idletasks()
-        self.snapshot = self.view_model.refresh()
+        if payload.snapshot is None:
+            return
+        self.snapshot = self.view_model.adopt_snapshot(payload.snapshot)
         if self.snapshot.selection_mode == "auto":
             self.current_page = 1
         self.lookback_days = self.snapshot.lookback_days
-        if refresh_quota:
-            self.quota_snapshot = self.quota_provider.refresh()
-        try:
-            observation = HistoryObservation.from_dashboard(
-                self.snapshot, self.quota_snapshot,
-            )
-        except (TypeError, ValueError):
-            self.history_error = "history_observation_invalid"
-        else:
-            self._record_history(observation)
         self._refresh_trend_query()
         self.advisor_result = self._evaluate_advisor()
-        self.presentation = present_dashboard(self.snapshot, bool(self.auto_refresh_var.get()))
-        self._apply_presentation(self.presentation, render_session_rows=render_session_rows)
+        self.presentation = present_dashboard(
+            self.snapshot, bool(self.auto_refresh_var.get()),
+        )
+        self._apply_presentation(
+            self.presentation,
+            render_session_rows=self._render_session_rows,
+        )
 
     def _record_history(self, observation: HistoryObservation) -> None:
         """Persist one normalized observation without blocking current UI data."""
@@ -2859,7 +3025,8 @@ class Dashboard:
                 local_timezone=None,
                 error_code="history_query_pending",
             )
-        self._render_usage_insights()
+        self._mark_pages_dirty({"overview", "usage_trends", "recommendations"})
+        self._render_visible_page()
         self.history_error = None
         request = (
             generation,
@@ -2953,11 +3120,8 @@ class Dashboard:
         ) = candidate
         if self.snapshot is not None:
             self.advisor_result = self._evaluate_advisor()
-        self._render_observed_usage()
-        self._render_usage_insights()
-        self._render_trends()
-        self._render_advisor()
-        self._render_recommendations()
+        self._mark_pages_dirty({"overview", "usage_trends", "recommendations"})
+        self._render_visible_page()
 
     def _invalidate_pending_trend_queries(self) -> None:
         self._trend_query_generation += 1
@@ -3001,9 +3165,10 @@ class Dashboard:
             if self._layout_job is not None:
                 try:
                     self.root.after_cancel(self._layout_job)
+                    self._layout_debounce_count += 1
                 except tk.TclError:
                     pass
-            self._layout_job = self.root.after(90, self._apply_responsive_layout)
+            self._layout_job = self.root.after(180, self._apply_responsive_layout)
 
     def _apply_responsive_layout(self) -> None:
         self._layout_job = None
@@ -3024,39 +3189,53 @@ class Dashboard:
                 self.brand_icon.grid_configure(padx=(0, SPACE_2))
             self._apply_sidebar_labels()
         content_width = self._dashboard_content_width(window_width)
-        self._apply_status_layout(content_width)
-        if hasattr(self, "history_selector"):
+        page = getattr(self, "current_nav_page", "overview")
+        layout = dashboard_layout_for_width(content_width)
+        signature = (
+            window_width, content_width, layout, collapsed, page,
+            metric_columns_for_width(content_width),
+        )
+        if signature == getattr(self, "_last_layout_signature", None):
+            self._layout_skip_count = getattr(self, "_layout_skip_count", 0) + 1
+            return
+        self._last_layout_signature = signature
+        self._layout_apply_count = getattr(self, "_layout_apply_count", 0) + 1
+        if page == "overview":
+            self._apply_status_layout(content_width)
+        elif page == "sessions" and hasattr(self, "history_selector"):
             self._layout_history_controls(content_width)
             self._layout_history_columns(content_width)
             self._layout_sessions_page(content_width)
-        if hasattr(self, "tool_group_cards"):
+        elif page == "tools" and hasattr(self, "tool_group_cards"):
             self._layout_tool_groups(content_width)
-        if hasattr(self, "settings_group_cards"):
+        elif page == "settings" and hasattr(self, "settings_group_cards"):
             self._layout_settings_groups(content_width)
-        if hasattr(self, "trend_metric_cells"):
+        elif page == "usage_trends" and hasattr(self, "trend_metric_cells"):
             self._layout_trend_metrics(content_width)
-        secondary_header = (
-            self.auto_switch, self.mini_widget_button,
-            self.header_settings_button, self.language_menu,
-            self.header_message_label,
-        )
-        if window_width < 1040:
-            for widget in secondary_header:
-                widget.grid_remove()
-        else:
-            for widget in secondary_header:
-                widget.grid()
-        layout = dashboard_layout_for_width(content_width)
+        if getattr(self, "_header_collapsed_state", None) != collapsed:
+            self._header_collapsed_state = collapsed
+            secondary_header = (
+                self.auto_switch, self.mini_widget_button,
+                self.header_settings_button, self.language_menu,
+                self.header_message_label,
+            )
+            if collapsed:
+                for widget in secondary_header:
+                    widget.grid_remove()
+            else:
+                for widget in secondary_header:
+                    widget.grid()
         reason_width = (
             int(content_width / 2) - 100
             if layout == "wide" else content_width - 64
         )
-        self.status_reason_label.configure(wraplength=max(180, reason_width))
-        if hasattr(self, "observed_usage_coverage_label"):
+        if page == "overview":
+            self.status_reason_label.configure(wraplength=max(180, reason_width))
+        if page == "overview" and hasattr(self, "observed_usage_coverage_label"):
             wrap = max(220, content_width - 64)
             self.observed_usage_coverage_label.configure(wraplength=wrap)
             self.observed_usage_disclaimer.configure(wraplength=wrap)
-        if hasattr(self, "usage_insights_sections"):
+        if page == "usage_trends" and hasattr(self, "usage_insights_sections"):
             wrap = max(220, content_width - 280)
             for section in self.usage_insights_sections.values():
                 for row in section["rows"]:
@@ -3281,14 +3460,12 @@ class Dashboard:
         self.last_event_var.set(presentation.last_event)
         self.last_refresh_var.set(presentation.last_refresh)
         self.recent_note.configure(text=self._recent_sessions_note())
-        self._render_sessions(presentation, render_session_rows=render_session_rows)
-        self._render_advisor()
-        self._render_observed_usage()
-        self._render_usage_insights()
-        self._render_safe_overview()
-        self._render_status_recent(presentation)
-        self._render_trends()
-        self._render_recommendations()
+        self._render_session_rows = render_session_rows
+        self._mark_pages_dirty({
+            "overview", "sessions", "session_detail",
+            "usage_trends", "recommendations",
+        })
+        self._render_visible_page()
 
     def _render_advisor(self) -> None:
         if self.advisor_result is None:
@@ -3376,7 +3553,7 @@ class Dashboard:
         self.trend_group = group
         self.trend_metric = TREND_GROUP_METRICS[group][0]
         self._configure_trend_metric_menu()
-        self._render_trends()
+        self._render_trends(target="usage_trends")
 
     def _change_usage_window(self, label: str) -> None:
         scope = self.usage_window_labels.get(label)
@@ -3384,8 +3561,6 @@ class Dashboard:
             return
         self.usage_window_kind = scope
         self._schedule_trend_query()
-        self._render_observed_usage()
-        self._render_usage_insights()
 
     def _toggle_usage_insights_group(self, group: str) -> None:
         if group not in self.usage_insights_expanded:
@@ -3475,6 +3650,7 @@ class Dashboard:
             self.usage_insights_fallback_button.grid()
             return
         self._apply_cached_snapshot(selected)
+        self.show_page("session_detail")
         self.task_detail_viewing_var.set(translate(
             "ranking_session_origin", self.language,
             kind=translate(
@@ -3485,7 +3661,6 @@ class Dashboard:
             ),
             rank=row.get("rank") or "—",
         ))
-        self.show_page("session_detail")
 
     def _expand_ranking_history(self) -> None:
         current = getattr(self, "lookback_days", 7)
@@ -3506,7 +3681,7 @@ class Dashboard:
         if metric is None or metric == self.trend_metric:
             return
         self.trend_metric = metric
-        self._render_trends()
+        self._render_trends(target="usage_trends")
 
     def _change_trend_range(self, label: str) -> None:
         labels = {
@@ -3518,11 +3693,6 @@ class Dashboard:
             return
         self.trend_range_days = days
         self._schedule_trend_query()
-        if self.snapshot is not None:
-            self.advisor_result = self._evaluate_advisor()
-        self._render_trends()
-        self._render_advisor()
-        self._render_recommendations()
 
     def _execute_trend_empty_action(self, *, fallback: bool = False) -> None:
         action = (
@@ -3579,7 +3749,7 @@ class Dashboard:
             self.usage_insights_primary_button.grid_remove()
             self.usage_insights_fallback_button.grid_remove()
 
-    def _render_trends(self) -> None:
+    def _render_trends(self, *, target: str | None = None) -> None:
         if not hasattr(self, "trend_quality_var"):
             return
         view = self.trend_view
@@ -3784,12 +3954,16 @@ class Dashboard:
             self._trend_points(view, self.trend_metric)
             if show_history_data else ()
         )
-        self.trend_chart.set_points(points)
-        show_chart = quality in {"available", "stale"} and len(points) >= 2
-        if show_chart:
-            self.trend_chart.grid()
-        else:
-            self.trend_chart.grid_remove()
+        if target != "overview":
+            self.trend_chart.set_points(points)
+            show_chart = quality in {"available", "stale"} and len(points) >= 2
+            if show_chart:
+                self.trend_chart.grid()
+            else:
+                self.trend_chart.grid_remove()
+
+        if target == "usage_trends":
+            return
 
         if contract is None or not contract.selected_is_pinned:
             preview_state = (
@@ -4117,7 +4291,7 @@ class Dashboard:
                 translate(TREND_GROUP_LABEL_KEYS["quota"], self.language),
             )
             self._configure_trend_metric_menu()
-            self._render_trends()
+        self._mark_pages_dirty({"usage_trends"})
         self.show_page("usage_trends")
 
     def _show_advisor_rules(self) -> None:
@@ -4322,7 +4496,171 @@ class Dashboard:
             coverage_color = COLORS.stale
         self.observed_usage_coverage_label.configure(text_color=coverage_color)
 
-    def _render_safe_overview(self) -> None:
+    def _render_safe_overview(self, *, target: str | None = None) -> None:
+        if target != "session_detail":
+            self._render_overview_quota()
+
+        current = (
+            resolve_activity_session(self.snapshot)
+            if self.snapshot is not None else None
+        )
+        scope_contract = (
+            build_ui_scope_contract(self.snapshot)
+            if self.snapshot is not None else None
+        )
+        selected = (
+            self.snapshot.selected_session
+            if (
+                self.snapshot is not None
+                and scope_contract is not None
+                and scope_contract.selected_is_pinned
+            )
+            else current
+        )
+
+        def session_values(session, *, role_key: str, viewing: bool):
+            if session is None:
+                full_title = translate("no_selected_thread", self.language)
+                values = {
+                    "title": full_title,
+                    "status": translate("quota_unavailable", self.language),
+                    "turns": "—", "instruction": "—", "session": "—",
+                    "activity": "—",
+                }
+                return full_title, values, None, None, "—", "unavailable"
+            instruction = session.instruction
+            usage = instruction.usage if instruction is not None else None
+            cumulative = session.thread_cumulative_usage
+            status = display_session_status(session, instruction)
+            cache = (
+                "—" if usage is None or usage.input_tokens <= 0
+                else f"{usage.cached_input_tokens / usage.input_tokens * 100:.1f}%"
+            )
+            safe_title = safe_session_primary_label(
+                session,
+                self.language,
+                role_key=role_key,
+                viewing=viewing,
+            )
+            values = {
+                "title": ellipsize_title(safe_title, 74),
+                "status": localize_presenter_text(status, self.language),
+                "turns": (
+                    str(getattr(session, "turn_count", 0))
+                    if getattr(session, "turn_count", 0) else "—"
+                ),
+                "instruction": format_compact_token_count(
+                    usage.total_tokens if usage is not None else None,
+                ),
+                "session": format_compact_token_count(
+                    cumulative.total_tokens if cumulative is not None else None,
+                ),
+                "activity": session.observed_at.astimezone().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+            }
+            return safe_title, values, usage, cumulative, cache, status
+
+        current_role_key = (
+            "ui_scope_current_activity"
+            if (
+                scope_contract is not None
+                and scope_contract.activity_scope.value == "current_activity"
+            )
+            else "ui_scope_recent_activity"
+        )
+        selected_role_key = (
+            current_role_key
+            if (
+                scope_contract is not None
+                and (
+                    not scope_contract.selected_is_pinned
+                    or scope_contract.selected_is_activity
+                )
+            )
+            else "historical_session_role"
+        )
+        (
+            _current_full_title, current_values, current_usage,
+            current_cumulative, current_cache, _current_status,
+        ) = session_values(current, role_key=current_role_key, viewing=False)
+        (
+            selected_full_title, selected_values, selected_usage,
+            selected_cumulative, selected_cache, selected_status,
+        ) = session_values(
+            selected,
+            role_key=selected_role_key,
+            viewing=False,
+        )
+
+        if target != "session_detail":
+            self._render_overview_metrics()
+            show_selected = bool(
+                scope_contract is not None and scope_contract.selected_is_pinned
+            )
+            if (
+                hasattr(self, "status_page")
+                and getattr(self, "_selected_card_visible", None) != show_selected
+            ):
+                self._selected_card_visible = show_selected
+                window_width = self._logical_window_width()
+                if window_width is not None:
+                    self._apply_status_layout(
+                        self._dashboard_content_width(window_width),
+                    )
+            if target == "overview":
+                return
+
+        if scope_contract is None or scope_contract.activity_thread_id is None:
+            viewing_key = "session_detail_no_activity"
+        elif not scope_contract.selected_is_pinned:
+            viewing_key = (
+                "session_detail_current_activity"
+                if scope_contract.activity_scope.value == "current_activity"
+                else "session_detail_recent_activity"
+            )
+        elif scope_contract.selected_is_activity:
+            viewing_key = (
+                "selected_session_same_activity"
+                if scope_contract.activity_scope.value == "current_activity"
+                else "selected_session_same_recent_activity"
+            )
+        else:
+            viewing_key = "selected_session_viewing"
+        self.task_detail_viewing_var.set(translate(
+            viewing_key, self.language, label=selected_values["title"],
+        ))
+        self.task_detail_vars["title"].set(selected_values["title"])
+        self.task_detail_vars["status"].set(selected_values["status"])
+        self.task_detail_vars["activity"].set(selected_values["activity"])
+        self.task_detail_vars["turns"].set(selected_values["turns"])
+        selected_instruction_total = (
+            selected_usage.total_tokens if selected_usage is not None else None
+        )
+        selected_session_total = (
+            selected_cumulative.total_tokens
+            if selected_cumulative is not None else None
+        )
+        selected_reasoning = (
+            selected_usage.reasoning_output_tokens
+            if selected_usage is not None else None
+        )
+        for name, raw in (
+            ("input", selected_usage.input_tokens if selected_usage is not None else None),
+            ("output", selected_usage.output_tokens if selected_usage is not None else None),
+            ("total", selected_instruction_total),
+            ("cached", selected_usage.cached_input_tokens if selected_usage is not None else None),
+            ("reasoning", selected_reasoning),
+            ("session", selected_session_total),
+        ):
+            self.task_detail_vars[name].set(format_full_token_count(raw))
+        self.task_detail_vars["cache"].set(
+            translate(
+                "derived_percent_value", self.language, value=selected_cache,
+            ) if selected_cache != "—" else "—"
+        )
+
+    def _render_overview_quota(self) -> None:
         quota = self.quota_snapshot
         for prefix, window in (("five", quota.five_hour), ("week", quota.weekly)):
             remaining = format_percent(window.remaining_percent)
@@ -4420,6 +4758,7 @@ class Dashboard:
                 )
                 self.quota_fallback_button.grid()
 
+    def _render_overview_metrics(self) -> None:
         current = (
             resolve_activity_session(self.snapshot)
             if self.snapshot is not None else None
@@ -4600,68 +4939,6 @@ class Dashboard:
                     widget["sparkline"].grid()
                 else:
                     widget["sparkline"].grid_remove()
-
-        if scope_contract is None or scope_contract.activity_thread_id is None:
-            viewing_key = "session_detail_no_activity"
-        elif not scope_contract.selected_is_pinned:
-            viewing_key = (
-                "session_detail_current_activity"
-                if scope_contract.activity_scope.value == "current_activity"
-                else "session_detail_recent_activity"
-            )
-        elif scope_contract.selected_is_activity:
-            viewing_key = (
-                "selected_session_same_activity"
-                if scope_contract.activity_scope.value == "current_activity"
-                else "selected_session_same_recent_activity"
-            )
-        else:
-            viewing_key = "selected_session_viewing"
-        self.task_detail_viewing_var.set(translate(
-            viewing_key, self.language, label=selected_values["title"],
-        ))
-        self.task_detail_vars["title"].set(selected_values["title"])
-        self.task_detail_vars["status"].set(selected_values["status"])
-        self.task_detail_vars["activity"].set(selected_values["activity"])
-        self.task_detail_vars["turns"].set(selected_values["turns"])
-        selected_instruction_total = (
-            selected_usage.total_tokens if selected_usage is not None else None
-        )
-        selected_session_total = (
-            selected_cumulative.total_tokens
-            if selected_cumulative is not None else None
-        )
-        selected_reasoning = (
-            selected_usage.reasoning_output_tokens
-            if selected_usage is not None else None
-        )
-        for name, raw in (
-            ("input", selected_usage.input_tokens if selected_usage is not None else None),
-            ("output", selected_usage.output_tokens if selected_usage is not None else None),
-            ("total", selected_instruction_total),
-            ("cached", selected_usage.cached_input_tokens if selected_usage is not None else None),
-            ("reasoning", selected_reasoning),
-            ("session", selected_session_total),
-        ):
-            self.task_detail_vars[name].set(format_full_token_count(raw))
-        self.task_detail_vars["cache"].set(
-            translate(
-                "derived_percent_value", self.language, value=selected_cache,
-            ) if selected_cache != "—" else "—"
-        )
-        show_selected = bool(
-            scope_contract is not None and scope_contract.selected_is_pinned
-        )
-        if (
-            hasattr(self, "status_page")
-            and getattr(self, "_selected_card_visible", None) != show_selected
-        ):
-            self._selected_card_visible = show_selected
-            window_width = self._logical_window_width()
-            if window_width is not None:
-                self._apply_status_layout(
-                    self._dashboard_content_width(window_width),
-                )
 
     def _metric_trend_samples(self, semantic: str) -> tuple[int, ...]:
         """Return chronological real samples; never synthesize chart points."""

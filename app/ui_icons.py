@@ -94,9 +94,15 @@ class CircularProgress(tk.Canvas):
         self.size = size
         self.track = track
         self.color = color
+        self._render_signature = None
         self.set(None)
 
     def set(self, value: float | None, *, color: str | None = None) -> None:
+        bounded = None if value is None else min(100.0, max(0.0, float(value)))
+        signature = (bounded, color or self.color, self.size, self.track)
+        if getattr(self, "_render_signature", None) == signature:
+            return
+        self._render_signature = signature
         self.delete("all")
         inset = 5
         width = max(4, round(self.size / 11))
@@ -105,8 +111,7 @@ class CircularProgress(tk.Canvas):
             start=90, extent=-359.9, style="arc", outline=self.track,
             width=width,
         )
-        if value is not None:
-            bounded = min(100.0, max(0.0, float(value)))
+        if bounded is not None:
             self.create_arc(
                 inset, inset, self.size - inset, self.size - inset,
                 start=90, extent=-(bounded * 3.6), style="arc",
@@ -140,10 +145,15 @@ class Sparkline(tk.Canvas):
         self.chart_width = width
         self.chart_height = height
         self.color = color
+        self._render_signature = None
 
     def set_samples(self, values: Iterable[float | int | None]) -> bool:
         samples = [float(value) for value in values if value is not None]
         samples = samples[-8:]
+        signature = (tuple(samples), self.chart_width, self.chart_height, self.color)
+        if getattr(self, "_render_signature", None) == signature:
+            return len(samples) >= 2
+        self._render_signature = signature
         self.delete("all")
         if len(samples) < 2:
             return False

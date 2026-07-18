@@ -3,10 +3,12 @@ from __future__ import annotations
 import inspect
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from app.trend_chart import (
     TrendCanvas,
     TrendPoint,
+    TrendTooltipLabels,
     downsample_peak_valley,
     nearest_trend_point,
 )
@@ -71,6 +73,44 @@ class DownsamplingTests(unittest.TestCase):
 
 
 class TrendCanvasContractTests(unittest.TestCase):
+    def test_hidden_canvas_defers_redraw_until_mapped(self):
+        scheduled = []
+        mapped = False
+        canvas = SimpleNamespace(
+            _disposed=False,
+            _redraw_after_id=None,
+            _needs_redraw=False,
+            winfo_viewable=lambda: mapped,
+            after_idle=lambda callback: scheduled.append(callback) or "after-1",
+        )
+        canvas._redraw = TrendCanvas._redraw.__get__(canvas)
+        canvas._schedule_redraw = TrendCanvas._schedule_redraw.__get__(canvas)
+
+        TrendCanvas._schedule_redraw(canvas)
+        self.assertTrue(canvas._needs_redraw)
+        self.assertEqual(scheduled, [])
+
+        mapped = True
+        TrendCanvas._on_map(canvas, None)
+        self.assertEqual(scheduled, [canvas._redraw])
+    def test_identical_points_and_labels_do_not_schedule_duplicate_redraw(self):
+        point = TrendPoint(datetime(2026, 1, 1, tzinfo=timezone.utc), "total", 10, "local")
+        calls = []
+        canvas = SimpleNamespace(
+            _points=(),
+            _metric_labels={},
+            _source_labels={},
+            _tooltip_labels=TrendTooltipLabels(),
+            _hide_tooltip=lambda: None,
+            _schedule_redraw=lambda: calls.append("redraw"),
+        )
+
+        TrendCanvas.set_points(canvas, (point,))
+        TrendCanvas.set_points(canvas, (point,))
+        TrendCanvas.set_labels(canvas, metric_labels={"total": "Total"})
+        TrendCanvas.set_labels(canvas, metric_labels={"total": "Total"})
+
+        self.assertEqual(calls, ["redraw", "redraw"])
     def test_canvas_binds_resize_hover_leave_and_destroy(self):
         source = inspect.getsource(TrendCanvas.__init__)
         for event in (

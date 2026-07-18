@@ -218,13 +218,39 @@ class UsageInsightsPresentationTests(unittest.TestCase):
 
 
 class UsageInsightsDashboardContractTests(unittest.TestCase):
+    def test_visible_page_routes_overview_renderer_to_exact_target(self):
+        dashboard = Dashboard.__new__(Dashboard)
+        dashboard.presentation = SimpleNamespace()
+        dashboard._dirty_pages = {"overview", "session_detail"}
+        dashboard._render_safe_overview = Mock()
+        dashboard._render_advisor = Mock()
+        dashboard._render_observed_usage = Mock()
+        dashboard._render_status_recent = Mock()
+        dashboard._render_trends = Mock()
+        dashboard._render_session_rows = True
+
+        dashboard.current_nav_page = "session_detail"
+        Dashboard._render_visible_page(dashboard)
+        dashboard._render_safe_overview.assert_called_once_with(
+            target="session_detail",
+        )
+        self.assertIn("overview", dashboard._dirty_pages)
+
+        dashboard.current_nav_page = "overview"
+        Dashboard._render_visible_page(dashboard)
+        dashboard._render_safe_overview.assert_called_with(target="overview")
+        self.assertEqual(dashboard._dirty_pages, set())
+
     def test_existing_trends_page_owns_card_and_shared_range_refresh(self):
         build_source = inspect.getsource(Dashboard._build_usage_trends_page)
         range_source = inspect.getsource(Dashboard._change_usage_window)
+        schedule_source = inspect.getsource(Dashboard._schedule_trend_query)
         worker_source = inspect.getsource(Dashboard._trend_query_worker_loop)
 
         self.assertIn("_build_usage_insights_card(page)", build_source)
-        self.assertIn("_render_usage_insights()", range_source)
+        self.assertIn("_schedule_trend_query()", range_source)
+        self.assertIn("_mark_pages_dirty", schedule_source)
+        self.assertIn("_render_visible_page", schedule_source)
         self.assertIn("_query_observed_usage", worker_source)
         self.assertNotIn("StringVar", worker_source)
         self.assertNotIn(".configure(", worker_source)
