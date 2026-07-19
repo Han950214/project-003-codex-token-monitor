@@ -86,7 +86,16 @@ def _stats(values: list[float]) -> dict[str, float | int]:
 
 
 class RealDataProfiler:
-    def __init__(self, run_id: str, output: Path, *, quiet: bool = False) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        output: Path,
+        *,
+        quiet: bool = False,
+        exercise_e3_f1: bool = False,
+        language: str | None = None,
+        geometry: str = "1280x800",
+    ) -> None:
         import customtkinter as ctk
         import tkinter as tk
         from app.history import UsageHistoryStore
@@ -98,6 +107,11 @@ class RealDataProfiler:
         self.output = output.resolve()
         self.output.parent.mkdir(parents=True, exist_ok=True)
         self.quiet = quiet
+        self.exercise_e3_f1 = exercise_e3_f1
+        self.geometry = geometry
+        self.e3_f1_checks: dict[str, bool] = {}
+        self.e3_f1_persistence_calls: list[bool] = []
+        self._restore_auto_refresh_persistence: Callable[[], None] | None = None
         self.callback_errors: list[str] = []
         self.worker_errors: list[str] = []
         self.phase = "startup"
@@ -109,6 +123,8 @@ class RealDataProfiler:
         self.phase_method_counts: dict[str, Counter[str]] = defaultdict(Counter)
         self.scrollregion_updates: Counter[str] = Counter()
         self.hidden_page_configures: Counter[str] = Counter()
+        self.page_configure_bind_counts: Counter[str] = Counter()
+        self.page_configure_event_counts: Counter[str] = Counter()
         self.widget_counts: dict[str, dict[str, int]] = {}
         self.page_first_layout_ms: dict[str, float] = {}
         self.page_first_render_ms: dict[str, float] = {}
@@ -147,19 +163,24 @@ class RealDataProfiler:
 
         self.history_store = ReadOnlyHistoryStore()
         main_module._new_backfill_history_store = lambda primary: primary
+        self._main_module = main_module
         Dashboard = main_module.Dashboard
         self._instrument_dashboard_class(Dashboard)
+        self._instrument_page_frame_creation(Dashboard)
         self._instrument_tk(tk)
 
         self.root = ctk.CTk()
         self.root.report_callback_exception = self._report_callback_exception
-        self.root.geometry("1280x800+20+20")
+        self.root.geometry(f"{self.geometry}+20+20")
         started = time.perf_counter()
         self.dashboard = Dashboard(self.root, history_store=self.history_store)
         self.constructor_ms = (time.perf_counter() - started) * 1000
         self.dashboard._request_history_backfill = lambda *args, **kwargs: False
         self.dashboard.auto_refresh.set_enabled(False)
         self.dashboard.auto_refresh_var.set(False)
+        if language is not None:
+            self.dashboard.language = language
+            self.dashboard._apply_language(language)
         self._bind_page_configures()
 
     def _instrument_dashboard_class(self, dashboard_type: type) -> None:
@@ -181,6 +202,19 @@ class RealDataProfiler:
             wrapper._e3_profiled = True
             setattr(dashboard_type, name, wrapper)
 
+    def _instrument_page_frame_creation(self, dashboard_type: type) -> None:
+        original = getattr(dashboard_type, "_create_page_frame", None)
+        if original is None or getattr(original, "_e3_profiled", False):
+            return
+
+        def create_page_frame(instance, page: str, *args, **kwargs):
+            frame = original(instance, page, *args, **kwargs)
+            self._bind_page_configure(page, frame)
+            return frame
+
+        create_page_frame._e3_profiled = True
+        setattr(dashboard_type, "_create_page_frame", create_page_frame)
+
     def _instrument_tk(self, tk: Any) -> None:
         original_configure = tk.Canvas.configure
 
@@ -201,15 +235,133 @@ class RealDataProfiler:
 
     def _bind_page_configures(self) -> None:
         for page, frame in self.dashboard.page_frames.items():
-            frame.bind(
-                "<Configure>",
-                lambda _event, target=page: self._count_page_configure(target),
-                add="+",
-            )
+            self._bind_page_configure(page, frame)
 
-    def _count_page_configure(self, page: str) -> None:
+    def _bind_page_configure(self, page: str, frame: Any) -> None:
+        if getattr(frame, "_e3_profile_configure_bound", False):
+            return
+        frame._e3_profile_configure_bound = True
+        self.page_configure_bind_counts[page] += 1
+        frame.bind(
+            "<Configure>",
+            lambda _event, target=page, source=frame: self._count_page_configure(
+                target, source,
+            ),
+            add="+",
+        )
+
+    def _count_page_configure(self, page: str, source: Any) -> None:
+        if self.dashboard.page_frames.get(page) is not source:
+            return
+        self.page_configure_event_counts[page] += 1
         if page != self.dashboard.current_nav_page:
             self.hidden_page_configures[page] += 1
+
+    def _wait_for_page_built(
+        self, page: str, done: Callable[[], None], *, timeout: float = 15.0,
+    ) -> None:
+        started = time.perf_counter()
+
+        def poll() -> None:
+            if page in getattr(self.dashboard, "built_pages", set()):
+                done()
+                return
+            if time.perf_counter() - started >= timeout:
+                self.callback_errors.append(f"page_build_timeout:{page}")
+                done()
+                return
+            self.root.after(25, poll)
+
+        poll()
+
+    def _exercise_e3_f1_gui_flow(self, finish: Callable[[], None]) -> None:
+        original_save = self._main_module.save_auto_refresh_enabled
+
+        def record_persistence(enabled: bool, _path: Path) -> bool:
+            self.e3_f1_persistence_calls.append(enabled)
+            return True
+
+        self._main_module.save_auto_refresh_enabled = record_persistence
+        self._restore_auto_refresh_persistence = lambda: setattr(
+            self._main_module, "save_auto_refresh_enabled", original_save,
+        )
+        dashboard = self.dashboard
+        self.e3_f1_checks["settings_unbuilt_on_start"] = (
+            not dashboard._page_is_built("settings")
+            and not hasattr(dashboard, "settings_auto_switch")
+        )
+        dashboard.auto_refresh_var.set(True)
+        dashboard._toggle_auto_refresh()
+        self.e3_f1_checks["header_auto_refresh"] = bool(
+            dashboard.auto_refresh_var.get()
+            and getattr(dashboard.auto_refresh, "enabled", False)
+        )
+        dashboard._toggle_auto_refresh_from_tray()
+        self.e3_f1_checks["tray_auto_refresh"] = not bool(
+            dashboard.auto_refresh_var.get()
+        )
+        dashboard.show_page("settings")
+
+        def settings_ready() -> None:
+            self.e3_f1_checks["settings_reflects_latest_state"] = bool(
+                dashboard._page_is_built("settings")
+                and dashboard.settings_auto_switch.cget("text")
+                == self._main_module.translate("disabled", dashboard.language)
+            )
+            dashboard.show_page("sessions")
+            self._wait_for_page_built("sessions", sessions_ready)
+
+        def sessions_ready() -> None:
+            dashboard.session_search_var.set("E3-F1 lifecycle")
+            dashboard.show_page("usage_trends")
+            self._wait_for_page_built("usage_trends", trends_ready)
+
+        def trends_ready() -> None:
+            dashboard.show_page("recommendations")
+            self._wait_for_page_built("recommendations", recommendations_ready)
+
+        def recommendations_ready() -> None:
+            self.root.after(2300, prune_ready)
+
+        def prune_ready() -> None:
+            built = getattr(dashboard, "built_pages", set())
+            self.e3_f1_checks["heavy_pages_pruned"] = bool(
+                dashboard.current_nav_page == "recommendations"
+                and "recommendations" in built
+                and "usage_trends" in built
+                and "sessions" not in built
+            )
+            dashboard.show_page("sessions")
+            self._wait_for_page_built("sessions", rebuilt_sessions_ready)
+
+        def rebuilt_sessions_ready() -> None:
+            self.e3_f1_checks["session_state_restored"] = (
+                dashboard.session_search_var.get() == "E3-F1 lifecycle"
+            )
+            self._begin("e3_f1_resize")
+            self._exercise_e3_f1_resize(finish)
+
+        self._wait_for_page_built("settings", settings_ready)
+
+    def _exercise_e3_f1_resize(self, finish: Callable[[], None]) -> None:
+        started = time.perf_counter()
+        index = [0]
+
+        def step() -> None:
+            if time.perf_counter() - started >= 3.0:
+                self.e3_f1_checks["callback_errors_empty"] = not self.callback_errors
+                if self._restore_auto_refresh_persistence is not None:
+                    self._restore_auto_refresh_persistence()
+                    self._restore_auto_refresh_persistence = None
+                finish()
+                return
+            self.root.geometry(
+                f"{980 + (index[0] % 8) * 50}x{660 + (index[0] % 5) * 30}+20+20"
+            )
+            index[0] += 1
+            self.root.after(50, step)
+
+        step()
 
     def _report_callback_exception(self, kind, error, error_traceback) -> None:
         self.callback_errors.append(kind.__name__)
@@ -382,6 +534,9 @@ class RealDataProfiler:
             self.startup_widget_counts = {
                 key: dict(value) for key, value in self.widget_counts.items()
             }
+            if self.exercise_e3_f1:
+                self._exercise_e3_f1_gui_flow(finish)
+                return
             self._begin("maximize_restore")
             maximize_restore()
 
@@ -500,6 +655,9 @@ class RealDataProfiler:
 
         self.root.after(50, wait_for_startup)
         self.root.mainloop()
+        if self._restore_auto_refresh_persistence is not None:
+            self._restore_auto_refresh_persistence()
+            self._restore_auto_refresh_persistence = None
         self.phase_durations[self.phase] = (time.perf_counter() - self._phase_started_at) * 1000
         self._restore_canvas_configure()
         self._write_result()
@@ -538,6 +696,10 @@ class RealDataProfiler:
             "phase_method_counts": {key: dict(value) for key, value in self.phase_method_counts.items()},
             "scrollregion_updates": dict(self.scrollregion_updates),
             "hidden_page_configures": dict(self.hidden_page_configures),
+            "page_configure_bind_counts": dict(self.page_configure_bind_counts),
+            "page_configure_event_counts": dict(self.page_configure_event_counts),
+            "e3_f1_checks": self.e3_f1_checks,
+            "e3_f1_persistence_calls": self.e3_f1_persistence_calls,
             "widget_counts": self.widget_counts,
             "startup_widget_counts": self.startup_widget_counts,
             "layout_apply_count": getattr(self.dashboard, "_layout_apply_count", 0),
@@ -568,8 +730,18 @@ def main() -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--assert-e3-f1", action="store_true")
+    parser.add_argument("--language", choices=("zh-CN", "en"))
+    parser.add_argument("--geometry", default="1280x800")
     args = parser.parse_args()
-    RealDataProfiler(args.run_id, args.output, quiet=args.quiet).run()
+    RealDataProfiler(
+        args.run_id,
+        args.output,
+        quiet=args.quiet,
+        exercise_e3_f1=args.assert_e3_f1,
+        language=args.language,
+        geometry=args.geometry,
+    ).run()
 
 
 if __name__ == "__main__":

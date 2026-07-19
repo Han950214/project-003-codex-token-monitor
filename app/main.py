@@ -679,7 +679,9 @@ class Dashboard:
         for page in HEAVY_PAGES - keep:
             self._destroy_heavy_page(page)
 
-    def _schedule_heavy_page_prune(self, target: str) -> None:
+    def _schedule_heavy_page_prune(
+        self, target: str, *, previous: str | None = None,
+    ) -> None:
         root = getattr(self, "root", None)
         if root is None or not hasattr(root, "after"):
             return
@@ -690,9 +692,10 @@ class Dashboard:
             except tk.TclError:
                 pass
             self._heavy_page_prune_job = None
-        if target in HEAVY_PAGES:
-            self._recent_heavy_page = target
-            return
+        if previous in HEAVY_PAGES and previous != target:
+            self._recent_heavy_page = previous
+        elif getattr(self, "_recent_heavy_page", None) == target:
+            self._recent_heavy_page = None
         self._heavy_page_prune_job = root.after(
             2000, self._prune_inactive_heavy_pages,
         )
@@ -3079,7 +3082,7 @@ class Dashboard:
         self._render_visible_page()
         if hasattr(self, "root") and hasattr(self, "sidebar"):
             self._apply_responsive_layout()
-        self._schedule_heavy_page_prune(target)
+        self._schedule_heavy_page_prune(target, previous=previous)
 
     def _mark_pages_dirty(self, pages: set[str] | tuple[str, ...]) -> None:
         dirty = getattr(self, "_dirty_pages", None)
@@ -3206,7 +3209,10 @@ class Dashboard:
         self.auto_refresh.set_enabled(enabled)
         save_auto_refresh_enabled(enabled, UI_SETTINGS_PATH)
         self.auto_switch.configure(text=localize_auto_refresh(enabled, self.language, self.auto_refresh.interval_seconds))
-        self.settings_auto_switch.configure(text=translate("enabled" if enabled else "disabled", self.language))
+        if self._page_is_built("settings") and hasattr(self, "settings_auto_switch"):
+            self.settings_auto_switch.configure(
+                text=translate("enabled" if enabled else "disabled", self.language),
+            )
         if self.snapshot is not None:
             self.presentation = present_dashboard(self.snapshot, enabled)
             self._apply_presentation(self.presentation)
