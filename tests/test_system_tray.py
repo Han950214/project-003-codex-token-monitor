@@ -159,7 +159,7 @@ class SystemTrayTests(unittest.TestCase):
 
     def test_close_stops_refresh_worker_tray_widget_and_root(self):
         source = inspect.getsource(Dashboard.close)
-        for expected in ("auto_refresh.close()", "refresh_worker.shutdown()", "tray.stop()", "mini_widget.destroy()", "root.destroy()"):
+        for expected in ("auto_refresh.close()", "refresh_worker.shutdown()", "diagnostics_worker.shutdown()", "tray.stop()", "mini_widget.destroy()", "root.destroy()"):
             self.assertIn(expected, source)
         self.assertIn(
             "cleanup=self.quota_provider.close",

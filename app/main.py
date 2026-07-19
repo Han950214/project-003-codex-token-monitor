@@ -45,7 +45,10 @@ from app.desktop_widget import (
     format_reset_time,
 )
 from app.diagnostics import (
-    DIAGNOSTIC_CHECK_CODES, DiagnosticContext, DiagnosticReport, run_diagnostics,
+    DIAGNOSTIC_CHECK_CODES, DiagnosticReport,
+)
+from app.diagnostics_worker import (
+    DashboardDiagnosticsWorker, DiagnosticsRequest, run_diagnostics_request,
 )
 from app.i18n import (
     LANGUAGE_LABELS, language_from_label, localize_auto_refresh,
@@ -54,7 +57,7 @@ from app.i18n import (
 from app.history import HistoryObservation, UsageHistoryStore
 from app.paths import ui_settings_path
 from app.quota import CodexQuotaSnapshot
-from app.quota_provider import CodexAppServerQuotaProvider, QuotaProvider, find_codex_executable
+from app.quota_provider import CodexAppServerQuotaProvider, QuotaProvider
 from app.single_instance import SingleInstanceGuard
 from app.version import __version__
 from app.new_thread import generic_handoff_template
@@ -281,6 +284,13 @@ class Dashboard:
         )
         self._latest_refresh_generation = 0
         self._refresh_poll_scheduled = False
+        self.diagnostics_worker = DashboardDiagnosticsWorker(
+            run_diagnostics_request,
+        )
+        self._latest_diagnostics_generation = 0
+        self._diagnostics_poll_scheduled = False
+        self._diagnostics_running = False
+        self._diagnostics_error = False
 
         self.auto_refresh_var = tk.BooleanVar(master=root, value=self.shell_state.auto_refresh_enabled)
         self.data_status_var = tk.StringVar(value="")
@@ -2808,6 +2818,7 @@ class Dashboard:
         self._history_backfill_cancel.set()
         self.auto_refresh.close()
         self.refresh_worker.shutdown()
+        self.diagnostics_worker.shutdown()
         self.tray.stop()
         self.settings_dialog.close()
         self.mini_widget.destroy()
@@ -5156,31 +5167,86 @@ class Dashboard:
         )
 
     def start_diagnostics(self) -> None:
+        if self._closing:
+            return
         self.show_page("tools")
         session_count = len(self.snapshot.recent_sessions) if self.snapshot is not None else 0
-        context = DiagnosticContext(
+        request = DiagnosticsRequest(
             version=__version__,
             runtime_mode=self.window_mode,
             frozen=bool(getattr(sys, "frozen", False)),
-            codex_executable_found=find_codex_executable() is not None,
-            quota_probe=lambda: self.quota_provider.refresh().source_status,
+            session_count=session_count,
             rollout_root=configured_sessions_dir(),
-            rollout_probe=lambda: session_count,
             state_path=configured_state_path(),
             settings_path=UI_SETTINGS_PATH,
-            startup_status=lambda: self.startup_adapter.path_status(sys.executable),
+            startup_executable=Path(sys.executable),
             tray_started=self.tray.started,
             refreshed_at=(self.snapshot.sessions_result.refreshed_at if self.snapshot is not None else None),
         )
-        self.diagnostic_report = run_diagnostics(context)
+        self._diagnostics_error = False
+        self._diagnostics_running = True
+        self._latest_diagnostics_generation = self.diagnostics_worker.submit(request)
         self._render_diagnostics()
-        self._show_diagnostic_dialog()
+        self._schedule_diagnostics_poll()
+
+    def _schedule_diagnostics_poll(self) -> None:
+        if self._diagnostics_poll_scheduled or self._closing:
+            return
+        self._diagnostics_poll_scheduled = True
+        self.root.after(25, self._poll_diagnostics_results)
+
+    def _poll_diagnostics_results(self) -> None:
+        if self._closing:
+            self._diagnostics_poll_scheduled = False
+            return
+        results = self.diagnostics_worker.drain_results()
+        if not results and not self.diagnostics_worker.busy:
+            results = self.diagnostics_worker.drain_results()
+        candidate = None
+        for result in results:
+            if result.generation != self._latest_diagnostics_generation:
+                self.diagnostics_worker.mark_discarded()
+                continue
+            candidate = result
+        if candidate is not None:
+            self._diagnostics_running = False
+            if candidate.error is not None:
+                self._diagnostics_error = True
+                self.status_message_var.set(
+                    f"{translate('diagnostics_title', self.language)} · "
+                    f"{translate('diagnostic_status_failure', self.language)}",
+                )
+                self.header_message_label.configure(text_color=COLORS.error)
+                self._mark_pages_dirty({"tools"})
+                self._render_visible_page()
+            elif candidate.value is not None:
+                self.diagnostic_report = candidate.value
+                self._diagnostics_error = False
+                self._mark_pages_dirty({"tools"})
+                self._render_visible_page()
+                self._show_diagnostic_dialog()
+        if self.diagnostics_worker.busy:
+            self.root.after(25, self._poll_diagnostics_results)
+        else:
+            self._diagnostics_poll_scheduled = False
 
     def _render_diagnostics(self) -> None:
         if not hasattr(self, "diagnostic_summary_var"):
             return
         report = self.diagnostic_report
-        if report is None:
+        running = bool(getattr(self, "_diagnostics_running", False))
+        failed = bool(getattr(self, "_diagnostics_error", False))
+        if running:
+            self.diagnostic_summary_var.set(
+                f"{translate('diagnostics_title', self.language)} · "
+                f"{translate('running', self.language)}",
+            )
+        elif failed:
+            self.diagnostic_summary_var.set(
+                f"{translate('diagnostics_title', self.language)} · "
+                f"{translate('diagnostic_status_failure', self.language)}",
+            )
+        elif report is None:
             self.diagnostic_summary_var.set(translate("diagnostics_not_run", self.language))
         else:
             self.diagnostic_summary_var.set(
@@ -5191,8 +5257,14 @@ class Dashboard:
         self.diagnostic_view_button.configure(
             state="normal" if report is not None else "disabled",
         )
+        self.diagnostic_run_button.configure(
+            state="disabled" if running else "normal",
+        )
         if getattr(self, "diagnostic_window", None) is not None:
             self._render_diagnostic_dialog()
+            self.diagnostic_rerun_button.configure(
+                state="disabled" if running else "normal",
+            )
 
     def _show_diagnostic_dialog(self) -> None:
         if self.diagnostic_report is None:

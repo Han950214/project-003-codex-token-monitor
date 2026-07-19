@@ -12,6 +12,7 @@ import argparse
 import os
 import sys
 import tempfile
+import time
 import traceback
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -1289,6 +1290,8 @@ def main() -> None:
     parser.add_argument("--cycle-observed-windows", action="store_true")
     parser.add_argument("--click-recent-index", choices=range(3), type=int)
     parser.add_argument("--assert-e1", action="store_true")
+    parser.add_argument("--diagnostics-slow", action="store_true")
+    parser.add_argument("--diagnostics-fail-once", action="store_true")
     parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--auto-close-ms", type=int, default=0)
     args = parser.parse_args()
@@ -1334,6 +1337,40 @@ def main() -> None:
     )
     dashboard.auto_refresh.set_enabled(False)
     dashboard.auto_refresh_var.set(False)
+    if args.diagnostics_fail_once and not args.diagnostics_slow:
+        raise RuntimeError("--diagnostics-fail-once requires --diagnostics-slow")
+    if args.diagnostics_slow:
+        from app.diagnostics import DiagnosticContext, run_diagnostics
+        from app.diagnostics_worker import DashboardDiagnosticsWorker
+
+        original_diagnostics_worker = dashboard.diagnostics_worker
+        original_diagnostics_worker.shutdown()
+        original_diagnostics_worker.wait_until_stopped(1)
+        diagnostic_attempts = {"count": 0}
+
+        def run_slow_diagnostics(request):
+            diagnostic_attempts["count"] += 1
+            time.sleep(1.5)
+            if args.diagnostics_fail_once and diagnostic_attempts["count"] == 1:
+                raise RuntimeError("qa_diagnostics_failure")
+            return run_diagnostics(DiagnosticContext(
+                version=request.version,
+                runtime_mode=request.runtime_mode,
+                frozen=request.frozen,
+                codex_executable_found=True,
+                quota_probe=lambda: "normal",
+                rollout_root=request.rollout_root,
+                rollout_probe=lambda: request.session_count,
+                state_path=request.state_path,
+                settings_path=request.settings_path,
+                startup_status=lambda: "unused",
+                tray_started=request.tray_started,
+                refreshed_at=request.refreshed_at,
+            ))
+
+        dashboard.diagnostics_worker = DashboardDiagnosticsWorker(
+            run_slow_diagnostics,
+        )
     percent = round(args.scale * 100)
     root.title(
         "Codex Token Monitor QA - "
@@ -1374,6 +1411,47 @@ def main() -> None:
                         dashboard, args.click_recent_index,
                     ),
                 )
+            if args.diagnostics_slow:
+                def complete_diagnostics() -> None:
+                    if dashboard.diagnostics_worker.busy or dashboard._diagnostics_running:
+                        root.after(50, complete_diagnostics)
+                        return
+                    metrics = dashboard.diagnostics_worker.metrics
+                    if args.diagnostics_fail_once and diagnostic_attempts["count"] == 1:
+                        if not dashboard._diagnostics_error:
+                            raise RuntimeError("Slow diagnostics did not expose failure")
+                        dashboard.start_diagnostics()
+                        root.after(1700, complete_diagnostics)
+                        return
+                    if dashboard.diagnostic_report is None:
+                        raise RuntimeError("Slow diagnostics did not return a report")
+                    if len(dashboard.diagnostic_report.results) != 13:
+                        raise RuntimeError("Slow diagnostics did not run every check")
+                    if metrics["max_parallel"] != 1 or metrics["ignored"] < 4:
+                        raise RuntimeError("Repeated diagnostics started parallel work")
+                    print(
+                        "F1_GUI_DIAGNOSTICS_OK "
+                        f"language={dashboard.language} submitted={metrics['submitted']} "
+                        f"executed={metrics['executed']} ignored={metrics['ignored']} "
+                        f"errors={metrics['errors']}",
+                        flush=True,
+                    )
+
+                dashboard.start_diagnostics()
+                for _ in range(4):
+                    dashboard.start_diagnostics()
+                expected_running = (
+                    f"{translate('diagnostics_title', dashboard.language)} · "
+                    f"{translate('running', dashboard.language)}"
+                )
+                if dashboard.diagnostic_summary_var.get() != expected_running:
+                    raise RuntimeError("Diagnostics did not show its running state")
+                root.after(650, lambda: dashboard.show_page("usage_trends"))
+                root.after(730, lambda: root.geometry(
+                    f"{_geometry_for_scale(args.geometry, args.scale)}+16+16",
+                ))
+                root.after(800, lambda: _scroll_trends_to_end(dashboard))
+                root.after(1700, complete_diagnostics)
             if screenshot_path is not None:
                 delay = (
                     1000

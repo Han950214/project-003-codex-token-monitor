@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import app.desktop_widget as desktop_widget_module
 import app.main as main_module
@@ -34,6 +34,7 @@ from app.diagnostics import (
     inspect_settings_file,
     run_diagnostics,
 )
+from app.diagnostics_worker import DiagnosticsWorkerResult
 from app.i18n import TRANSLATIONS, translate
 from app.main import CORE_METRICS, Dashboard
 from app.new_thread import generic_handoff_template
@@ -993,6 +994,81 @@ class Phase3DiagnosticsTests(unittest.TestCase):
         for code in DIAGNOSTIC_CHECK_CODES:
             self.assertIn(f"diagnostic_name_{code}", TRANSLATIONS["zh-CN"])
             self.assertIn(f"diagnostic_name_{code}", TRANSLATIONS["en"])
+
+    def test_start_diagnostics_only_captures_safe_values_and_submits_worker_request(self):
+        class Worker:
+            def __init__(self):
+                self.requests = []
+
+            def submit(self, request):
+                self.requests.append(request)
+                return 7
+
+        dashboard = Dashboard.__new__(Dashboard)
+        dashboard._closing = False
+        dashboard.snapshot = None
+        dashboard.window_mode = "dashboard"
+        dashboard.tray = SimpleNamespace(started=True)
+        dashboard.diagnostics_worker = Worker()
+        dashboard._diagnostics_error = False
+        dashboard._diagnostics_running = False
+        dashboard.show_page = lambda _page: None
+        dashboard._render_diagnostics = lambda: None
+        dashboard._schedule_diagnostics_poll = lambda: None
+
+        with (
+            patch.object(main_module, "configured_sessions_dir", return_value=Path("sessions")),
+            patch.object(main_module, "configured_state_path", return_value=Path("state.sqlite")),
+        ):
+            Dashboard.start_diagnostics(dashboard)
+
+        self.assertEqual(dashboard._latest_diagnostics_generation, 7)
+        self.assertTrue(dashboard._diagnostics_running)
+        request = dashboard.diagnostics_worker.requests[0]
+        self.assertEqual(request.session_count, 0)
+        self.assertEqual(request.rollout_root, Path("sessions"))
+        source = inspect.getsource(Dashboard.start_diagnostics)
+        self.assertNotIn("run_diagnostics(", source)
+        self.assertNotIn("find_codex_executable", source)
+        self.assertNotIn("quota_provider.refresh", source)
+
+    def test_diagnostics_poll_applies_latest_result_and_ignores_old_generation(self):
+        class Worker:
+            busy = False
+
+            def __init__(self):
+                self.discarded = 0
+
+            @staticmethod
+            def drain_results():
+                return (
+                    DiagnosticsWorkerResult(1, value="old"),
+                    DiagnosticsWorkerResult(2, value="latest"),
+                )
+
+            def mark_discarded(self):
+                self.discarded += 1
+
+        dashboard = Dashboard.__new__(Dashboard)
+        dashboard._closing = False
+        dashboard._latest_diagnostics_generation = 2
+        dashboard._diagnostics_poll_scheduled = True
+        dashboard._diagnostics_running = True
+        dashboard._diagnostics_error = False
+        dashboard.diagnostics_worker = Worker()
+        dashboard._mark_pages_dirty = Mock()
+        dashboard._render_visible_page = Mock()
+        dashboard._show_diagnostic_dialog = Mock()
+
+        Dashboard._poll_diagnostics_results(dashboard)
+
+        self.assertEqual(dashboard.diagnostic_report, "latest")
+        self.assertFalse(dashboard._diagnostics_running)
+        self.assertEqual(dashboard.diagnostics_worker.discarded, 1)
+        dashboard._mark_pages_dirty.assert_called_once_with({"tools"})
+        dashboard._render_visible_page.assert_called_once_with()
+        dashboard._show_diagnostic_dialog.assert_called_once_with()
+        self.assertFalse(dashboard._diagnostics_poll_scheduled)
 
 
 class Phase3WidgetAndSettingsTests(unittest.TestCase):
