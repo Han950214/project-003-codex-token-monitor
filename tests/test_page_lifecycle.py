@@ -227,6 +227,10 @@ class PageLifecycleTests(unittest.TestCase):
         )
 
     def test_unbuilt_or_destroyed_page_does_not_run_responsive_layout(self):
+        class DestroyedDetailsLabel:
+            def configure(self, **_kwargs):
+                raise AssertionError("destroyed trends widget was accessed")
+
         dashboard = object.__new__(Dashboard)
         dashboard.root = FakeWidget()
         dashboard.current_nav_page = "usage_trends"
@@ -240,6 +244,9 @@ class PageLifecycleTests(unittest.TestCase):
         dashboard._logical_window_width = lambda: 1280
         dashboard._dashboard_content_width = lambda _width: 1040
         dashboard._layout_trend_metrics = Mock()
+        dashboard.usage_insights_sections = {
+            "threads": {"rows": [{"details_label": DestroyedDetailsLabel()}]},
+        }
 
         Dashboard._apply_responsive_layout(dashboard)
 
@@ -561,6 +568,222 @@ class PageLifecycleTests(unittest.TestCase):
             Dashboard._toggle_auto_refresh(dashboard)
 
         self.assertEqual(dashboard.auto_refresh.enabled, [True])
+
+    def _language_dashboard(self, built_pages, current_page="overview"):
+        dashboard = object.__new__(Dashboard)
+        dashboard.language = "zh-CN"
+        dashboard.built_pages = set(built_pages)
+        dashboard.current_nav_page = current_page
+        dashboard.refresh_button = FakeWidget()
+        dashboard.auto_refresh_var = FakeVar(False)
+        dashboard.auto_switch = FakeWidget()
+        dashboard.language_menu = FakeWidget()
+        dashboard._apply_sidebar_labels = Mock()
+        dashboard.nav_version_var = FakeVar()
+        dashboard._update_page_title = Mock()
+        dashboard.status_section_title = FakeWidget()
+        dashboard.core_metrics_title = FakeWidget()
+        dashboard.reason_button = FakeWidget()
+        dashboard.core_metric_widgets = []
+        dashboard.observed_usage_title = FakeWidget()
+        dashboard.observed_usage_disclaimer = FakeWidget()
+        dashboard.usage_window_labels = {}
+        dashboard.observed_usage_window_menu = FakeWidget()
+        dashboard.usage_window_kind = next(iter(main_module.USAGE_WINDOW_LABEL_KEYS))
+        dashboard.observed_usage_metric_widgets = {
+            name: {"title": FakeVar()}
+            for name in ("total", "input", "output", "cached", "reasoning")
+        }
+        dashboard.observed_usage_aux_widgets = {
+            name: {"title": FakeVar()}
+            for name in ("responses", "sessions", "average", "cache_reuse")
+        }
+        dashboard._sync_compact_metric = Mock()
+        dashboard.simple_task_section_var = FakeVar()
+        dashboard.simple_task_title_vars = {
+            name: FakeVar() for name in ("turns", "instruction", "session")
+        }
+        dashboard._sync_task_stat = Mock()
+        dashboard._sync_task_summary_text = Mock()
+        dashboard.task_switch_button_home = FakeWidget()
+        dashboard.task_detail_button_home = FakeWidget()
+        dashboard.simple_quota_title = FakeWidget()
+        dashboard.quota_detail_button = FakeWidget()
+        dashboard.quota_window_widgets = {
+            "five": {"title": FakeVar()}, "week": {"title": FakeVar()},
+        }
+        dashboard.quick_title = FakeWidget()
+        dashboard.quick_action_buttons = []
+        dashboard.status_recent_title = FakeWidget()
+        dashboard.status_recent_all = FakeWidget()
+        dashboard.trend_preview_title = FakeWidget()
+        dashboard.trend_preview_open = FakeWidget()
+        dashboard._mark_pages_dirty = Mock()
+        dashboard.presentation = None
+        dashboard._render_visible_page = Mock()
+        dashboard._apply_deferred_page_language = Mock()
+        if "settings" in built_pages:
+            dashboard.settings_language_menu = FakeWidget()
+        return dashboard
+
+    def test_language_change_updates_every_built_hidden_page_without_creating_unbuilt_pages(self):
+        dashboard = self._language_dashboard(
+            {"overview", "sessions", "usage_trends", "settings"},
+        )
+        dashboard.page_frames = {
+            page: FakeWidget() for page in dashboard.built_pages
+        }
+        dashboard.view_model = QueryBomb()
+        dashboard.quota_provider = QueryBomb()
+
+        Dashboard._apply_language(dashboard, "en")
+
+        self.assertEqual(dashboard.language, "en")
+        self.assertEqual(
+            {
+                call.args[0]
+                for call in dashboard._apply_deferred_page_language.call_args_list
+            },
+            {"sessions", "usage_trends", "settings"},
+        )
+        self.assertNotIn("recommendations", dashboard.page_frames)
+        self.assertNotIn("tools", dashboard.page_frames)
+
+    def test_language_change_skips_destroyed_page_and_rebuild_uses_latest_language(self):
+        dashboard = self._language_dashboard({"overview", "usage_trends"})
+        dashboard.root = FakeRoot()
+        dashboard.page_host = FakeWidget()
+        dashboard.page_frames = {"overview": FakeWidget(), "usage_trends": FakeWidget()}
+        dashboard._building_pages = set()
+        dashboard._page_build_errors = {}
+        observed = []
+        dashboard.page_builders = {
+            "sessions": lambda _parent: observed.append(dashboard.language),
+        }
+        dashboard._apply_responsive_layout = Mock()
+
+        Dashboard._apply_language(dashboard, "zh-CN")
+        self.assertEqual(
+            [call.args[0] for call in dashboard._apply_deferred_page_language.call_args_list],
+            ["usage_trends"],
+        )
+        with patch.object(main_module.ctk, "CTkFrame", FakeWidget), patch.object(
+            main_module.ctk, "CTkLabel", FakeWidget,
+        ):
+            Dashboard.ensure_page_built(dashboard, "sessions")
+            dashboard.root.idle_callbacks.pop()()
+
+        self.assertEqual(observed, ["zh-CN"])
+
+    def test_language_change_updates_current_built_heavy_page(self):
+        for current_page in ("sessions", "usage_trends"):
+            with self.subTest(current_page=current_page):
+                dashboard = self._language_dashboard(
+                    {"overview", current_page}, current_page=current_page,
+                )
+                Dashboard._apply_language(dashboard, "en")
+                self.assertEqual(
+                    [call.args[0] for call in dashboard._apply_deferred_page_language.call_args_list],
+                    [current_page],
+                )
+
+    def test_destroyed_heavy_pages_rebuild_with_latest_language(self):
+        for page in ("sessions", "usage_trends"):
+            with self.subTest(page=page):
+                dashboard = self._language_dashboard({"overview"})
+                dashboard.root = FakeRoot()
+                dashboard.page_host = FakeWidget()
+                dashboard.page_frames = {"overview": FakeWidget()}
+                dashboard._building_pages = set()
+                dashboard._page_build_errors = {}
+                dashboard._apply_responsive_layout = Mock()
+                observed = []
+                dashboard.page_builders = {
+                    page: lambda _parent: observed.append(dashboard.language),
+                }
+
+                Dashboard._apply_language(dashboard, "en")
+                with patch.object(main_module.ctk, "CTkFrame", FakeWidget), patch.object(
+                    main_module.ctk, "CTkLabel", FakeWidget,
+                ):
+                    Dashboard.ensure_page_built(dashboard, page)
+                    dashboard.root.idle_callbacks.pop()()
+
+                self.assertEqual(observed, ["en"])
+
+    def test_recent_session_selection_after_sessions_destroy_only_updates_python_state(self):
+        class DestroyedWidget:
+            def set(self, _value):
+                raise AssertionError("destroyed sessions widget was accessed")
+
+        dashboard = object.__new__(Dashboard)
+        dashboard.status_recent_rows = [{"thread_id": "thread-1"}]
+        dashboard.status_filter = "attention"
+        dashboard._session_search_text = "stale"
+        dashboard.session_search_var = DestroyedWidget()
+        dashboard.status_filter_menu = DestroyedWidget()
+        dashboard.built_pages = {"overview"}
+        dashboard.presentation = None
+        dashboard.language = "en"
+        dashboard.view_model = Mock(select_cached_thread=lambda _thread_id: object())
+        dashboard._apply_cached_snapshot = Mock()
+
+        Dashboard._select_status_recent(dashboard, 0)
+
+        self.assertEqual(dashboard.status_filter, "all")
+        self.assertEqual(dashboard._session_search_text, "")
+        dashboard._apply_cached_snapshot.assert_called_once()
+
+    def test_quota_history_after_trends_destroy_keeps_state_and_rebuilds_page(self):
+        class DestroyedWidget:
+            def set(self, _value):
+                raise AssertionError("destroyed trends widget was accessed")
+
+        dashboard = object.__new__(Dashboard)
+        dashboard.language = "en"
+        dashboard.built_pages = {"overview"}
+        dashboard.trend_group_menu = DestroyedWidget()
+        dashboard.trend_metric_menu = DestroyedWidget()
+        dashboard._mark_pages_dirty = Mock()
+        dashboard.show_page = Mock()
+
+        Dashboard._show_quota_history(dashboard)
+
+        self.assertEqual(dashboard.trend_group, "quota")
+        self.assertEqual(dashboard.trend_metric, main_module.TREND_GROUP_METRICS["quota"][0])
+        dashboard._mark_pages_dirty.assert_called_once_with({"usage_trends"})
+        dashboard.show_page.assert_called_once_with("usage_trends")
+
+    def test_quota_history_before_trends_build_uses_only_python_state(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.language = "en"
+        dashboard.built_pages = {"overview"}
+        dashboard._mark_pages_dirty = Mock()
+        dashboard.show_page = Mock()
+
+        Dashboard._show_quota_history(dashboard)
+
+        self.assertEqual(dashboard.trend_group, "quota")
+        self.assertEqual(dashboard.trend_metric, "five_hour")
+        dashboard.show_page.assert_called_once_with("usage_trends")
+
+    def test_quota_history_updates_live_trends_controls(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.language = "en"
+        dashboard.built_pages = {"overview", "usage_trends"}
+        dashboard.trend_group_menu = FakeWidget()
+        dashboard.trend_metric_menu = FakeWidget()
+        dashboard._configure_trend_metric_menu = Mock()
+        dashboard._mark_pages_dirty = Mock()
+        dashboard.show_page = Mock()
+
+        Dashboard._show_quota_history(dashboard)
+
+        self.assertEqual(
+            dashboard.trend_group_menu.value,
+            main_module.translate("trend_group_quota", "en"),
+        )
+        dashboard._configure_trend_metric_menu.assert_called_once_with()
 
 
 if __name__ == "__main__":

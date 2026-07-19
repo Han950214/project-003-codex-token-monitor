@@ -1437,10 +1437,11 @@ class Dashboard:
             return
         self.status_filter = "all"
         self._session_search_text = ""
-        if hasattr(self, "session_search_var"):
-            self.session_search_var.set("")
-        if hasattr(self, "status_filter_menu"):
-            self.status_filter_menu.set(translate("filter_all", self.language))
+        if self._page_is_built("sessions"):
+            if hasattr(self, "session_search_var"):
+                self.session_search_var.set("")
+            if hasattr(self, "status_filter_menu"):
+                self.status_filter_menu.set(translate("filter_all", self.language))
         presentation = getattr(self, "presentation", None)
         if presentation is not None:
             for row_index, row in enumerate(presentation.recent_sessions):
@@ -2620,9 +2621,9 @@ class Dashboard:
         self.trend_preview_open.configure(text=translate("view_trends", language))
 
         if not all(self._page_is_built(page) for page in ALL_PAGES):
-            page = getattr(self, "current_nav_page", "overview")
-            if page != "overview" and self._page_is_built(page):
-                self._apply_deferred_page_language(page, language)
+            for page in tuple(getattr(self, "built_pages", ())):
+                if page != "overview":
+                    self._apply_deferred_page_language(page, language)
             self._mark_pages_dirty(set(ALL_PAGES))
             if self.presentation is not None:
                 self._apply_presentation(self.presentation)
@@ -3701,7 +3702,11 @@ class Dashboard:
             wrap = max(220, content_width - 64)
             self.observed_usage_coverage_label.configure(wraplength=wrap)
             self.observed_usage_disclaimer.configure(wraplength=wrap)
-        if page == "usage_trends" and hasattr(self, "usage_insights_sections"):
+        if (
+            page == "usage_trends"
+            and self._page_is_built("usage_trends")
+            and hasattr(self, "usage_insights_sections")
+        ):
             wrap = max(220, content_width - 280)
             for section in self.usage_insights_sections.values():
                 for row in section["rows"]:
@@ -4772,7 +4777,11 @@ class Dashboard:
     def _show_quota_history(self) -> None:
         self.trend_group = "quota"
         self.trend_metric = TREND_GROUP_METRICS["quota"][0]
-        if hasattr(self, "trend_group_menu"):
+        if (
+            self._page_is_built("usage_trends")
+            and hasattr(self, "trend_group_menu")
+            and hasattr(self, "trend_metric_menu")
+        ):
             self.trend_group_menu.set(
                 translate(TREND_GROUP_LABEL_KEYS["quota"], self.language),
             )

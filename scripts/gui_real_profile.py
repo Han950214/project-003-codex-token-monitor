@@ -93,6 +93,7 @@ class RealDataProfiler:
         *,
         quiet: bool = False,
         exercise_e3_f1: bool = False,
+        exercise_e3_f2: bool = False,
         language: str | None = None,
         geometry: str = "1280x800",
     ) -> None:
@@ -108,8 +109,10 @@ class RealDataProfiler:
         self.output.parent.mkdir(parents=True, exist_ok=True)
         self.quiet = quiet
         self.exercise_e3_f1 = exercise_e3_f1
+        self.exercise_e3_f2 = exercise_e3_f2
         self.geometry = geometry
         self.e3_f1_checks: dict[str, bool] = {}
+        self.e3_f2_checks: dict[str, bool] = {}
         self.e3_f1_persistence_calls: list[bool] = []
         self._restore_auto_refresh_persistence: Callable[[], None] | None = None
         self.callback_errors: list[str] = []
@@ -363,6 +366,110 @@ class RealDataProfiler:
 
         step()
 
+    def _exercise_e3_f2_gui_flow(self, finish: Callable[[], None]) -> None:
+        dashboard = self.dashboard
+        target_language = "en" if dashboard.language == "zh-CN" else "zh-CN"
+        dashboard.show_page("settings")
+
+        def settings_ready() -> None:
+            dashboard.show_page("sessions")
+            self._wait_for_page_built("sessions", sessions_ready)
+
+        def sessions_ready() -> None:
+            dashboard.show_page("usage_trends")
+            self._wait_for_page_built("usage_trends", trends_ready)
+
+        def trends_ready() -> None:
+            dashboard.show_page("overview")
+            built_before_language_change = set(dashboard.built_pages)
+            dashboard._apply_language(target_language)
+            self.e3_f2_checks["all_built_pages_language_synced"] = bool(
+                dashboard.session_search_label.cget("text")
+                == self._main_module.translate("search_sessions", target_language)
+                and self._main_module.translate(
+                    self._main_module.TREND_GROUP_LABEL_KEYS["tokens"],
+                    target_language,
+                )
+                in dashboard.trend_group_menu.cget("values")
+                and dashboard.settings_language_menu.get()
+                == self._main_module.LANGUAGE_LABELS[target_language]
+            )
+            self.e3_f2_checks["unbuilt_pages_not_created"] = bool(
+                dashboard.built_pages == built_before_language_change
+                and "recommendations" not in dashboard.built_pages
+                and "tools" not in dashboard.built_pages
+            )
+            dashboard.show_page("sessions")
+            self._wait_for_page_built("sessions", sessions_language_ready)
+
+        def sessions_language_ready() -> None:
+            self.e3_f2_checks["sessions_language_visible"] = bool(
+                dashboard.session_search_label.cget("text")
+                == self._main_module.translate("search_sessions", target_language)
+            )
+            dashboard.show_page("usage_trends")
+            self._wait_for_page_built("usage_trends", trends_language_ready)
+
+        def trends_language_ready() -> None:
+            self.e3_f2_checks["trends_language_visible"] = bool(
+                self._main_module.translate(
+                    self._main_module.TREND_GROUP_LABEL_KEYS["tokens"],
+                    target_language,
+                )
+                in dashboard.trend_group_menu.cget("values")
+            )
+            dashboard.show_page("overview")
+            self.root.after(2300, sessions_destroyed)
+
+        def sessions_destroyed() -> None:
+            self.e3_f2_checks["sessions_destroyed"] = not dashboard._page_is_built(
+                "sessions",
+            )
+            if dashboard.status_recent_rows:
+                dashboard.status_recent_rows[0]["thread_id"] = "e3-f2-safe-click"
+                dashboard._select_status_recent(0)
+            self.e3_f2_checks["recent_session_after_sessions_destroy_safe"] = bool(
+                dashboard.status_filter == "all"
+                and dashboard._session_search_text == ""
+            )
+            dashboard.show_page("sessions")
+            self._wait_for_page_built("sessions", rebuilt_sessions_ready)
+
+        def rebuilt_sessions_ready() -> None:
+            self.e3_f2_checks["rebuilt_sessions_use_latest_language"] = bool(
+                dashboard.session_search_label.cget("text")
+                == self._main_module.translate("search_sessions", target_language)
+            )
+            dashboard.show_page("settings")
+            self.root.after(2300, trends_destroyed)
+
+        def trends_destroyed() -> None:
+            self.e3_f2_checks["trends_destroyed"] = not dashboard._page_is_built(
+                "usage_trends",
+            )
+            dashboard._show_quota_history()
+            self._wait_for_page_built("usage_trends", rebuilt_trends_ready)
+
+        def rebuilt_trends_ready() -> None:
+            self.e3_f2_checks["quota_history_after_trends_destroy_safe"] = bool(
+                dashboard.trend_group == "quota"
+                and dashboard.trend_metric
+                == self._main_module.TREND_GROUP_METRICS["quota"][0]
+                and dashboard.trend_group_menu.cget("values")
+            )
+            self.e3_f2_checks["rebuilt_trends_use_latest_language"] = bool(
+                self._main_module.translate(
+                    self._main_module.TREND_GROUP_LABEL_KEYS["quota"],
+                    target_language,
+                )
+                in dashboard.trend_group_menu.cget("values")
+            )
+            self.e3_f2_checks["callback_errors_empty"] = not self.callback_errors
+            self.e3_f2_checks["worker_errors_empty"] = not self.worker_errors
+            finish()
+
+        self._wait_for_page_built("settings", settings_ready)
+
     def _report_callback_exception(self, kind, error, error_traceback) -> None:
         self.callback_errors.append(kind.__name__)
         self.output.with_suffix(".error").write_text(
@@ -537,6 +644,9 @@ class RealDataProfiler:
             if self.exercise_e3_f1:
                 self._exercise_e3_f1_gui_flow(finish)
                 return
+            if self.exercise_e3_f2:
+                self._exercise_e3_f2_gui_flow(finish)
+                return
             self._begin("maximize_restore")
             maximize_restore()
 
@@ -699,6 +809,7 @@ class RealDataProfiler:
             "page_configure_bind_counts": dict(self.page_configure_bind_counts),
             "page_configure_event_counts": dict(self.page_configure_event_counts),
             "e3_f1_checks": self.e3_f1_checks,
+            "e3_f2_checks": self.e3_f2_checks,
             "e3_f1_persistence_calls": self.e3_f1_persistence_calls,
             "widget_counts": self.widget_counts,
             "startup_widget_counts": self.startup_widget_counts,
@@ -731,6 +842,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--assert-e3-f1", action="store_true")
+    parser.add_argument("--assert-e3-f2", action="store_true")
     parser.add_argument("--language", choices=("zh-CN", "en"))
     parser.add_argument("--geometry", default="1280x800")
     args = parser.parse_args()
@@ -739,6 +851,7 @@ def main() -> None:
         args.output,
         quiet=args.quiet,
         exercise_e3_f1=args.assert_e3_f1,
+        exercise_e3_f2=args.assert_e3_f2,
         language=args.language,
         geometry=args.geometry,
     ).run()
