@@ -1278,7 +1278,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         self.assertEqual(len(dashboard.quick_action_buttons), 4)
         self.assertEqual(len(dashboard.status_recent_rows), 3)
 
-    def test_recent_task_text_regions_select_their_row(self):
+    def test_recent_task_compact_row_selects_its_session(self):
         class ClickBindingWidget(FakeWidget):
             instances = []
 
@@ -1311,20 +1311,8 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             Dashboard._build_status_recent_card(dashboard, parent)
 
         row = dashboard.status_recent_rows[0]["button"]
-        text_regions = [
-            widget for widget in ClickBindingWidget.instances
-            if widget.master is row
-        ]
-        callbacks = [
-            widget.bindings["<Button-1>"]
-            for widget in text_regions
-            if "<Button-1>" in widget.bindings
-        ]
-
-        self.assertEqual(len(callbacks), 3)
-        for callback in callbacks:
-            callback(SimpleNamespace())
-        self.assertEqual(selected, [0, 0, 0])
+        row.options["command"]()
+        self.assertEqual(selected, [0])
 
     def test_product_semantics_labels_exist_in_both_languages(self):
         expected = {

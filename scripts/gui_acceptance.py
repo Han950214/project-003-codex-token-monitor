@@ -715,9 +715,25 @@ def build_scenario(
     )
 
 
+def _ensure_qa_page_built(dashboard: object, page: str) -> None:
+    """Build one real widget page synchronously for deterministic QA assertions."""
+
+    if not hasattr(dashboard, "built_pages") or page in dashboard.built_pages:
+        return
+    dashboard._build_page_now(page)  # noqa: SLF001 - deterministic GUI QA
+    dashboard._apply_deferred_page_language(  # noqa: SLF001
+        page, dashboard.language,
+    )
+    dashboard._mark_pages_dirty({page})  # noqa: SLF001
+
+
 def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> None:
     """Apply production DTOs to already-built real Dashboard widgets."""
 
+    _ensure_qa_page_built(dashboard, "usage_trends")
+    _ensure_qa_page_built(dashboard, "recommendations")
+    _ensure_qa_page_built(dashboard, "sessions")
+    _ensure_qa_page_built(dashboard, "session_detail")
     dashboard.trend_range_days = scenario.after.range_days
     dashboard.trend_view = scenario.trend_view
     dashboard.selected_history_view = scenario.selected_history_view
@@ -825,8 +841,7 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
         dashboard._render_safe_overview()  # noqa: SLF001 - production QA path
         if scenario.current_session is not None:
             dashboard._render_status_recent(dashboard.presentation)  # noqa: SLF001
-            dashboard._render_sessions(dashboard.presentation)  # noqa: SLF001
-            dashboard._render_trends()  # noqa: SLF001
+    _ensure_qa_page_built(dashboard, page)
     dashboard.show_page(page)
 
 
@@ -844,6 +859,7 @@ def _assert_e1_state_widgets(
     saved_backfill = dashboard.history_backfill_status
     saved_quota = dashboard.quota_snapshot
 
+    _ensure_qa_page_built(dashboard, "usage_trends")
     dashboard.show_page("usage_trends")
     dashboard.trend_group = "tokens"
     dashboard.trend_metric = "total"
@@ -1128,6 +1144,7 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
         and scenario.selected_session.thread_id not in ranking_text
     )
     if visible_ranking is not None:
+        _ensure_qa_page_built(dashboard, "usage_trends")
         dashboard.show_page("usage_trends")
         visible_ranking["locate_button"].invoke()
         dashboard.root.update_idletasks()
@@ -1152,6 +1169,7 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
         dashboard.current_nav_page == "usage_trends"
         and dashboard.trend_group == "quota"
     )
+    _ensure_qa_page_built(dashboard, "recommendations")
     dashboard.show_page("recommendations")
     dashboard._execute_ui_action("view_quota")  # noqa: SLF001 - QA action path
     checks["quota_action_routes_overview"] = dashboard.current_nav_page == "overview"
@@ -1188,9 +1206,7 @@ def _click_recent_title(dashboard: object, index: int) -> None:
     """Exercise the visible title region of a recent-session card."""
     row = dashboard.status_recent_rows[index]
     thread_id = row["thread_id"]
-    title_label = row["title_label"]
-    visible_target = getattr(title_label, "_label", title_label)
-    visible_target.event_generate("<Button-1>")
+    row["button"].invoke()
     if getattr(dashboard.snapshot, "selected_thread_id", None) != thread_id:
         raise RuntimeError(
             "Recent-session title click did not change the selection: "
@@ -1201,7 +1217,10 @@ def _click_recent_title(dashboard: object, index: int) -> None:
 
 
 def _scroll_trends_to_end(dashboard: object) -> None:
-    """Expose the final summary row in the real 980x660 trends page."""
+    """Expose the final row in the active real scrollable page."""
+    if getattr(dashboard, "current_nav_page", None) == "overview":
+        dashboard.status_page._parent_canvas.yview_moveto(1.0)  # noqa: SLF001
+        return
     page = dashboard.trend_chart
     while page is not None and not hasattr(page, "_parent_canvas"):
         page = getattr(page, "master", None)
@@ -1446,7 +1465,10 @@ def main() -> None:
                 )
                 if dashboard.diagnostic_summary_var.get() != expected_running:
                     raise RuntimeError("Diagnostics did not show its running state")
-                root.after(650, lambda: dashboard.show_page("usage_trends"))
+                root.after(650, lambda: (
+                    _ensure_qa_page_built(dashboard, "usage_trends"),
+                    dashboard.show_page("usage_trends"),
+                ))
                 root.after(730, lambda: root.geometry(
                     f"{_geometry_for_scale(args.geometry, args.scale)}+16+16",
                 ))
