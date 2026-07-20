@@ -438,6 +438,74 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
             for card in cards
         ))
 
+    def test_recent_sessions_card_keeps_its_grid_position_when_selection_changes(self):
+        def recent_position(selection_mode: str):
+            dashboard = object.__new__(Dashboard)
+            dashboard.status_page = FakeWidget()
+            (
+                dashboard.status_advice_card,
+                dashboard.core_metrics_panel,
+                dashboard.observed_usage_card,
+                dashboard.task_summary_card,
+                dashboard.quota_center_card,
+                dashboard.trend_preview_card,
+                dashboard.status_recent_card,
+                dashboard.quick_actions_card,
+            ) = [FakeWidget() for _ in range(8)]
+            dashboard._layout_core_metrics = lambda _width: None
+            dashboard._layout_observed_usage = lambda _width: None
+            dashboard.snapshot = SimpleNamespace(
+                selection_mode=selection_mode,
+                selected_session=object() if selection_mode == "pinned" else None,
+            )
+
+            Dashboard._apply_status_layout(dashboard, 1_400)
+            return dashboard.status_recent_card.grid_calls[-1][1]
+
+        self.assertEqual(recent_position("auto"), recent_position("pinned"))
+
+    def test_return_to_current_session_restores_auto_follow_without_navigation(self):
+        snapshot = object()
+        dashboard = object.__new__(Dashboard)
+        dashboard.view_model = Mock(set_auto_follow=Mock(return_value=snapshot))
+        dashboard._apply_cached_snapshot = Mock()
+        dashboard.show_page = Mock()
+
+        Dashboard._return_to_current_session(dashboard)
+
+        dashboard.view_model.set_auto_follow.assert_called_once_with()
+        dashboard._apply_cached_snapshot.assert_called_once_with(snapshot)
+        dashboard.show_page.assert_not_called()
+
+    def test_startup_fast_refresh_uses_bounded_sessions_without_waiting_for_quota(self):
+        snapshot = object()
+        quota = CodexQuotaSnapshot.unavailable()
+        dashboard = object.__new__(Dashboard)
+        dashboard._refresh_view_model = Mock(refresh=Mock(return_value=snapshot))
+        dashboard.quota_provider = Mock()
+        dashboard.history_store = Mock()
+        request = main_module._RefreshRequest(
+            "dashboard", 7, "auto", None, None, True, quota,
+            startup_fast=True,
+        )
+
+        payload = Dashboard._execute_refresh(dashboard, request)
+
+        dashboard._refresh_view_model.refresh.assert_called_once_with(
+            candidate_limit=24, include_enrichment=False,
+        )
+        dashboard.quota_provider.refresh.assert_not_called()
+        dashboard.history_store.record.assert_not_called()
+        self.assertIs(payload.snapshot, snapshot)
+        self.assertTrue(payload.startup_fast)
+
+    def test_startup_backfill_is_blocked_until_the_first_snapshot_is_applied(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard._closing = False
+        dashboard._first_snapshot_applied = False
+
+        self.assertFalse(Dashboard._request_history_backfill(dashboard))
+
     def test_dashboard_layout_helper_boundaries(self):
         cases = {
             1_400: "wide",

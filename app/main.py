@@ -168,6 +168,7 @@ class _RefreshRequest:
     widget_thread_id: str | None
     refresh_quota: bool
     quota_snapshot: CodexQuotaSnapshot
+    startup_fast: bool = False
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,7 @@ class _RefreshPayload:
     mini_snapshot: MiniThreadSnapshot | None
     quota_snapshot: CodexQuotaSnapshot
     history_error: str | None
+    startup_fast: bool = False
 
 
 class Dashboard:
@@ -292,6 +294,8 @@ class Dashboard:
         )
         self._latest_refresh_generation = 0
         self._refresh_poll_scheduled = False
+        self._first_snapshot_applied = False
+        self._startup_backfill_job: str | None = None
         self.diagnostics_worker = DashboardDiagnosticsWorker(
             run_diagnostics_request,
         )
@@ -365,10 +369,9 @@ class Dashboard:
         self._apply_language(self.language)
         self.data_status_var.set(translate("status_refreshing", self.language))
         self.status_message_var.set(translate("message_refreshing", self.language))
-        self.root.after_idle(self.refresh)
+        self.root.after_idle(lambda: self.refresh(startup_fast=True))
         self.auto_refresh.set_enabled(bool(self.auto_refresh_var.get()))
         self._apply_startup_mode(load_startup_mode(UI_SETTINGS_PATH))
-        self.root.after(250, self._request_history_backfill)
 
     def _build(self) -> None:
         self.root.grid_columnconfigure(0, minsize=184)
@@ -1137,7 +1140,7 @@ class Dashboard:
             self.simple_task_display_vars[name] = display_var
         self.task_activity_label = self.simple_task_title
         self.task_switch_button_home = ctk.CTkButton(
-            card, text="", command=lambda: self.show_page("sessions"), width=96,
+            card, text="", command=self._return_to_current_session, width=128,
             height=30, fg_color="transparent", border_width=1,
             border_color=COLORS.border, text_color=COLORS.primary_text,
             hover_color=COLORS.accent_soft,
@@ -1154,8 +1157,6 @@ class Dashboard:
         self.task_detail_button_home.grid(
             row=2, column=1, sticky="e", padx=(0, SPACE_4), pady=(0, SPACE_3),
         )
-        for widget in (card, self.simple_task_title):
-            widget.bind("<Button-1>", lambda _event: self.show_page("session_detail"))
         return card
 
     def _build_quota_center_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
@@ -1453,14 +1454,9 @@ class Dashboard:
             self._apply_cached_snapshot(snapshot)
 
     def _apply_status_layout(self, content_width: int) -> None:
-        show_selected = bool(
-            getattr(self, "snapshot", None) is not None
-            and self.snapshot.selection_mode == "pinned"
-            and self.snapshot.selected_session is not None
-        )
         mode = dashboard_layout_for_width(content_width)
         layout_signature = (
-            mode, show_selected, metric_columns_for_width(content_width),
+            mode, metric_columns_for_width(content_width),
         )
         if getattr(self, "_status_layout_signature", None) == layout_signature:
             return
@@ -1497,14 +1493,9 @@ class Dashboard:
                 row=2, column=0, sticky="nsew", padx=(0, SPACE_2),
                 pady=(0, SPACE_3),
             )
-            if show_selected:
-                self.task_summary_card.grid(
-                    row=2, column=1, sticky="nsew", pady=(0, SPACE_3),
-                )
-            else:
-                self.status_recent_card.grid(
-                    row=2, column=1, sticky="nsew", pady=(0, SPACE_3),
-                )
+            self.status_recent_card.grid(
+                row=2, column=1, sticky="nsew", pady=(0, SPACE_3),
+            )
             self.observed_usage_card.grid(
                 row=3, column=0, columnspan=2,
                 sticky="ew", pady=(0, SPACE_3),
@@ -1513,26 +1504,19 @@ class Dashboard:
                 row=4, column=0, sticky="nsew", padx=(0, SPACE_2),
                 pady=(0, SPACE_3),
             )
-            if show_selected:
-                self.status_recent_card.grid(
-                    row=4, column=1, sticky="nsew", pady=(0, SPACE_3),
-                )
-                self.quick_actions_card.grid(
-                    row=5, column=0, columnspan=2,
-                    sticky="ew", pady=(0, SPACE_3),
-                )
-            else:
-                self.quick_actions_card.grid(
-                    row=4, column=1, sticky="nsew", pady=(0, SPACE_3),
-                )
+            self.task_summary_card.grid(
+                row=4, column=1, sticky="nsew", pady=(0, SPACE_3),
+            )
+            self.quick_actions_card.grid(
+                row=5, column=0, columnspan=2,
+                sticky="ew", pady=(0, SPACE_3),
+            )
         else:
             self.status_page.grid_columnconfigure(0, weight=1, uniform="")
             ordered_cards = [
                 self.status_advice_card, self.quota_center_card,
-                self.core_metrics_panel,
+                self.core_metrics_panel, self.task_summary_card,
             ]
-            if show_selected:
-                ordered_cards.append(self.task_summary_card)
             ordered_cards.extend((
                 self.observed_usage_card, self.trend_preview_card,
                 self.status_recent_card, self.quick_actions_card,
@@ -1688,7 +1672,7 @@ class Dashboard:
         actions = ctk.CTkFrame(page, fg_color="transparent")
         actions.grid(row=5, column=0, sticky="ew", pady=SPACE_3)
         self.task_refresh_button = ctk.CTkButton(actions, text="", command=self.manual_refresh)
-        self.task_switch_button = ctk.CTkButton(actions, text="", command=lambda: self.show_page("sessions"), fg_color="transparent", border_width=1, border_color=COLORS.border, text_color=COLORS.primary_text)
+        self.task_switch_button = ctk.CTkButton(actions, text="", command=self._return_to_current_session, fg_color="transparent", border_width=1, border_color=COLORS.border, text_color=COLORS.primary_text)
         self.task_new_thread_button = ctk.CTkButton(actions, text="", command=self._show_new_thread_dialog, fg_color=COLORS.orange, hover_color=COLORS.estimate)
         for column, button in enumerate((self.task_refresh_button, self.task_switch_button, self.task_new_thread_button)):
             button.grid(row=0, column=column, padx=(0, SPACE_2))
@@ -2602,7 +2586,7 @@ class Dashboard:
             self.simple_task_title_vars[name].set(translate(key, language))
             self._sync_task_stat(name)
         self._sync_task_summary_text()
-        self.task_switch_button_home.configure(text=translate("switch_task", language))
+        self.task_switch_button_home.configure(text=translate("return_to_current", language))
         self.task_detail_button_home.configure(text=translate("view_details", language))
         self.simple_quota_title.configure(
             text=translate("official_live_quota_title", language),
@@ -2653,7 +2637,7 @@ class Dashboard:
             self.task_detail_labels[name].configure(text=translate(key, language))
         self.task_back_button.configure(text=translate("nav_sessions", language))
         self.task_refresh_button.configure(text=translate("manual_refresh", language))
-        self.task_switch_button.configure(text=translate("switch_task", language))
+        self.task_switch_button.configure(text=translate("return_to_current", language))
         self.task_new_thread_button.configure(text=translate("prepare_new_thread", language))
 
         self.task_selector_label.configure(text=translate("monitored_task", language))
@@ -2836,7 +2820,7 @@ class Dashboard:
                 self.task_detail_labels[name].configure(text=translate(key, language))
             self.task_back_button.configure(text=translate("nav_sessions", language))
             self.task_refresh_button.configure(text=translate("manual_refresh", language))
-            self.task_switch_button.configure(text=translate("switch_task", language))
+            self.task_switch_button.configure(text=translate("return_to_current", language))
             self.task_new_thread_button.configure(text=translate("prepare_new_thread", language))
             return
         if page == "sessions":
@@ -3164,6 +3148,11 @@ class Dashboard:
         if snapshot is not None:
             self._apply_cached_snapshot(snapshot)
 
+    def _return_to_current_session(self) -> None:
+        snapshot = self.view_model.set_auto_follow()
+        if snapshot is not None:
+            self._apply_cached_snapshot(snapshot)
+
     def _change_time_range(self, label: str) -> None:
         labels = {translate(f"last_{days}_days", self.language): days for days in (7, 30, 90)}
         days = labels.get(label)
@@ -3272,7 +3261,7 @@ class Dashboard:
         elif action == "minimize":
             self._minimize_to_taskbar()
 
-    def refresh(self, show_refreshing: bool = True, render_session_rows: bool = True, refresh_quota: bool = True) -> None:
+    def refresh(self, show_refreshing: bool = True, render_session_rows: bool = True, refresh_quota: bool = True, startup_fast: bool = False) -> None:
         if self._closing:
             return
         if show_refreshing:
@@ -3280,7 +3269,10 @@ class Dashboard:
                 self.mini_widget.set_refreshing()
             else:
                 self.data_status_var.set(translate("status_refreshing", self.language))
-                self.status_message_var.set(translate("message_refreshing", self.language))
+                self.status_message_var.set(translate(
+                    "startup_loading_fast" if startup_fast else "message_refreshing",
+                    self.language,
+                ))
                 self.header_message_label.configure(text_color=COLORS.secondary_text)
         self._render_session_rows = render_session_rows
         request = _RefreshRequest(
@@ -3291,6 +3283,7 @@ class Dashboard:
             self._widget_thread_id,
             refresh_quota,
             self.quota_snapshot,
+            startup_fast,
         )
         self._latest_refresh_generation = self.refresh_worker.submit(request)
         self._schedule_refresh_poll()
@@ -3301,7 +3294,8 @@ class Dashboard:
         model.selection_mode = request.selection_mode
         model.selected_thread_id = request.selected_thread_id
         quota = (
-            self.quota_provider.refresh()
+            request.quota_snapshot
+            if request.startup_fast else self.quota_provider.refresh()
             if request.refresh_quota else request.quota_snapshot
         )
         snapshot = None
@@ -3312,15 +3306,25 @@ class Dashboard:
                 mini_snapshot, quota, request.widget_thread_id,
             )
         else:
-            snapshot = model.refresh()
+            snapshot = model.refresh(
+                candidate_limit=24 if request.startup_fast else None,
+                include_enrichment=not request.startup_fast,
+            )
+            if request.startup_fast:
+                return _RefreshPayload(
+                    snapshot, None, quota, None, startup_fast=True,
+                )
             observation = HistoryObservation.from_dashboard(snapshot, quota)
         history_error = None
-        try:
-            self.history_store.record(observation)
-            history_error = self.history_store.last_error
-        except (OSError, RuntimeError, TypeError, ValueError):
-            history_error = "history_write_failed"
-        return _RefreshPayload(snapshot, mini_snapshot, quota, history_error)
+        if not request.startup_fast:
+            try:
+                self.history_store.record(observation)
+                history_error = self.history_store.last_error
+            except (OSError, RuntimeError, TypeError, ValueError):
+                history_error = "history_write_failed"
+        return _RefreshPayload(
+            snapshot, mini_snapshot, quota, history_error, request.startup_fast,
+        )
 
     def _schedule_refresh_poll(self) -> None:
         if self._refresh_poll_scheduled or self._closing:
@@ -3381,6 +3385,18 @@ class Dashboard:
             self.presentation,
             render_session_rows=self._render_session_rows,
         )
+        if payload.startup_fast:
+            self._first_snapshot_applied = True
+            self.refresh(show_refreshing=False)
+            if self._startup_backfill_job is None:
+                self._startup_backfill_job = self.root.after(
+                    2000, self._start_startup_history_backfill,
+                )
+
+    def _start_startup_history_backfill(self) -> None:
+        self._startup_backfill_job = None
+        if self._first_snapshot_applied:
+            self._request_history_backfill()
 
     def _record_history(self, observation: HistoryObservation) -> None:
         """Persist one normalized observation without blocking current UI data."""
@@ -5870,6 +5886,8 @@ class Dashboard:
         """Start at most one bounded worker without delaying UI refresh."""
 
         if self._closing:
+            return False
+        if not manual and not self._first_snapshot_applied:
             return False
         now = monotonic()
         with self._history_backfill_lock:

@@ -94,6 +94,7 @@ class RealDataProfiler:
         quiet: bool = False,
         exercise_e3_f1: bool = False,
         exercise_e3_f2: bool = False,
+        exercise_e4: bool = False,
         language: str | None = None,
         geometry: str = "1280x800",
     ) -> None:
@@ -110,9 +111,12 @@ class RealDataProfiler:
         self.quiet = quiet
         self.exercise_e3_f1 = exercise_e3_f1
         self.exercise_e3_f2 = exercise_e3_f2
+        self.exercise_e4 = exercise_e4
         self.geometry = geometry
         self.e3_f1_checks: dict[str, bool] = {}
         self.e3_f2_checks: dict[str, bool] = {}
+        self.e4_checks: dict[str, bool | float | int] = {}
+        self.startup_timeline: dict[str, float] = {}
         self.e3_f1_persistence_calls: list[bool] = []
         self._restore_auto_refresh_persistence: Callable[[], None] | None = None
         self.callback_errors: list[str] = []
@@ -178,13 +182,82 @@ class RealDataProfiler:
         started = time.perf_counter()
         self.dashboard = Dashboard(self.root, history_store=self.history_store)
         self.constructor_ms = (time.perf_counter() - started) * 1000
-        self.dashboard._request_history_backfill = lambda *args, **kwargs: False
-        self.dashboard.auto_refresh.set_enabled(False)
-        self.dashboard.auto_refresh_var.set(False)
+        self.startup_timeline["dashboard_constructed_ms"] = self.constructor_ms
+        if not self.exercise_e4:
+            self.dashboard._request_history_backfill = lambda *args, **kwargs: False
+            self.dashboard.auto_refresh.set_enabled(False)
+            self.dashboard.auto_refresh_var.set(False)
+        self._instrument_e4_startup()
         if language is not None:
             self.dashboard.language = language
             self.dashboard._apply_language(language)
         self._bind_page_configures()
+
+    def _instrument_e4_startup(self) -> None:
+        if not self.exercise_e4:
+            return
+        started = self.phase_started
+        dashboard = self.dashboard
+
+        def mark(name: str) -> None:
+            self.startup_timeline.setdefault(
+                name, round((time.perf_counter() - started) * 1000, 3),
+            )
+
+        self.root.bind("<Map>", lambda _event: mark("shell_visible_ms"), add="+")
+        apply_payload = dashboard._apply_refresh_payload
+
+        def observed_payload(payload):
+            result = apply_payload(payload)
+            if payload.snapshot is not None:
+                mark("first_snapshot_applied_ms")
+                mark("first_status_visible_ms")
+                mark("current_session_metrics_visible_ms")
+                if any(
+                    row.get("thread_id") is not None
+                    for row in dashboard.status_recent_rows
+                ):
+                    mark("recent_sessions_visible_ms")
+                mark("first_useful_content_ms")
+            if getattr(payload, "startup_fast", False):
+                mark("fast_snapshot_applied_ms")
+            if not getattr(payload, "startup_fast", False):
+                mark("full_enrichment_applied_ms")
+                mark("official_quota_visible_ms")
+                mark("all_sessions_usage_visible_ms")
+            return result
+
+        dashboard._apply_refresh_payload = observed_payload
+        request_backfill = dashboard._request_history_backfill
+
+        def observed_backfill(*args, **kwargs):
+            result = request_backfill(*args, **kwargs)
+            if result:
+                mark("history_backfill_started_ms")
+            return result
+
+        dashboard._request_history_backfill = observed_backfill
+        poll_backfill = dashboard._poll_history_backfill_results
+
+        def observed_backfill_poll():
+            result = poll_backfill()
+            if (
+                "history_backfill_started_ms" in self.startup_timeline
+                and dashboard.history_backfill_status != "running"
+            ):
+                mark("full_history_ready_ms")
+            return result
+
+        dashboard._poll_history_backfill_results = observed_backfill_poll
+        poll_trends = dashboard._poll_trend_query_results
+
+        def observed_trends_poll():
+            result = poll_trends()
+            if dashboard.trend_view.error_code is None:
+                mark("trends_visible_ms")
+            return result
+
+        dashboard._poll_trend_query_results = observed_trends_poll
 
     def _instrument_dashboard_class(self, dashboard_type: type) -> None:
         for name in PROFILE_METHODS:
@@ -470,6 +543,87 @@ class RealDataProfiler:
 
         self._wait_for_page_built("settings", settings_ready)
 
+    def _exercise_e4_gui_flow(self, finish: Callable[[], None]) -> None:
+        dashboard = self.dashboard
+        started = time.perf_counter()
+
+        def wait_for_recent() -> None:
+            rows = [
+                row for row in dashboard.status_recent_rows
+                if isinstance(row.get("thread_id"), str)
+            ]
+            if len(rows) < 3 and time.perf_counter() - started < 60:
+                self.root.after(50, wait_for_recent)
+                return
+            self.e4_checks["recent_rows_available"] = len(rows) >= 3
+            if len(rows) < 3:
+                finish()
+                return
+            card_position = dict(dashboard.status_recent_card.grid_info())
+            canvas = dashboard.status_page._parent_canvas
+            before_yview = canvas.yview()[0]
+            selected = [0, 1, 2, 0]
+
+            def select_next(index: int = 0) -> None:
+                if index >= len(selected):
+                    after_yview = canvas.yview()[0]
+                    self.e4_checks["selection_scroll_delta"] = round(
+                        abs(after_yview - before_yview), 6,
+                    )
+                    self.e4_checks["recent_card_position_changed"] = (
+                        dict(dashboard.status_recent_card.grid_info()) != card_position
+                    )
+                    self.e4_checks["single_click_opens_detail"] = (
+                        dashboard.current_nav_page == "session_detail"
+                    )
+                    self.e4_checks["continuous_selection_passed"] = bool(
+                        dashboard.snapshot is not None
+                        and dashboard.snapshot.selection_mode == "pinned"
+                    )
+                    dashboard.task_detail_button_home.invoke()
+                    self.root.after(100, detail_ready)
+                    return
+                dashboard.status_recent_rows[selected[index]]["button"].invoke()
+                self.root.after(100, lambda: select_next(index + 1))
+
+            def detail_ready() -> None:
+                self.e4_checks["explicit_detail_action_opened"] = (
+                    dashboard.current_nav_page == "session_detail"
+                )
+                dashboard.show_page("overview")
+                dashboard.task_switch_button_home.invoke()
+                self.root.after(100, return_ready)
+
+            def return_ready() -> None:
+                self.e4_checks["return_to_current_passed"] = bool(
+                    dashboard.snapshot is not None
+                    and dashboard.snapshot.selection_mode == "auto"
+                    and dashboard.current_nav_page == "overview"
+                )
+                self.e4_checks["selection_layout_shift_count"] = int(
+                    dict(dashboard.status_recent_card.grid_info()) != card_position
+                )
+                self.e4_checks["callback_errors_empty"] = not self.callback_errors
+                self.e4_checks["worker_errors_empty"] = not self.worker_errors
+                wait_for_backfill()
+
+            def wait_for_backfill() -> None:
+                if (
+                    dashboard.history_backfill_status == "running"
+                    and time.perf_counter() - started < 60
+                ):
+                    self.root.after(100, wait_for_backfill)
+                    return
+                self.e4_checks["history_backfill_finished"] = (
+                    dashboard.history_backfill_status != "running"
+                )
+                finish()
+
+            select_next()
+
+        wait_for_recent()
+
+
     def _report_callback_exception(self, kind, error, error_traceback) -> None:
         self.callback_errors.append(kind.__name__)
         self.output.with_suffix(".error").write_text(
@@ -647,6 +801,9 @@ class RealDataProfiler:
             if self.exercise_e3_f2:
                 self._exercise_e3_f2_gui_flow(finish)
                 return
+            if self.exercise_e4:
+                self._exercise_e4_gui_flow(finish)
+                return
             self._begin("maximize_restore")
             maximize_restore()
 
@@ -810,6 +967,8 @@ class RealDataProfiler:
             "page_configure_event_counts": dict(self.page_configure_event_counts),
             "e3_f1_checks": self.e3_f1_checks,
             "e3_f2_checks": self.e3_f2_checks,
+            "e4_checks": self.e4_checks,
+            "startup_timeline_ms": self.startup_timeline,
             "e3_f1_persistence_calls": self.e3_f1_persistence_calls,
             "widget_counts": self.widget_counts,
             "startup_widget_counts": self.startup_widget_counts,
@@ -843,6 +1002,7 @@ def main() -> None:
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--assert-e3-f1", action="store_true")
     parser.add_argument("--assert-e3-f2", action="store_true")
+    parser.add_argument("--assert-e4", action="store_true")
     parser.add_argument("--language", choices=("zh-CN", "en"))
     parser.add_argument("--geometry", default="1280x800")
     args = parser.parse_args()
@@ -852,6 +1012,7 @@ def main() -> None:
         quiet=args.quiet,
         exercise_e3_f1=args.assert_e3_f1,
         exercise_e3_f2=args.assert_e3_f2,
+        exercise_e4=args.assert_e4,
         language=args.language,
         geometry=args.geometry,
     ).run()

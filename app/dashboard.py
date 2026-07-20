@@ -365,11 +365,20 @@ class DashboardViewModel:
         self.lookback_days = days
         return True
 
-    def refresh(self, _runs: object = None) -> DashboardSnapshot:
+    def refresh(
+        self,
+        _runs: object = None,
+        *,
+        candidate_limit: int | None = None,
+        include_enrichment: bool = True,
+    ) -> DashboardSnapshot:
         result = (
             self.rollout_sessions_loader()
             if self.rollout_sessions_loader is not None
-            else self.rollout_reader.refresh_sessions(lookback_days=self.lookback_days)
+            else self.rollout_reader.refresh_sessions(
+                lookback_days=self.lookback_days,
+                candidate_limit=candidate_limit,
+            )
         )
         recent = [_effective_session_status(session, result.refreshed_at) for session in result.sessions]
         current = next(
@@ -392,9 +401,12 @@ class DashboardViewModel:
             [session.thread_id for session in recent]
             + ([selected.thread_id] if selected is not None else [])
         ))
-        metadata = self.state_batch_loader(tuple(thread_ids)) if thread_ids else {}
+        metadata = (
+            self.state_batch_loader(tuple(thread_ids))
+            if include_enrichment and thread_ids else {}
+        )
         try:
-            titles = self.title_batch_loader()
+            titles = self.title_batch_loader() if include_enrichment else None
         except Exception:
             titles = None
         # A failed title batch must not erase titles already verified for a

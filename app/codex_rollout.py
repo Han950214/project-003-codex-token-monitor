@@ -275,6 +275,7 @@ class CodexRolloutReader:
         sessions_dir: Path | None = None,
         pinned_path: Path | None = None,
         lookback_days: int | None = None,
+        candidate_limit: int | None = None,
     ) -> RolloutSessionsResult:
         started = perf_counter()
         refreshed_at = datetime.now(timezone.utc)
@@ -287,7 +288,8 @@ class CodexRolloutReader:
             mtime_cutoff = (refreshed_at - timedelta(days=lookback_days + 1)).timestamp()
             candidate_paths = [path for path in candidate_paths if _safe_mtime(path) >= mtime_cutoff]
         candidates_found = len(candidate_paths)
-        candidates = sorted(candidate_paths, key=_safe_mtime, reverse=True)[: self.candidate_limit]
+        limit = candidate_limit or self.candidate_limit
+        candidates = sorted(candidate_paths, key=_safe_mtime, reverse=True)[:limit]
         if pinned_path is not None and pinned_path.is_file() and not any(_same_path(pinned_path, path) for path in candidates):
             candidates.append(pinned_path)
         parsed: list[tuple[datetime, RolloutUsageResult]] = []
@@ -320,8 +322,8 @@ class CodexRolloutReader:
         latest = sessions[0].thread_id if sessions else None
         return RolloutSessionsResult(
             sessions, latest, sum(item.status == "in_progress" for item in sessions), refreshed_at,
-            self.candidate_limit, candidates_found, min(candidates_found, self.candidate_limit),
-            candidates_found > self.candidate_limit, files_parsed, files_reused,
+            limit, candidates_found, min(candidates_found, limit),
+            candidates_found > limit, files_parsed, files_reused,
             round((perf_counter() - started) * 1000),
         )
 
