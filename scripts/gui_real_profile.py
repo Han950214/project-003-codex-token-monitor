@@ -1,8 +1,8 @@
-"""Privacy-safe real-data GUI profiler for Phase 3.1-E3.
+"""Privacy-safe real-data GUI profiler for Phase 3.1-E4-F1.
 
 The profiler uses the normal Dashboard and local data sources, but opens the
-history database read-only and records only timings, counts, widget types, page
-names, callback counts, and anonymous aggregate statistics.
+    history database read-only and records only timings, counts, widget types, page
+    names, callback counts, and privacy-safe UI assertions.
 """
 
 from __future__ import annotations
@@ -116,6 +116,8 @@ class RealDataProfiler:
         self.e3_f1_checks: dict[str, bool] = {}
         self.e3_f2_checks: dict[str, bool] = {}
         self.e4_checks: dict[str, bool | float | int] = {}
+        self._layout_before_title_enrichment: tuple[object, ...] | None = None
+        self._layout_after_title_enrichment: tuple[object, ...] | None = None
         self.startup_timeline: dict[str, float] = {}
         self.e3_f1_persistence_calls: list[bool] = []
         self._restore_auto_refresh_persistence: Callable[[], None] | None = None
@@ -209,6 +211,7 @@ class RealDataProfiler:
 
         def observed_payload(payload):
             result = apply_payload(payload)
+            self.root.update_idletasks()
             if payload.snapshot is not None:
                 mark("first_snapshot_applied_ms")
                 mark("first_status_visible_ms")
@@ -221,10 +224,12 @@ class RealDataProfiler:
                 mark("first_useful_content_ms")
             if getattr(payload, "startup_fast", False):
                 mark("fast_snapshot_applied_ms")
+                self._layout_before_title_enrichment = self._session_selector_layout()
             if not getattr(payload, "startup_fast", False):
                 mark("full_enrichment_applied_ms")
                 mark("official_quota_visible_ms")
                 mark("all_sessions_usage_visible_ms")
+                self._layout_after_title_enrichment = self._session_selector_layout()
             return result
 
         dashboard._apply_refresh_payload = observed_payload
@@ -258,6 +263,46 @@ class RealDataProfiler:
             return result
 
         dashboard._poll_trend_query_results = observed_trends_poll
+
+    def _session_selector_layout(self) -> tuple[object, ...]:
+        dashboard = self.dashboard
+        widgets = (
+            getattr(dashboard, "session_selector_card", None),
+            getattr(dashboard, "status_recent_card", None),
+            getattr(dashboard, "task_summary_card", None),
+        )
+        result: list[object] = []
+        for widget in widgets:
+            if widget is None:
+                result.append(None)
+                continue
+            info = widget.grid_info()
+            result.append((info.get("row"), info.get("column"), info.get("columnspan")))
+        return tuple(result)
+
+    def _visible_overview_text(self) -> str:
+        dashboard = self.dashboard
+        values: list[str] = []
+        for row in getattr(dashboard, "status_recent_rows", ()):
+            for key in ("title", "full_title", "detail", "current"):
+                variable = row.get(key)
+                if variable is not None:
+                    values.append(str(variable.get()))
+        for variable in (
+            getattr(dashboard, "task_full_title_var", None),
+            *getattr(dashboard, "simple_task_vars", {}).values(),
+        ):
+            if variable is not None:
+                values.append(str(variable.get()))
+        for widget in getattr(dashboard, "core_metric_widgets", ()):
+            for key in ("value", "display", "full"):
+                variable = widget.get(key)
+                if variable is not None:
+                    try:
+                        values.append(str(variable.get()))
+                    except Exception:
+                        pass
+        return "\n".join(values)
 
     def _instrument_dashboard_class(self, dashboard_type: type) -> None:
         for name in PROFILE_METHODS:
@@ -556,6 +601,34 @@ class RealDataProfiler:
                 self.root.after(50, wait_for_recent)
                 return
             self.e4_checks["recent_rows_available"] = len(rows) >= 3
+            self.e4_checks["visible_recent_row_count"] = len(rows)
+            selector = getattr(dashboard, "session_selector_card", None)
+            self.e4_checks["recent_and_selected_same_viewport"] = bool(
+                selector is not None
+                and dashboard.status_recent_card.winfo_ismapped()
+                and dashboard.task_summary_card.winfo_ismapped()
+            )
+            visible_text = self._visible_overview_text()
+            self.e4_checks["anonymous_code_visible"] = (
+                "匿名代码" in visible_text or "Anonymous code" in visible_text
+            )
+            self.e4_checks["safe_title_visible"] = bool(
+                dashboard.status_recent_rows[0]["full_title"].get()
+            )
+            if dashboard.language == "zh-CN":
+                self.e4_checks["chinese_token_format_passed"] = not any(
+                    marker in visible_text for marker in ("M", "B")
+                )
+            else:
+                self.e4_checks["english_token_format_preserved"] = not any(
+                    marker in visible_text for marker in ("万", "亿")
+                )
+            self.e4_checks["title_enrichment_layout_shift_count"] = int(
+                self._layout_before_title_enrichment is not None
+                and self._layout_after_title_enrichment is not None
+                and self._layout_before_title_enrichment
+                != self._layout_after_title_enrichment
+            )
             if len(rows) < 3:
                 finish()
                 return
@@ -563,6 +636,8 @@ class RealDataProfiler:
             canvas = dashboard.status_page._parent_canvas
             before_yview = canvas.yview()[0]
             selected = [0, 1, 2, 0]
+            selection_checks: list[bool] = []
+            selection_check_details: list[dict[str, bool]] = []
 
             def select_next(index: int = 0) -> None:
                 if index >= len(selected):
@@ -577,14 +652,37 @@ class RealDataProfiler:
                         dashboard.current_nav_page == "session_detail"
                     )
                     self.e4_checks["continuous_selection_passed"] = bool(
-                        dashboard.snapshot is not None
+                        selection_checks
+                        and len(selection_checks) == len(selected)
+                        and all(selection_checks)
+                        and dashboard.snapshot is not None
                         and dashboard.snapshot.selection_mode == "pinned"
                     )
+                    self.e4_checks["selection_step_checks"] = selection_check_details
                     dashboard.task_detail_button_home.invoke()
                     self.root.after(100, detail_ready)
                     return
-                dashboard.status_recent_rows[selected[index]]["button"].invoke()
-                self.root.after(100, lambda: select_next(index + 1))
+                row = dashboard.status_recent_rows[selected[index]]
+                row["button"].invoke()
+
+                def verify_selection() -> None:
+                    self.root.update_idletasks()
+                    selected_session = getattr(dashboard.snapshot, "selected_session", None)
+                    selected_id_ok = bool(
+                        selected_session is not None
+                        and selected_session.thread_id == row.get("thread_id")
+                    )
+                    title_ok = bool(dashboard.task_full_title_var.get())
+                    viewport_ok = bool(dashboard.session_selector_card.winfo_ismapped())
+                    selection_check_details.append({
+                        "selected_id": selected_id_ok,
+                        "title": title_ok,
+                        "viewport": viewport_ok,
+                    })
+                    selection_checks.append(selected_id_ok and title_ok and viewport_ok)
+                    select_next(index + 1)
+
+                self.root.after(100, verify_selection)
 
             def detail_ready() -> None:
                 self.e4_checks["explicit_detail_action_opened"] = (
@@ -603,9 +701,22 @@ class RealDataProfiler:
                 self.e4_checks["selection_layout_shift_count"] = int(
                     dict(dashboard.status_recent_card.grid_info()) != card_position
                 )
+                self.e4_checks["selection_same_viewport"] = bool(
+                    self.e4_checks.get("recent_and_selected_same_viewport", False)
+                )
                 self.e4_checks["callback_errors_empty"] = not self.callback_errors
                 self.e4_checks["worker_errors_empty"] = not self.worker_errors
-                wait_for_backfill()
+                refresh_position = self._session_selector_layout()
+                dashboard.manual_refresh()
+
+                def manual_refresh_ready() -> None:
+                    self.root.update_idletasks()
+                    self.e4_checks["manual_refresh_layout_shift_count"] = int(
+                        self._session_selector_layout() != refresh_position
+                    )
+                    wait_for_backfill()
+
+                self._wait_for_refresh(manual_refresh_ready)
 
             def wait_for_backfill() -> None:
                 if (
@@ -1003,6 +1114,7 @@ def main() -> None:
     parser.add_argument("--assert-e3-f1", action="store_true")
     parser.add_argument("--assert-e3-f2", action="store_true")
     parser.add_argument("--assert-e4", action="store_true")
+    parser.add_argument("--assert-e4-f1", action="store_true")
     parser.add_argument("--language", choices=("zh-CN", "en"))
     parser.add_argument("--geometry", default="1280x800")
     args = parser.parse_args()
@@ -1012,7 +1124,7 @@ def main() -> None:
         quiet=args.quiet,
         exercise_e3_f1=args.assert_e3_f1,
         exercise_e3_f2=args.assert_e3_f2,
-        exercise_e4=args.assert_e4,
+        exercise_e4=args.assert_e4 or args.assert_e4_f1,
         language=args.language,
         geometry=args.geometry,
     ).run()

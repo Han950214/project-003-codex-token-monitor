@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from app.codex_rollout import make_thread_safe_id
 from app.i18n import translate
-from app.ui_format import format_compact_token_count
+from app.ui_format import format_localized_token_count
 from app.usage_summary import CoverageState, UsageInsightsResult, UsageWindowKind
 
 
@@ -149,12 +149,12 @@ def _thread_row(item: object, rank: int, language: str) -> UsageInsightRowView:
         ),
         primary=translate(
             "usage_insights_total_cache", language,
-            total=_tokens(item.total_tokens), cache=_percent(item.cache_reuse),
+            total=_tokens(item.total_tokens, language), cache=_percent(item.cache_reuse),
         ),
         details=translate(
             "usage_insights_thread_summary", language,
             metrics=metrics, count=item.completed_response_count,
-            label=item.safe_thread_label,
+            label=_safe_session_label(item, language, turns=item.completed_response_count),
         ),
         coverage=_coverage(item.coverage_status, language),
         kind="thread",
@@ -172,11 +172,11 @@ def _response_row(item: object, rank: int, language: str) -> UsageInsightRowView
         ),
         primary=translate(
             "usage_insights_total_cache", language,
-            total=_tokens(item.total_tokens), cache=_percent(item.cache_reuse),
+            total=_tokens(item.total_tokens, language), cache=_percent(item.cache_reuse),
         ),
         details=translate(
             "usage_insights_response_session", language,
-            metrics=metrics, label=item.safe_thread_label,
+            metrics=metrics, label=_safe_session_label(item, language),
         ),
         coverage=_coverage(item.coverage_status, language),
         kind="response",
@@ -197,9 +197,10 @@ def _cache_row(item: object, rank: int, language: str) -> UsageInsightRowView:
         ),
         details=translate(
             "usage_insights_cache_summary", language,
-            input=_tokens(item.valid_input_tokens),
-            cached=_tokens(item.valid_cached_tokens),
-            count=item.valid_response_count, label=item.safe_thread_label,
+            input=_tokens(item.valid_input_tokens, language),
+            cached=_tokens(item.valid_cached_tokens, language),
+            count=item.valid_response_count,
+            label=_safe_session_label(item, language, turns=item.valid_response_count),
         ),
         coverage=_coverage(item.coverage_status, language),
         kind="cache",
@@ -211,15 +212,29 @@ def _cache_row(item: object, rank: int, language: str) -> UsageInsightRowView:
 def _metrics(item: object, language: str) -> str:
     return translate(
         "usage_insights_metric_summary", language,
-        input=_tokens(item.input_tokens),
-        output=_tokens(item.output_tokens),
-        cached=_tokens(item.cached_tokens),
-        reasoning=_tokens(item.reasoning_tokens),
+        input=_tokens(item.input_tokens, language),
+        output=_tokens(item.output_tokens, language),
+        cached=_tokens(item.cached_tokens, language),
+        reasoning=_tokens(item.reasoning_tokens, language),
     )
 
 
-def _tokens(value: int | None) -> str:
-    return format_compact_token_count(value)
+def _tokens(value: int | None, language: str) -> str:
+    return format_localized_token_count(value, language)
+
+
+def _safe_session_label(item: object, language: str, turns: int | None = None) -> str:
+    observed_at = getattr(item, "last_observed_at", None) or getattr(item, "observed_at", None)
+    time = _time(observed_at) if observed_at is not None else "—"
+    turn_text = (
+        translate("task_turns_value", language, value=turns)
+        if isinstance(turns, int) and turns > 0
+        else translate("session_turn_unknown", language)
+    )
+    return translate(
+        "ranking_session_fallback", language,
+        time=time, turns=turn_text,
+    )
 
 
 def _percent(value: float | None) -> str:

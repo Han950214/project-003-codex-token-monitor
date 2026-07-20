@@ -79,12 +79,12 @@ SCENARIOS = (
     "semantic_selected_one_saved",
 )
 QA_THREAD_ID = "qa-thread-001"
-QA_PRIVATE_THREAD_NAMES = (
-    "用户Prompt：分析内部财务数据和客户名单",
-    "User prompt: analyze confidential customer records",
+QA_SAFE_THREAD_NAMES = (
+    "整理本周项目进展",
+    "Review release checklist",
 )
-QA_PRIVATE_FRAGMENTS = (
-    "内部财务数据", "客户名单", "confidential customer records",
+QA_FORBIDDEN_FRAGMENTS = (
+    "raw-thread-id", "sha256:", "匿名代码", "Anonymous code",
 )
 QA_INSIGHT_THREAD_IDS = (
     "sha256:" + "1" * 56 + "aaabcdef",
@@ -610,17 +610,17 @@ def build_scenario(
         "semantic_selected_one_saved",
     }:
         current_session = _semantic_session(
-            "qa-current-A", QA_PRIVATE_THREAD_NAMES[0], current,
+            "qa-current-A", QA_SAFE_THREAD_NAMES[0], current,
             status="in_progress", total_tokens=1_200,
             session_total_tokens=9_000, turn_count=12,
         )
         current_session = replace(
             current_session,
             title_source="codex_app_server.thread_display_title",
-            full_title=QA_PRIVATE_THREAD_NAMES[0],
+            full_title=QA_SAFE_THREAD_NAMES[0],
         )
         history_session = _semantic_session(
-            "qa-history-B", QA_PRIVATE_THREAD_NAMES[1],
+            "qa-history-B", QA_SAFE_THREAD_NAMES[1],
             current - timedelta(minutes=8),
             status="exact", total_tokens=2_400,
             session_total_tokens=18_000, turn_count=18,
@@ -628,7 +628,7 @@ def build_scenario(
         history_session = replace(
             history_session,
             title_source="codex_app_server.thread_display_title",
-            full_title=QA_PRIVATE_THREAD_NAMES[1],
+            full_title=QA_SAFE_THREAD_NAMES[1],
         )
         recent_sessions = (current_session, history_session)
         selected_session = (
@@ -1112,20 +1112,25 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
     visible_values.extend(str(value) for value in tooltip_values)
     visible_text = "\n".join(visible_values)
     checks["thread_name_privacy_sentinel"] = all(
-        fragment not in visible_text for fragment in QA_PRIVATE_FRAGMENTS
+        fragment not in visible_text for fragment in QA_FORBIDDEN_FRAGMENTS
     )
     checks["tooltip_privacy_sentinel"] = all(
         fragment not in "\n".join(str(value) for value in tooltip_values)
-        for fragment in QA_PRIVATE_FRAGMENTS
+        for fragment in QA_FORBIDDEN_FRAGMENTS
+    )
+    checks["codex_title_visible"] = all(
+        title in visible_text for title in QA_SAFE_THREAD_NAMES
+    )
+    checks["codex_title_tooltip_visible"] = all(
+        title in "\n".join(str(value) for value in tooltip_values)
+        for title in QA_SAFE_THREAD_NAMES
     )
     safe_selected_label = dashboard.simple_task_vars["title"].get()
     checks["safe_session_metadata_preserved"] = bool(
-        str(scenario.selected_session.turn_count) in safe_selected_label
-        and translate("historical_session_role", dashboard.language)
-        in safe_selected_label
-        and translate("anonymous_session_code", dashboard.language, code="")
-        .split(":", 1)[0].split("：", 1)[0]
-        in safe_selected_label
+        safe_selected_label == QA_SAFE_THREAD_NAMES[1]
+        and str(scenario.selected_session.turn_count) not in safe_selected_label
+        and "Anonymous code" not in safe_selected_label
+        and "匿名代码" not in safe_selected_label
     )
     checks.update(_assert_e1_state_widgets(dashboard, scenario))
     ranking_rows = dashboard.usage_insights_sections["threads"]["rows"]

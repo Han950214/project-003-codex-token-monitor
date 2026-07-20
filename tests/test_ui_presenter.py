@@ -250,7 +250,7 @@ class UiScopeContractTests(unittest.TestCase):
         self.assertIsNone(contract.selected_thread_id)
         self.assertFalse(contract.selected_is_pinned)
 
-    def test_safe_session_labels_use_role_time_turns_viewing_and_anonymous_code(self):
+    def test_safe_session_labels_use_metadata_fallback_without_anonymous_code(self):
         session = self._session("raw-thread-must-not-render", "exact", in_progress=False)
 
         label = safe_session_primary_label(
@@ -266,8 +266,8 @@ class UiScopeContractTests(unittest.TestCase):
             label,
         )
         self.assertIn("2 turns", label)
-        self.assertIn("Viewing", label)
-        self.assertIn("Anonymous code", label)
+        self.assertNotIn("Viewing", label)
+        self.assertNotIn("Anonymous", label)
         self.assertNotIn(session.thread_id, label)
         self.assertNotIn(session.display_title, label)
 
@@ -288,14 +288,14 @@ class UiScopeContractTests(unittest.TestCase):
 
         label = labels[session.thread_id]
         self.assertIn("Recent activity", label)
-        self.assertIn("Viewing", label)
-        self.assertIn("Anonymous code", label)
+        self.assertNotIn("Viewing", label)
+        self.assertNotIn("Anonymous", label)
         self.assertNotIn("Private-looking title", label)
 
-    def test_presenter_never_exposes_thread_names_in_recent_rows(self):
-        sensitive_names = (
-            "用户Prompt：分析内部财务数据和客户名单",
-            "User prompt: analyze confidential customer records",
+    def test_presenter_uses_codex_app_server_titles_in_recent_rows(self):
+        safe_names = (
+            "整理本周项目进展",
+            "Review release checklist",
         )
         sessions = tuple(
             replace(
@@ -304,7 +304,7 @@ class UiScopeContractTests(unittest.TestCase):
                 title_source="codex_app_server.thread_display_title",
                 full_title=name,
             )
-            for index, name in enumerate(sensitive_names)
+            for index, name in enumerate(safe_names)
         )
 
         presentation = present_dashboard(replace(
@@ -312,8 +312,8 @@ class UiScopeContractTests(unittest.TestCase):
         ), False)
 
         rendered = repr(presentation.recent_sessions)
-        for fragment in ("内部财务数据", "客户名单", "confidential customer records"):
-            self.assertNotIn(fragment, rendered)
+        for fragment in safe_names:
+            self.assertIn(fragment, rendered)
 
     def test_unreconciled_usage_does_not_hide_explicit_running_lifecycle(self):
         running = self._session("running", "in_progress", in_progress=True)

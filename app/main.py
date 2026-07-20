@@ -28,7 +28,7 @@ from app.analytics_ui import (
 )
 from app.app_actions import open_codex, open_data_directory
 from app.codex_rollout import (
-    configured_sessions_dir, make_response_safe_id, make_thread_safe_id,
+    configured_sessions_dir, make_response_safe_id,
 )
 from app.codex_state import configured_state_path
 from app.dashboard import (
@@ -71,8 +71,9 @@ from app.ui_presenter import (
     present_dashboard, resolve_activity_session, safe_session_primary_label,
 )
 from app.ui_format import (
-    dashboard_layout_for_width, ellipsize_title, format_compact_token_count,
-    format_full_token_count, metric_columns_for_width,
+    dashboard_layout_for_width, ellipsize_title,
+    format_full_token_count, format_localized_token_count,
+    metric_columns_for_width,
 )
 from app.trend_chart import TrendCanvas, TrendPoint, TrendTooltipLabels
 from app.usage_insights_ui import (
@@ -93,7 +94,7 @@ from app.ui_theme import (
     SPACE_4, SPACE_6, STATUS_TITLE, configure_view,
 )
 from app.usage_summary import (
-    ObservedUsageSummary, safe_digest_labels,
+    ObservedUsageSummary,
     UsageWindowKind,
     unavailable_usage_summary,
 )
@@ -715,11 +716,15 @@ class Dashboard:
         self.status_advice_card = self._build_status_advice(page)
         self.core_metrics_panel = self._build_core_metrics_panel(page)
         self.observed_usage_card = self._build_observed_usage_card(page)
-        self.task_summary_card = self._build_task_summary_card(page)
+        self.session_selector_card = ctk.CTkFrame(
+            page, fg_color="transparent", corner_radius=0,
+        )
+        self.session_selector_card.grid_columnconfigure((0, 1), weight=1, uniform="session_selector")
+        self.task_summary_card = self._build_task_summary_card(self.session_selector_card)
         self.quota_center_card = self._build_quota_center_card(page)
         self.trend_preview_card = self._build_trend_preview_card(page)
         self.quick_actions_card = self._build_quick_actions_card(page)
-        self.status_recent_card = self._build_status_recent_card(page)
+        self.status_recent_card = self._build_status_recent_card(self.session_selector_card)
         self._apply_status_layout(1000)
 
     @staticmethod
@@ -1363,14 +1368,14 @@ class Dashboard:
             current_var = tk.StringVar(master=self.root, value="")
             row = ctk.CTkButton(
                 card, text="", command=lambda item=index: self._select_status_recent(item),
-                height=64, corner_radius=CONTROL_RADIUS,
+                height=56, corner_radius=CONTROL_RADIUS,
                 fg_color=COLORS.raised_surface, hover_color=COLORS.accent_soft,
                 border_width=1, border_color=COLORS.border,
                 text_color=COLORS.primary_text, font=BODY, anchor="w",
             )
             row.grid(
                 row=index + 1, column=0, sticky="ew", padx=SPACE_3,
-                pady=(0, SPACE_2 if index < 4 else SPACE_3),
+                pady=(0, SPACE_1 if index < 2 else SPACE_2),
             )
             WidgetTooltip(row, lambda variable=full_title: variable.get())
             self.status_recent_rows.append({
@@ -1461,12 +1466,21 @@ class Dashboard:
         if getattr(self, "_status_layout_signature", None) == layout_signature:
             return
         self._status_layout_signature = layout_signature
+        selector = getattr(self, "session_selector_card", None)
+        if selector is not None:
+            selector.grid_forget()
+            selector.grid_propagate(True)
+            self.task_summary_card.grid_forget()
+            self.status_recent_card.grid_forget()
         cards = (
             self.status_advice_card, self.core_metrics_panel,
-            self.observed_usage_card,
-            self.task_summary_card, self.quota_center_card,
-            self.trend_preview_card, self.status_recent_card,
-            self.quick_actions_card,
+            self.observed_usage_card, self.quota_center_card,
+            self.trend_preview_card, self.quick_actions_card,
+        ) if selector is not None else (
+            self.status_advice_card, self.core_metrics_panel,
+            self.observed_usage_card, self.task_summary_card,
+            self.quota_center_card, self.trend_preview_card,
+            self.status_recent_card, self.quick_actions_card,
         )
         for card in cards:
             card.grid_forget()
@@ -1485,46 +1499,90 @@ class Dashboard:
                 row=0, column=0, columnspan=2,
                 sticky="ew", pady=(0, SPACE_3),
             )
+            if selector is not None:
+                selector.grid(
+                    row=1, column=0, columnspan=2,
+                    sticky="nsew", pady=(0, SPACE_3),
+                )
+                self._layout_session_selector(content_width)
             self.core_metrics_panel.grid(
-                row=1, column=0, columnspan=2,
+                row=2 if selector is not None else 1, column=0, columnspan=2,
                 sticky="ew", pady=(0, SPACE_3),
             )
             self.quota_center_card.grid(
-                row=2, column=0, sticky="nsew", padx=(0, SPACE_2),
+                row=3 if selector is not None else 2, column=0, sticky="nsew", padx=(0, SPACE_2),
                 pady=(0, SPACE_3),
             )
-            self.status_recent_card.grid(
-                row=2, column=1, sticky="nsew", pady=(0, SPACE_3),
-            )
+            if selector is None:
+                self.status_recent_card.grid(
+                    row=2, column=1, sticky="nsew", pady=(0, SPACE_3),
+                )
             self.observed_usage_card.grid(
-                row=3, column=0, columnspan=2,
+                row=4 if selector is not None else 3, column=0, columnspan=2,
                 sticky="ew", pady=(0, SPACE_3),
             )
             self.trend_preview_card.grid(
-                row=4, column=0, sticky="nsew", padx=(0, SPACE_2),
+                row=5 if selector is not None else 4, column=0, sticky="nsew", padx=(0, SPACE_2),
                 pady=(0, SPACE_3),
             )
-            self.task_summary_card.grid(
-                row=4, column=1, sticky="nsew", pady=(0, SPACE_3),
-            )
+            if selector is None:
+                self.task_summary_card.grid(
+                    row=4, column=1, sticky="nsew", pady=(0, SPACE_3),
+                )
             self.quick_actions_card.grid(
-                row=5, column=0, columnspan=2,
+                row=6 if selector is not None else 5, column=0, columnspan=2,
                 sticky="ew", pady=(0, SPACE_3),
             )
         else:
             self.status_page.grid_columnconfigure(0, weight=1, uniform="")
-            ordered_cards = [
-                self.status_advice_card, self.quota_center_card,
-                self.core_metrics_panel, self.task_summary_card,
-            ]
-            ordered_cards.extend((
-                self.observed_usage_card, self.trend_preview_card,
-                self.status_recent_card, self.quick_actions_card,
-            ))
+            ordered_cards = [self.status_advice_card]
+            if selector is not None:
+                ordered_cards.append(selector)
+                ordered_cards.extend((
+                    self.core_metrics_panel, self.quota_center_card,
+                    self.observed_usage_card, self.trend_preview_card,
+                ))
+            else:
+                ordered_cards.extend((
+                    self.quota_center_card, self.core_metrics_panel,
+                    self.task_summary_card, self.observed_usage_card,
+                    self.trend_preview_card, self.status_recent_card,
+                ))
+            ordered_cards.append(self.quick_actions_card)
             for row, card in enumerate(ordered_cards):
                 card.grid(row=row, column=0, sticky="ew", pady=(0, SPACE_3))
+            if selector is not None:
+                self._layout_session_selector(content_width)
         self._layout_core_metrics(core_layout_width)
         self._layout_observed_usage(content_width)
+
+    def _layout_session_selector(self, content_width: int) -> None:
+        """Keep recent choices and the selected result in one stable region."""
+        if not hasattr(self, "session_selector_card"):
+            return
+        self.session_selector_card.grid_columnconfigure(
+            0, weight=1, uniform="session_selector",
+        )
+        self.session_selector_card.grid_columnconfigure(
+            1, weight=1 if content_width >= 720 else 0,
+            uniform="session_selector" if content_width >= 720 else "",
+        )
+        self.status_recent_card.grid_forget()
+        self.task_summary_card.grid_forget()
+        if content_width >= 720:
+            self.status_recent_card.grid(
+                row=0, column=0, sticky="new", padx=(SPACE_2, SPACE_1),
+            )
+            self.task_summary_card.grid(
+                row=0, column=1, sticky="new", padx=(SPACE_1, SPACE_2),
+            )
+        else:
+            self.status_recent_card.grid(
+                row=0, column=0, sticky="ew", padx=SPACE_2,
+            )
+            self.task_summary_card.grid(
+                row=1, column=0, sticky="ew", padx=SPACE_2,
+            )
 
     def _layout_core_metrics(self, width: int) -> None:
         columns = (
@@ -3867,7 +3925,11 @@ class Dashboard:
         thread_id: str | None,
         observed_at: datetime | None,
         turn_count: int | None,
+        full_title: str | None = None,
+        title_source: str | None = None,
     ) -> str:
+        if title_source == "codex_app_server.thread_display_title" and full_title:
+            return " ".join(str(full_title).split())
         activity = (
             resolve_activity_session(self.snapshot)
             if getattr(self, "snapshot", None) is not None else None
@@ -3898,6 +3960,7 @@ class Dashboard:
             return snapshot
         safe_title = self._mini_safe_title(
             self._widget_thread_id, snapshot.observed_at, snapshot.turn_count,
+            snapshot.full_title, snapshot.title_source,
         )
         return MiniThreadSnapshot(
             safe_title,
@@ -3909,6 +3972,7 @@ class Dashboard:
             safe_title,
             snapshot.response_safe_id,
             snapshot.response_status,
+            snapshot.title_source,
         )
 
     @staticmethod
@@ -3934,6 +3998,7 @@ class Dashboard:
                 else "completed_partial" if instruction is not None
                 else "unavailable"
             ),
+            getattr(selected, "title_source", None),
         )
 
     def _apply_presentation(self, presentation: DashboardPresentation, render_session_rows: bool = True) -> None:
@@ -4608,7 +4673,7 @@ class Dashboard:
             return f"{sign}{value:.1f}%"
         if metric == "turn_count":
             return f"{sign}{round(value):,}"
-        compact = format_compact_token_count(round(value))
+        compact = format_localized_token_count(round(value), self.language)
         return f"{sign}{compact}"
 
     def _trend_points(self, view: TrendView, metric: str) -> tuple[TrendPoint, ...]:
@@ -4896,7 +4961,7 @@ class Dashboard:
             "reasoning": summary.reasoning_tokens,
         }
         for name, aggregate in metric_values.items():
-            value = format_compact_token_count(aggregate.value)
+            value = format_localized_token_count(aggregate.value, self.language)
             widget = self.observed_usage_metric_widgets[name]
             widget["value"].set(value)
             widget["full"].set(self._full_token_tooltip(aggregate.value))
@@ -4912,7 +4977,8 @@ class Dashboard:
             str(summary.covered_thread_count) if has_observations else "—"
         )
         self.observed_usage_aux_widgets["average"]["value"].set(
-            format_compact_token_count(round(average)) if average is not None else "—"
+            format_localized_token_count(round(average), self.language)
+            if average is not None else "—"
         )
         self.observed_usage_aux_widgets["cache_reuse"]["value"].set(
             f"{cache_reuse * 100:.1f}%" if cache_reuse is not None else "—"
@@ -5063,11 +5129,13 @@ class Dashboard:
                     str(getattr(session, "turn_count", 0))
                     if getattr(session, "turn_count", 0) else "—"
                 ),
-                "instruction": format_compact_token_count(
+                "instruction": format_localized_token_count(
                     usage.total_tokens if usage is not None else None,
+                    self.language,
                 ),
-                "session": format_compact_token_count(
+                "session": format_localized_token_count(
                     cumulative.total_tokens if cumulative is not None else None,
+                    self.language,
                 ),
                 "activity": session.observed_at.astimezone().strftime(
                     "%Y-%m-%d %H:%M:%S"
@@ -5323,11 +5391,13 @@ class Dashboard:
                     str(getattr(session, "turn_count", 0))
                     if getattr(session, "turn_count", 0) else "—"
                 ),
-                "instruction": format_compact_token_count(
+                "instruction": format_localized_token_count(
                     usage.total_tokens if usage is not None else None,
+                    self.language,
                 ),
-                "session": format_compact_token_count(
+                "session": format_localized_token_count(
                     cumulative.total_tokens if cumulative is not None else None,
+                    self.language,
                 ),
                 "activity": session.observed_at.astimezone().strftime(
                     "%Y-%m-%d %H:%M:%S"
@@ -5411,12 +5481,12 @@ class Dashboard:
         )
         metric_values = {
             "current_turn": (
-                format_compact_token_count(instruction_total),
+                format_localized_token_count(instruction_total, self.language),
                 self._full_token_tooltip(instruction_total),
                 current_values["status"], None,
             ),
             "session_total": (
-                format_compact_token_count(session_total),
+                format_localized_token_count(session_total, self.language),
                 self._full_token_tooltip(session_total),
                 translate(
                     "task_turns_value", self.language,
@@ -5433,7 +5503,7 @@ class Dashboard:
                 else float(current_cache.rstrip("%")) / 100.0,
             ),
             "reasoning": (
-                format_compact_token_count(reasoning),
+                format_localized_token_count(reasoning, self.language),
                 self._full_token_tooltip(reasoning),
                 translate("current_turn_scope", self.language), None,
             ),
@@ -5523,7 +5593,7 @@ class Dashboard:
                 if row.last_activity else "—"
             )
             total_value = getattr(row, "thread_total_tokens", None)
-            total = format_compact_token_count(total_value)
+            total = format_localized_token_count(total_value, self.language)
             turns = (
                 translate("task_turns_value", self.language, value=row.turn_count)
                 if row.turn_count else translate("session_turn_unknown", self.language)
@@ -5541,29 +5611,28 @@ class Dashboard:
                 else "ui_scope_recent_activity" if is_current
                 else "historical_session_role"
             )
-            safe_title = translate(
-                "safe_session_primary", self.language,
-                role=translate(role_key, self.language), time=activity,
-                turns=turns,
-                viewing=(
-                    translate("safe_session_viewing_suffix", self.language)
-                    if is_selected else ""
-                ),
+            safe_title = safe_session_primary_label(
+                row,
+                self.language,
+                role_key=role_key,
+                viewing=is_selected,
             )
-            widget["title"].set(safe_title)
-            safe_id = make_thread_safe_id(row.thread_id)
-            anonymous = (
-                safe_digest_labels((safe_id,))[safe_id]
-                if safe_id is not None else "—"
+            widget["title"].set(
+                ellipsize_title(safe_title, 38 if self.language == "zh-CN" else 62),
             )
             widget["full_title"].set(safe_title)
             detail_parts = [translate(
-                "anonymous_session_code", self.language, code=anonymous,
-            ), translate(
                 "recent_session_safe_detail", self.language,
+                time=activity, turns=turns,
                 status=localize_presenter_text(row.status, self.language),
                 total=total,
-            )]
+            )] if row.title_source == "codex_app_server.thread_display_title" else [
+                translate(
+                    "recent_session_compact_detail", self.language,
+                    status=localize_presenter_text(row.status, self.language),
+                    total=total,
+                )
+            ]
             widget["detail"].set(" · ".join(detail_parts))
             badges = []
             if is_current:
@@ -5590,9 +5659,7 @@ class Dashboard:
                 )
             widget["button"].configure(
                 text="\n".join(item for item in (
-                    " 路 ".join(item for item in (
-                        widget["current"].get(), widget["title"].get(),
-                    ) if item),
+                    widget["title"].get(),
                     widget["detail"].get(),
                 ) if item),
                 state="normal",

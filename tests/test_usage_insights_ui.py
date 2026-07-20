@@ -171,7 +171,7 @@ class UsageInsightsPresentationTests(unittest.TestCase):
         for view in (empty_view, pending_view, unavailable_view):
             self.assertTrue(all(not section.rows for section in view.sections))
 
-    def test_consumption_rank_uses_role_time_and_anonymous_code_as_secondary(self):
+    def test_consumption_rank_uses_metadata_fallback_without_anonymous_code(self):
         view = build_usage_insights_view(
             result(item_count=1), "en",
             expanded_threads=False, expanded_responses=False,
@@ -183,14 +183,15 @@ class UsageInsightsPresentationTests(unittest.TestCase):
         self.assertIn("Usage rank No. 1", thread_row.title)
         self.assertIn("Last completed", thread_row.title)
         self.assertIn("completed responses", thread_row.details)
-        self.assertIn("Anonymous code 000000", thread_row.details)
+        self.assertIn("Historical session", thread_row.details)
+        self.assertIn("1 turns", thread_row.details)
         self.assertNotIn(thread_row.thread_safe_id, repr(thread_row))
 
         self.assertEqual((response_row.kind, response_row.rank), ("response", 1))
         self.assertIn("Usage rank No. 1", response_row.title)
         self.assertIn("Response completed", response_row.title)
-        self.assertIn("Round unknown", response_row.details)
-        self.assertIn("Anonymous code 000000", response_row.details)
+        self.assertIn("Historical session", response_row.details)
+        self.assertIn("Turns unknown", response_row.details)
         self.assertEqual(
             response_row.thread_safe_id,
             result(item_count=1).high_usage_responses[0].thread_safe_id,

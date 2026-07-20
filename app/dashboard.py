@@ -68,6 +68,7 @@ class MiniThreadSnapshot:
     full_title: str | None = None
     response_safe_id: str | None = None
     response_status: str | None = None
+    title_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -466,7 +467,7 @@ class DashboardViewModel:
             return MiniThreadSnapshot(
                 session.display_title, None, None, status, session.observed_at,
                 session.turn_count, session.full_title or session.display_title,
-                response_status="unavailable",
+                response_status="unavailable", title_source=session.title_source,
             )
         instruction = session.instruction
         instruction_total = instruction.usage.total_tokens if instruction is not None and instruction.usage is not None else None
@@ -479,6 +480,7 @@ class DashboardViewModel:
             make_response_safe_id(session.thread_id, instruction.turn_id)
             if instruction is not None else None,
             _history_instruction_status(instruction),
+            session.title_source,
         )
 
     def _select(self, sessions: list[CodexSessionUsage]) -> CodexSessionUsage | None:
@@ -506,7 +508,10 @@ class DashboardViewModel:
                 title_source="codex_app_server.thread_display_title",
                 full_title=full_title,
             )
-        fallback = f"Codex Session · {session.observed_at.astimezone().strftime('%m-%d %H:%M')}"
+        fallback = (
+            f"Codex Session · {session.observed_at.astimezone().strftime('%m-%d %H:%M')}"
+            f" · {session.turn_count} turns"
+        )
         return replace(
             session, display_title=fallback, title_source="safe timestamp fallback",
             full_title=fallback,

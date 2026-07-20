@@ -5,10 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from app.codex_rollout import make_thread_safe_id
 from app.dashboard import DashboardSnapshot, display_session_status
 from app.i18n import translate
-from app.usage_summary import safe_digest_labels
 
 
 class UiTone(str, Enum):
@@ -461,12 +459,6 @@ def disambiguated_session_labels(
     activity_is_running: bool = False,
     selected_thread_id: str | None = None,
 ) -> dict[str, str]:
-    safe_ids = tuple(
-        safe_id
-        for row in rows
-        if (safe_id := make_thread_safe_id(row.thread_id)) is not None
-    )
-    anonymous_labels = safe_digest_labels(safe_ids)
     bases: list[tuple[str, str]] = []
     for row in rows:
         if row.thread_id == activity_thread_id:
@@ -481,7 +473,6 @@ def disambiguated_session_labels(
             language,
             role_key=role_key,
             viewing=row.thread_id == selected_thread_id,
-            anonymous_labels=anonymous_labels,
         )
         bases.append((row.thread_id, base))
     counts: dict[str, int] = {}
@@ -498,9 +489,8 @@ def safe_session_primary_label(
     *,
     role_key: str,
     viewing: bool,
-    anonymous_labels: dict[str, str] | None = None,
 ) -> str:
-    """Build a content-free primary label plus a secondary anonymous code."""
+    """Use the safe app-server title, or a metadata-only fallback."""
 
     observed_at = getattr(session, "last_activity", None) or getattr(
         session, "observed_at", None,
@@ -515,25 +505,20 @@ def safe_session_primary_label(
         if isinstance(turn_count, int) and turn_count > 0
         else translate("session_turn_unknown", language)
     )
-    primary = translate(
+    title_source = getattr(session, "title_source", "")
+    title = getattr(session, "full_title", None) or getattr(
+        session, "display_title", None,
+    )
+    if title_source == "codex_app_server.thread_display_title" and title:
+        return " ".join(str(title).split())
+    return translate(
         "safe_session_primary",
         language,
         role=translate(role_key, language),
         time=time_label,
         turns=turns,
-        viewing=(
-            translate("safe_session_viewing_suffix", language)
-            if viewing else ""
-        ),
+        viewing="",
     )
-    safe_id = make_thread_safe_id(getattr(session, "thread_id", None))
-    if safe_id is None:
-        return primary
-    labels = anonymous_labels or safe_digest_labels((safe_id,))
-    code = labels.get(safe_id)
-    if code is None:
-        return primary
-    return f"{primary} · {translate('anonymous_session_code', language, code=code)}"
 
 
 def _recent_row(session) -> RecentSessionRow:
@@ -541,11 +526,14 @@ def _recent_row(session) -> RecentSessionRow:
     hit = "—"
     if cumulative is not None and cumulative.input_tokens:
         hit = f"{cumulative.cached_input_tokens / cumulative.input_tokens * 100:.1f}%"
+    title_source = getattr(session, "title_source", "safe timestamp metadata")
     safe_title = (
-        f"Codex Session · {session.observed_at.astimezone().strftime('%m-%d %H:%M')}"
+        getattr(session, "full_title", None) or getattr(session, "display_title", None)
+        if title_source == "codex_app_server.thread_display_title"
+        else f"Codex Session · {session.observed_at.astimezone().strftime('%m-%d %H:%M')}"
     )
     return RecentSessionRow(
-        session.thread_id, safe_title, "safe timestamp metadata",
+        session.thread_id, safe_title, title_source,
         display_session_status(session, session.instruction),
         session.observed_at, f"{cumulative.total_tokens:,}" if cumulative else "—", hit,
         getattr(session, "turn_count", 0),

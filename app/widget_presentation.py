@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from app.dashboard import MiniThreadSnapshot
 from app.i18n import translate
 from app.quota import CodexQuotaSnapshot
-from app.ui_format import format_compact_token_count
+from app.ui_format import format_localized_token_count
 
 
 @dataclass(frozen=True)
@@ -56,8 +56,8 @@ def present_widget(
         quota_text,
         thread.full_title or thread.title or translate("no_selected_thread", language),
         str(turn_count if turn_count is not None else thread.turn_count) if (turn_count is not None or thread.turn_count is not None) else "—",
-        _format_token_total(thread.instruction_total_tokens),
-        _format_token_total(thread.session_total_tokens),
+        _format_token_total(thread.instruction_total_tokens, language),
+        _format_token_total(thread.session_total_tokens, language),
     )
 
 
@@ -68,8 +68,8 @@ def _format_percent(value: float | None) -> str:
     return f"{int(number)}%" if number.is_integer() else f"{number:.1f}%"
 
 
-def _format_token_total(value: int | None) -> str:
-    return format_compact_token_count(value)
+def _format_token_total(value: int | None, language: str) -> str:
+    return format_localized_token_count(value, language)
 
 
 def _format_reset_time(

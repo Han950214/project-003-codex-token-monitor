@@ -62,7 +62,8 @@ class MultiSessionDashboardTests(unittest.TestCase):
     def test_pinned_selection_does_not_jump_when_another_thread_updates(self):
         results = [RolloutSessionsResult((session("a", 1), session("b", 0)), "a", 0, NOW), RolloutSessionsResult((session("b", 5), session("a", 1)), "b", 0, NOW)]
         vm = DashboardViewModel(rollout_sessions_loader=Mock(side_effect=results), state_batch_loader=lambda _ids: {})
-        vm.refresh(); vm.pin_thread("a")
+        vm.refresh()
+        vm.pin_thread("a")
         snapshot = vm.refresh()
         self.assertEqual(snapshot.selection_mode, "pinned")
         self.assertEqual(snapshot.selected_thread_id, "a")
@@ -125,6 +126,23 @@ class MultiSessionDashboardTests(unittest.TestCase):
         self.assertEqual(selected.title_source, "safe timestamp fallback")
         self.assertTrue(selected.display_title.startswith("Codex Session ·"))
 
+    def test_fast_snapshot_fallback_is_replaced_by_codex_title_without_selection_change(self):
+        titles = Mock(return_value={"a": "Official session title"})
+        vm = DashboardViewModel(
+            rollout_sessions_loader=lambda: RolloutSessionsResult(
+                (session("a", 1),), "a", 0, NOW,
+            ),
+            state_batch_loader=lambda _ids: {},
+            title_batch_loader=titles,
+        )
+        fast = vm.refresh(include_enrichment=False)
+        self.assertIn("Codex Session", fast.selected_session.display_title)
+        self.assertNotIn("Anonymous", fast.selected_session.display_title)
+        enriched = vm.refresh()
+        self.assertEqual(enriched.selected_session.thread_id, "a")
+        self.assertEqual(enriched.selected_session.display_title, "Official session title")
+        self.assertEqual(enriched.selected_thread_id, "a")
+
     def test_long_official_name_is_truncated_only_for_display(self):
         name = "A" * 90
         vm = DashboardViewModel(
@@ -172,7 +190,8 @@ class MultiSessionDashboardTests(unittest.TestCase):
             first = session("a", 1, path=missing)
             loader = Mock(side_effect=[RolloutSessionsResult((first,), "a", 0, NOW), RolloutSessionsResult((session("b", 5),), "b", 0, NOW)])
             vm = DashboardViewModel(rollout_sessions_loader=loader, state_batch_loader=lambda _ids: {})
-            vm.refresh(); vm.pin_thread("a")
+            vm.refresh()
+            vm.pin_thread("a")
             snapshot = vm.refresh()
         self.assertEqual(snapshot.selected_thread_id, "a")
         self.assertEqual(snapshot.selected_session.status, "unavailable")
@@ -186,7 +205,8 @@ class MultiSessionDashboardTests(unittest.TestCase):
             reader.read_session.return_value = first
             loader = Mock(side_effect=[RolloutSessionsResult((first,), "a", 0, NOW), RolloutSessionsResult((session("b", 5),), "b", 0, NOW)])
             vm = DashboardViewModel(rollout_sessions_loader=loader, state_batch_loader=lambda _ids: {}, rollout_reader=reader)
-            vm.refresh(); vm.pin_thread("a")
+            vm.refresh()
+            vm.pin_thread("a")
             snapshot = vm.refresh()
         reader.read_session.assert_called_once_with(known_path)
         self.assertEqual(snapshot.selected_thread_id, "a")

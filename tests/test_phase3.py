@@ -42,7 +42,8 @@ from app.quota import CodexQuotaSnapshot, QuotaKind, QuotaWindow
 from app.ui_presenter import _latest_metrics
 from app.ui_format import (
     dashboard_layout_for_width, ellipsize_title, format_compact_token_count,
-    format_full_token_count, metric_columns_for_width,
+    format_full_token_count, format_localized_token_count,
+    metric_columns_for_width,
 )
 from app.ui_icons import CircularProgress, Sparkline, create_icon
 from app.ui_settings import (
@@ -305,6 +306,28 @@ class Phase3ModeTests(unittest.TestCase):
 
 
 class Phase3FormatAndResponsiveTests(unittest.TestCase):
+    def test_chinese_token_examples_use_k_wan_and_yi(self):
+        cases = {
+            905: "905", 6_120: "6.1K", 504_800: "50.5万",
+            6_120_000: "612万", 20_960_000: "2096万",
+            91_230_000: "9123万", 112_100_000: "1.12亿",
+            168_390_000: "1.68亿", 1_200_000_000: "12亿",
+        }
+        self.assertEqual(
+            {value: format_localized_token_count(value, "zh-CN") for value in cases},
+            cases,
+        )
+
+    def test_localized_token_format_handles_none_negative_boundaries_and_english(self):
+        self.assertEqual(format_localized_token_count(None, "zh-CN"), "—")
+        self.assertEqual(format_localized_token_count(0, "zh-CN"), "0")
+        self.assertEqual(format_localized_token_count(-999, "zh-CN"), "-999")
+        self.assertEqual(format_localized_token_count(999, "zh-CN"), "999")
+        self.assertEqual(format_localized_token_count(10_000, "zh-CN"), "1万")
+        self.assertEqual(format_localized_token_count(99_999_999, "zh-CN"), "10000万")
+        self.assertEqual(format_localized_token_count(100_000_000, "zh-CN"), "1亿")
+        self.assertEqual(format_localized_token_count(1_200_000_000, "en"), "1.20B")
+
     def test_compact_token_examples_cover_k_m_and_b(self):
         cases = {
             999: "999",
@@ -463,6 +486,34 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
             return dashboard.status_recent_card.grid_calls[-1][1]
 
         self.assertEqual(recent_position("auto"), recent_position("pinned"))
+
+    def test_session_selector_combines_recent_and_selected_cards_at_supported_width(self):
+        dashboard = object.__new__(Dashboard)
+        dashboard.status_page = FakeWidget()
+        (
+            dashboard.status_advice_card,
+            dashboard.core_metrics_panel,
+            dashboard.observed_usage_card,
+            dashboard.quota_center_card,
+            dashboard.trend_preview_card,
+            dashboard.quick_actions_card,
+            dashboard.session_selector_card,
+            dashboard.status_recent_card,
+            dashboard.task_summary_card,
+        ) = [FakeWidget() for _ in range(9)]
+        dashboard._layout_core_metrics = lambda _width: None
+        dashboard._layout_observed_usage = lambda _width: None
+        Dashboard._apply_status_layout(dashboard, 980)
+
+        self.assertEqual(
+            dashboard.session_selector_card.grid_calls[-1][1]["row"], 1,
+        )
+        self.assertEqual(
+            dashboard.status_recent_card.grid_calls[-1][1]["column"], 0,
+        )
+        self.assertEqual(
+            dashboard.task_summary_card.grid_calls[-1][1]["column"], 1,
+        )
 
     def test_return_to_current_session_restores_auto_follow_without_navigation(self):
         snapshot = object()
@@ -1470,10 +1521,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         core = {item["semantic"]: item["value"].get() for item in dashboard.core_metric_widgets}
         self.assertEqual(core, {"current_turn": "100", "session_total": "1.0K"})
         selected_title = dashboard.simple_task_vars["title"].get()
-        self.assertIn("Historical session", selected_title)
-        self.assertIn("4 turns", selected_title)
-        self.assertIn("Anonymous code", selected_title)
-        self.assertNotIn("Session B", selected_title)
+        self.assertEqual(selected_title, "User prompt: analyze confidential customer records")
         visible_values = (
             *(variable.get() for variable in dashboard.simple_task_vars.values()),
             dashboard.task_full_title_var.get(),
@@ -1481,8 +1529,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             dashboard.task_detail_viewing_var.get(),
         )
         visible_text = " ".join(str(value) for value in visible_values)
-        for fragment in ("内部财务数据", "客户名单", "confidential customer records"):
-            self.assertNotIn(fragment, visible_text)
+        self.assertIn("confidential customer records", visible_text)
         self.assertEqual(dashboard.task_detail_vars["total"].get(), "200")
         self.assertEqual(dashboard.task_detail_vars["session"].get(), "2,000")
         self.assertEqual(dashboard.core_metrics_scope_var.get(), "Current active task")
@@ -1503,7 +1550,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         self.assertEqual(core, {"current_turn": "100", "session_total": "1.0K"})
         selected_title = dashboard.simple_task_vars["title"].get()
         self.assertIn("Historical session", selected_title)
-        self.assertIn("Anonymous code", selected_title)
+        self.assertNotIn("Anonymous", selected_title)
         self.assertNotIn("Session C", selected_title)
         self.assertEqual(dashboard.task_detail_vars["total"].get(), "300")
         self.assertEqual(dashboard.task_detail_vars["session"].get(), "3,000")
@@ -1549,13 +1596,9 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
 
         self.assertEqual(dashboard.status_recent_rows[0]["current"].get(), "Current")
         self.assertEqual(dashboard.status_recent_rows[1]["current"].get(), "Selected")
-        self.assertIn("Running now", dashboard.status_recent_rows[0]["title"].get())
-        self.assertIn("Viewing", dashboard.status_recent_rows[1]["title"].get())
-        self.assertEqual(
-            dashboard.status_recent_rows[1]["title"].get().count("Viewing"), 1,
-        )
-        self.assertIn("Anonymous code", dashboard.status_recent_rows[0]["detail"].get())
-        self.assertNotIn("Session A", dashboard.status_recent_rows[0]["title"].get())
+        self.assertIn("用户Prompt：分析内部财务数据和客户名单", dashboard.status_recent_rows[0]["title"].get())
+        self.assertIn("User prompt: analyze confidential customer records", dashboard.status_recent_rows[1]["title"].get())
+        self.assertNotIn("Anonymous", dashboard.status_recent_rows[0]["detail"].get())
         rendered = " ".join(
             str(variable.get())
             for row in dashboard.status_recent_rows
@@ -1563,7 +1606,7 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             if key in {"title", "full_title", "detail", "current"}
         )
         for fragment in ("内部财务数据", "客户名单", "confidential customer records"):
-            self.assertNotIn(fragment, rendered)
+            self.assertIn(fragment, rendered)
 
     def test_mini_widget_uses_content_free_session_label(self):
         dashboard = object.__new__(Dashboard)
@@ -1595,8 +1638,8 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         )
 
         self.assertIn("Historical session", refreshed.title)
-        self.assertIn("Viewing", refreshed.title)
-        self.assertIn("Anonymous code", refreshed.title)
+        self.assertNotIn("Viewing", refreshed.title)
+        self.assertNotIn("Anonymous", refreshed.title)
         self.assertEqual(refreshed.full_title, refreshed.title)
         for fragment in ("内部财务数据", "客户名单", "confidential customer records"):
             self.assertNotIn(fragment, refreshed.title)

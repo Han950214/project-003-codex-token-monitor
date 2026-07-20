@@ -13,7 +13,7 @@ from typing import Callable
 import customtkinter as ctk
 
 from app.dashboard import MiniThreadSnapshot
-from app.i18n import localize_presenter_text, translate
+from app.i18n import translate
 from app.quota import CodexQuotaSnapshot, QuotaWindow
 from app.ui_settings import (
     load_widget_idle_opacity, load_widget_mode, load_widget_position,
@@ -33,7 +33,7 @@ from app.ui_theme import (
 )
 from app.ui_icons import CircularProgress, create_icon
 from app.widget_presentation import present_widget
-from app.ui_format import format_compact_token_count, format_full_token_count
+from app.ui_format import format_full_token_count, format_localized_token_count
 
 
 WIDGET_WIDTH = 820
@@ -672,8 +672,8 @@ def _quota_color(window: QuotaWindow, source_status: str) -> str:
     return WIDGET_SUCCESS
 
 
-def format_token_total(value: int | None) -> str:
-    return format_compact_token_count(value)
+def format_token_total(value: int | None, language: str = "en") -> str:
+    return format_localized_token_count(value, language)
 
 
 def format_reset_time(

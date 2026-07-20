@@ -27,6 +27,27 @@ def format_compact_token_count(value: int | None) -> str:
     return f"{sign}{_rounded(absolute, 1_000_000_000, 2):.2f}B"
 
 
+def format_localized_token_count(value: int | None, language: str) -> str:
+    """Format tokens using the user's language without changing full values."""
+
+    if language != "zh-CN":
+        return format_compact_token_count(value)
+    if value is None:
+        return "—"
+    number = int(value)
+    sign = "-" if number < 0 else ""
+    absolute = abs(number)
+    if absolute < 1_000:
+        return f"{number}"
+    if absolute < 10_000:
+        return f"{sign}{_trim_decimal(_rounded(absolute, 1_000, 1))}K"
+    if absolute < 100_000_000:
+        decimals = 1 if absolute < 1_000_000 else 0
+        return f"{sign}{_trim_decimal(_rounded(absolute, 10_000, decimals))}万"
+    decimals = 2 if absolute < 1_000_000_000 else 0
+    return f"{sign}{_trim_decimal(_rounded(absolute, 100_000_000, decimals))}亿"
+
+
 def format_full_token_count(value: int | None) -> str:
     return "—" if value is None else f"{int(value):,}"
 
@@ -59,3 +80,10 @@ def dashboard_layout_for_width(width: int) -> str:
 def _rounded(value: int, divisor: int, decimals: int) -> Decimal:
     quantum = Decimal(1).scaleb(-decimals)
     return (Decimal(value) / Decimal(divisor)).quantize(quantum, rounding=ROUND_HALF_UP)
+
+
+def _trim_decimal(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
