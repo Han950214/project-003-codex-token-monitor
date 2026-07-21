@@ -47,15 +47,13 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
         self.assertEqual(GEOMETRIES, ("980x660", "1440x900"))
         self.assertEqual(SCALES, (1.0, 1.25, 1.5))
         self.assertEqual(PAGES, (
-            "overview", "session_detail", "usage_trends", "recommendations",
+            "overview", "session_detail", "usage_trends", "sessions", "settings",
         ))
         self.assertEqual(RANGES, (7, 30, 90))
         self.assertEqual(SCENARIOS, (
             "token_quota_independence",
             "quota_heartbeat",
             "quota_round_trip",
-            "advisor_quota_sufficient",
-            "advisor_quota_insufficient",
             "mini_dashboard_dedup",
             "observed_usage_complete",
             "observed_usage_partial",
@@ -270,33 +268,6 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             tuple(zip((80.0, 70.0, 80.0), expected_times, strict=True)),
         )
 
-    def test_advisor_quota_sufficient_uses_five_prior_global_samples(self):
-        scenario = self._scenario("advisor_quota_sufficient")
-        quota_risk = next(
-            item for item in scenario.advisor_result.recommendations
-            if item.code == "quota_risk"
-        )
-        history = quota_risk.history_evidence
-
-        self.assertIsNotNone(history)
-        self.assertEqual(history.source, "global_quota_history")
-        self.assertEqual(history.sample_count, 5)
-        self.assertGreaterEqual(history.distinct_observation_count, 3)
-        self.assertLess(history.range_ended_at, scenario.current_observed_at)
-        self.assertEqual(len(scenario.before.quota_samples), 5)
-        self.assertEqual(len(scenario.after.quota_samples), 6)
-
-    def test_advisor_quota_insufficient_exposes_no_trend_conclusion(self):
-        scenario = self._scenario("advisor_quota_insufficient")
-        quota_risk = next(
-            item for item in scenario.advisor_result.recommendations
-            if item.code == "quota_risk"
-        )
-
-        self.assertIsNone(quota_risk.history_evidence)
-        self.assertEqual(len(scenario.before.quota_samples), 4)
-        self.assertEqual(len(scenario.after.quota_samples), 5)
-
     def test_mini_and_dashboard_same_observation_keep_one_complete_dashboard_point(self):
         scenario = self._scenario("mini_dashboard_dedup")
 
@@ -325,8 +296,6 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             _configure_trend_metric_menu=Mock(),
             _render_observed_usage=Mock(),
             _render_trends=Mock(),
-            _render_advisor=Mock(),
-            _render_recommendations=Mock(),
             _render_safe_overview=Mock(),
             status_recent_rows=[],
             show_page=Mock(),
@@ -336,15 +305,12 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
 
         self.assertEqual(dashboard.trend_range_days, 7)
         self.assertIs(dashboard.trend_view, scenario.trend_view)
-        self.assertIs(dashboard.advisor_result, scenario.advisor_result)
         self.assertIs(dashboard.observed_usage_summary, scenario.usage_summary)
         self.assertEqual((dashboard.trend_group, dashboard.trend_metric), ("tokens", "total"))
         dashboard.trend_group_menu.set.assert_called_once_with("Token Trends")
         dashboard.trend_range_menu.set.assert_called_once_with("Last 7 days")
         dashboard._render_trends.assert_called_once_with()
         dashboard._render_observed_usage.assert_called_once_with()
-        dashboard._render_advisor.assert_called_once_with()
-        dashboard._render_recommendations.assert_called_once_with()
         dashboard._render_safe_overview.assert_called_once_with()
         dashboard.show_page.assert_called_once_with("usage_trends")
 
@@ -358,8 +324,6 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             _configure_trend_metric_menu=Mock(),
             _render_observed_usage=Mock(),
             _render_trends=Mock(),
-            _render_advisor=Mock(),
-            _render_recommendations=Mock(),
             show_page=Mock(),
         )
 
@@ -455,8 +419,6 @@ class GuiAcceptanceLauncherTests(unittest.TestCase):
             _configure_trend_metric_menu=Mock(),
             _render_observed_usage=Mock(),
             _render_trends=Mock(),
-            _render_advisor=Mock(),
-            _render_recommendations=Mock(),
             _render_safe_overview=Mock(),
             show_page=Mock(),
         )

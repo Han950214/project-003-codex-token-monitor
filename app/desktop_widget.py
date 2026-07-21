@@ -158,7 +158,6 @@ class DesktopMiniWidget:
         on_exit: Callable[[], None],
         on_refresh: Callable[[], None],
         settings_path: Path,
-        on_more: Callable[[], None] | None = None,
     ) -> None:
         self.root = root
         self.on_restore = on_restore
@@ -166,7 +165,6 @@ class DesktopMiniWidget:
         self.on_hide_to_tray = on_hide_to_tray
         self.on_exit = on_exit
         self.on_refresh = on_refresh
-        self.on_more = on_more or on_restore
         self.settings_path = settings_path
         self.idle_opacity = load_widget_idle_opacity(settings_path)
         self.mode = load_widget_mode(settings_path)
@@ -195,7 +193,6 @@ class DesktopMiniWidget:
         self._action_icons = {
             "open": create_icon("open", size=22, color=COLORS.telemetry_text),
             "refresh": create_icon("refresh", size=22, color=COLORS.telemetry_text),
-            "more": create_icon("more", size=22, color=COLORS.telemetry_text),
         }
 
         self.remaining_var = tk.StringVar(master=self.window, value="—")
@@ -225,7 +222,7 @@ class DesktopMiniWidget:
             border_width=1, border_color=COLORS.telemetry_border,
         )
         self.expanded_frame.grid(row=0, column=0, sticky="nsew")
-        for column, weight in enumerate((3, 2, 2, 2, 1, 1, 1, 0, 0)):
+        for column, weight in enumerate((3, 2, 2, 2, 1, 1, 0, 0)):
             self.expanded_frame.grid_columnconfigure(column, weight=weight)
 
         status_cell = ctk.CTkFrame(
@@ -288,24 +285,23 @@ class DesktopMiniWidget:
 
         self.restore_button = self._widget_action_button(4, "open", self.on_restore)
         self.refresh_button = self._widget_action_button(5, "refresh", self.on_refresh)
-        self.more_button = self._widget_action_button(6, "more", self.on_more)
         self.collapse_button = ctk.CTkButton(
             self.expanded_frame, text="‹", command=lambda: self.set_mode("compact"),
             width=28, height=28, corner_radius=14, fg_color="transparent",
             text_color=COLORS.telemetry_muted, hover_color=COLORS.telemetry_hover,
         )
-        self.collapse_button.grid(row=0, column=7, padx=SPACE_1, pady=SPACE_2, sticky="n")
+        self.collapse_button.grid(row=0, column=6, padx=SPACE_1, pady=SPACE_2, sticky="n")
         self.exit_button = ctk.CTkButton(
             self.expanded_frame, text="×", command=self.on_exit, width=28,
             height=28, corner_radius=14, fg_color="transparent",
             text_color=COLORS.telemetry_muted, hover_color=COLORS.telemetry_exit_hover,
         )
-        self.exit_button.grid(row=0, column=8, padx=(0, SPACE_2), pady=SPACE_2, sticky="n")
+        self.exit_button.grid(row=0, column=7, padx=(0, SPACE_2), pady=SPACE_2, sticky="n")
         self.footer_label = ctk.CTkLabel(
             self.expanded_frame, textvariable=self.last_updated_var,
             font=(FONT_FAMILY, 8), text_color=COLORS.telemetry_muted,
         )
-        self.footer_label.grid(row=0, column=7, columnspan=2, sticky="s", pady=(0, SPACE_2))
+        self.footer_label.grid(row=0, column=6, columnspan=2, sticky="s", pady=(0, SPACE_2))
         self.status_label = ctk.CTkLabel(
             status_cell, textvariable=self.data_status_var, font=(FONT_FAMILY, 9),
             text_color=WIDGET_SUCCESS, anchor="w",
@@ -316,7 +312,6 @@ class DesktopMiniWidget:
         WidgetTooltip(self.session_value_label, lambda: self.session_full_var.get())
         WidgetTooltip(self.restore_button, lambda: translate("restore_widget", self.language))
         WidgetTooltip(self.refresh_button, lambda: translate("manual_refresh", self.language))
-        WidgetTooltip(self.more_button, lambda: translate("more_tools", self.language))
         WidgetTooltip(self.collapse_button, lambda: translate("widget_compact", self.language))
         WidgetTooltip(self.exit_button, lambda: translate("exit_application_short", self.language))
         for widget in (self.expanded_frame, status_cell, self.expanded_status_label, self.thread_title_label):
@@ -461,11 +456,10 @@ class DesktopMiniWidget:
         quota: CodexQuotaSnapshot,
         thread: MiniThreadSnapshot,
         language: str,
-        recommendation: object | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.language = language
-        self.update(quota, thread, language, recommendation)
+        self.update(quota, thread, language)
         self.root.update_idletasks()
         area = monitor_work_area(self.root)
         width, height = self._dimensions()
@@ -543,10 +537,9 @@ class DesktopMiniWidget:
         quota: CodexQuotaSnapshot,
         thread: MiniThreadSnapshot,
         language: str,
-        recommendation: object | None = None,
     ) -> None:
         self.language = language
-        presentation = present_widget(quota, thread, recommendation, language)
+        presentation = present_widget(quota, thread, language)
         self.quota_title_var.set(translate("five_hour_limit", language))
         self.instruction_label.configure(text=translate("instruction_total", language))
         self.session_label.configure(text=translate("session_total_short", language))
@@ -555,10 +548,9 @@ class DesktopMiniWidget:
         self.compact_quota_var.set(presentation.quota_text)
         status_icon_key = {
             "normal": "normal",
-            "optimize": "warning",
-            "new_thread": "warning",
-            "quota_risk": "warning",
-            "data_unavailable": "error",
+            "warning": "warning",
+            "error": "error",
+            "unknown": "unknown",
         }.get(presentation.status, "unknown")
         status_icon = self._status_icons[status_icon_key]
         status_color = {

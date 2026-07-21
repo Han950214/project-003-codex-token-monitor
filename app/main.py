@@ -21,16 +21,11 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.auto_refresh import AutoRefreshController, DEFAULT_AUTO_REFRESH_SECONDS
-from app.advisor import AdvisorResult, Recommendation, build_advisor_input, evaluate_advice
 from app.analytics_ui import (
     TREND_STALE_AFTER, TrendView, metric_observed_at, metric_samples, summarize_metric,
     trend_view_from_query,
 )
-from app.app_actions import open_codex, open_data_directory
-from app.codex_rollout import (
-    configured_sessions_dir, make_response_safe_id,
-)
-from app.codex_state import configured_state_path
+from app.codex_rollout import make_response_safe_id
 from app.dashboard import (
     DashboardSnapshot,
     DashboardViewModel,
@@ -45,12 +40,6 @@ from app.desktop_widget import (
     DesktopMiniWidget, ExitChoiceDialog, WidgetTooltip, format_percent,
     format_reset_time,
 )
-from app.diagnostics import (
-    DIAGNOSTIC_CHECK_CODES, DiagnosticReport,
-)
-from app.diagnostics_worker import (
-    DashboardDiagnosticsWorker, DiagnosticsRequest, run_diagnostics_request,
-)
 from app.i18n import (
     LANGUAGE_LABELS, language_from_label, localize_auto_refresh,
     localize_presenter_text, localize_status, translate,
@@ -61,7 +50,6 @@ from app.quota import CodexQuotaSnapshot
 from app.quota_provider import CodexAppServerQuotaProvider, QuotaProvider
 from app.single_instance import SingleInstanceGuard
 from app.version import __version__
-from app.new_thread import generic_handoff_template
 from app.startup_settings import StartupSettingsDialog
 from app.system_tray import SystemTrayController
 from app.ui_presenter import (
@@ -88,10 +76,10 @@ from app.ui_settings import (
     save_widget_mode,
 )
 from app.ui_theme import (
-    BODY, BODY_STRONG, BUTTON, CAPTION, CARD_RADIUS, CARD_TITLE, COLORS,
-    CONTROL_RADIUS, FONT_BODY, FONT_FAMILY, FONT_SECTION, FONT_SMALL,
+    BODY, BODY_STRONG, CAPTION, CARD_RADIUS, CARD_TITLE, COLORS,
+    CONTROL_RADIUS, FONT_FAMILY, FONT_SECTION, FONT_SMALL,
     METRIC, NAV, PAGE_TITLE, SECTION_TITLE, SPACE_1, SPACE_2, SPACE_3,
-    SPACE_4, SPACE_6, STATUS_TITLE, configure_view,
+    SPACE_4, SPACE_6, configure_view,
 )
 from app.usage_summary import (
     ObservedUsageSummary,
@@ -110,7 +98,7 @@ SESSION_COLUMN_KEYS = (
 CORE_METRICS = (
     "current_turn", "session_total", "cache_reuse", "reasoning",
 )
-HEAVY_PAGES = frozenset(("sessions", "usage_trends", "recommendations"))
+HEAVY_PAGES = frozenset(("sessions", "usage_trends"))
 TREND_GROUP_METRICS = {
     "tokens": ("input", "output", "total"),
     "cache": ("cached", "cache_reuse", "reasoning"),
@@ -206,8 +194,6 @@ class Dashboard:
         )
         self.snapshot = None
         self.presentation: DashboardPresentation | None = None
-        self.advisor_result: AdvisorResult | None = None
-        self.diagnostic_report: DiagnosticReport | None = None
         self.lookback_days = 7
         self.trend_range_days = 7
         self.trend_view = TrendView(7, "empty", (), None)
@@ -297,14 +283,6 @@ class Dashboard:
         self._refresh_poll_scheduled = False
         self._first_snapshot_applied = False
         self._startup_backfill_job: str | None = None
-        self.diagnostics_worker = DashboardDiagnosticsWorker(
-            run_diagnostics_request,
-        )
-        self._latest_diagnostics_generation = 0
-        self._diagnostics_poll_scheduled = False
-        self._diagnostics_running = False
-        self._diagnostics_error = False
-
         self.auto_refresh_var = tk.BooleanVar(master=root, value=self.shell_state.auto_refresh_enabled)
         self.data_status_var = tk.StringVar(value="")
         self.status_message_var = tk.StringVar(value="")
@@ -330,7 +308,6 @@ class Dashboard:
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
         self.ui_icons: dict[str, ctk.CTkImage] = {}
         self.status_recent_rows: list[dict[str, object]] = []
-        self.diagnostic_rows: list[tuple[ctk.CTkLabel, ctk.CTkLabel]] = []
         self.startup_adapter = WindowsStartupAdapter()
 
         root.title("Codex Token Monitor")
@@ -348,7 +325,6 @@ class Dashboard:
             on_exit=self.request_exit,
             on_refresh=self.manual_refresh,
             settings_path=UI_SETTINGS_PATH,
-            on_more=self._show_widget_more,
         )
         self.exit_dialog = ExitChoiceDialog(root, UI_SETTINGS_PATH)
         self.settings_dialog = StartupSettingsDialog(root, UI_SETTINGS_PATH, on_idle_opacity_saved=self.mini_widget.set_idle_opacity)
@@ -417,8 +393,7 @@ class Dashboard:
         nav.grid_columnconfigure(0, weight=1)
         nav_icon_kinds = {
             "overview": "home", "sessions": "history",
-            "usage_trends": "trend", "recommendations": "recommendation",
-            "tools": "tools", "settings": "settings",
+            "usage_trends": "trend", "settings": "settings",
         }
         for row, page in enumerate(NAVIGATION_ITEMS):
             self.ui_icons[f"nav_{page}"] = create_icon(
@@ -547,8 +522,6 @@ class Dashboard:
             "session_detail": self._build_current_task_page,
             "sessions": self._build_history_page,
             "usage_trends": self._build_usage_trends_page,
-            "recommendations": self._build_recommendations_page,
-            "tools": self._build_tools_page,
             "settings": self._build_settings_page,
         }
         self.built_pages = set()
@@ -668,7 +641,6 @@ class Dashboard:
         for attribute in {
             "sessions": ("_history_controls_layout_mode", "_sessions_page_show_detail"),
             "usage_trends": ("_trend_metric_layout_columns",),
-            "recommendations": (),
         }[page]:
             self.__dict__.pop(attribute, None)
         self._heavy_page_destroy_count += 1
@@ -713,17 +685,15 @@ class Dashboard:
         )
         self._stabilize_scrollable_frame(page)
         page.grid(row=0, column=0, sticky="nsew")
-        self.status_advice_card = self._build_status_advice(page)
-        self.core_metrics_panel = self._build_core_metrics_panel(page)
-        self.observed_usage_card = self._build_observed_usage_card(page)
         self.session_selector_card = ctk.CTkFrame(
             page, fg_color="transparent", corner_radius=0,
         )
         self.session_selector_card.grid_columnconfigure((0, 1), weight=1, uniform="session_selector")
         self.task_summary_card = self._build_task_summary_card(self.session_selector_card)
+        self.core_metrics_panel = self._build_core_metrics_panel(page)
         self.quota_center_card = self._build_quota_center_card(page)
+        self.observed_usage_card = self._build_observed_usage_card(page)
         self.trend_preview_card = self._build_trend_preview_card(page)
-        self.quick_actions_card = self._build_quick_actions_card(page)
         self.status_recent_card = self._build_status_recent_card(self.session_selector_card)
         self._apply_status_layout(1000)
 
@@ -773,7 +743,7 @@ class Dashboard:
     def _sync_task_summary_text(self) -> None:
         if not hasattr(self, "task_summary_display_var"):
             return
-        heading = " 路 ".join(item for item in (
+        heading = " · ".join(item for item in (
             self.simple_task_section_var.get(), self.task_summary_status_var.get(),
         ) if item)
         self.task_summary_display_var.set("\n".join(item for item in (
@@ -807,75 +777,6 @@ class Dashboard:
             canvas.configure(scrollregion=bounds)
 
         frame.bind("<Configure>", update_scrollregion)
-
-    def _build_status_advice(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
-        card = self._section_card(parent)
-        card.grid_columnconfigure(1, weight=1)
-        self.status_section_title = ctk.CTkLabel(
-            card, text="", font=SECTION_TITLE, text_color=COLORS.primary_text,
-            anchor="w",
-        )
-        self.status_section_title.grid(
-            row=0, column=0, columnspan=2, sticky="ew", padx=SPACE_4,
-            pady=(SPACE_3, SPACE_1),
-        )
-        self.status_meta_var = tk.StringVar(master=self.root, value="")
-        self.status_meta_label = ctk.CTkLabel(
-            card, textvariable=self.status_meta_var, font=CAPTION,
-            text_color=COLORS.accent, anchor="e",
-        )
-        self.status_meta_label.grid(
-            row=0, column=2, sticky="e", padx=SPACE_4,
-            pady=(SPACE_3, SPACE_1),
-        )
-        self.ui_icons["status_shield"] = create_icon(
-            "shield", size=24, color=COLORS.on_accent,
-        )
-        self.simple_status_accent = ctk.CTkLabel(
-            card, text="", image=self.ui_icons["status_shield"],
-            width=30, height=30, corner_radius=8,
-            font=(FONT_FAMILY, 19, "bold"), text_color=COLORS.on_accent,
-            fg_color=COLORS.real,
-        )
-        self.simple_status_accent.grid(
-            row=1, column=0, sticky="nw", padx=(SPACE_4, SPACE_2), pady=SPACE_1,
-        )
-        self.simple_status_title_var = tk.StringVar(master=self.root, value="—")
-        self.simple_reason_var = tk.StringVar(master=self.root, value="")
-        ctk.CTkLabel(
-            card, textvariable=self.simple_status_title_var, font=BODY_STRONG,
-            text_color=COLORS.primary_text, anchor="w",
-        ).grid(row=1, column=1, sticky="ew", padx=(0, SPACE_2), pady=SPACE_1)
-        self.status_reason_label = ctk.CTkLabel(
-            card, textvariable=self.simple_reason_var, font=BODY,
-            text_color=COLORS.secondary_text, anchor="w", justify="left",
-            wraplength=420, height=24,
-        )
-        self.status_reason_label.grid(
-            row=2, column=1, sticky="ew", padx=(0, SPACE_2),
-            pady=(0, SPACE_3),
-        )
-        self.primary_action_button = ctk.CTkButton(
-            card, text="", command=self._execute_primary_action, width=138,
-            height=34, fg_color=COLORS.accent, hover_color=COLORS.accent_hover,
-            font=BUTTON,
-        )
-        self.primary_action_button.grid(
-            row=1, column=2, rowspan=2, sticky="e",
-            padx=(SPACE_2, SPACE_2), pady=(SPACE_1, SPACE_3),
-        )
-        self.reason_button = ctk.CTkButton(
-            card, text="", command=lambda: self.show_page("recommendations"),
-            width=118, height=34,
-            fg_color="transparent", border_width=1, border_color=COLORS.border,
-            text_color=COLORS.primary_text, hover_color=COLORS.accent_soft,
-            font=BUTTON,
-        )
-        self.reason_button.grid(
-            row=1, column=3, rowspan=2, sticky="e",
-            padx=(0, SPACE_4), pady=(SPACE_1, SPACE_3),
-        )
-        return card
 
     def _build_core_metrics_panel(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
         panel = self._section_card(parent)
@@ -1117,7 +1018,8 @@ class Dashboard:
         title = self.simple_task_title
         WidgetTooltip(title, lambda: self.task_full_title_var.get())
         stats = ctk.CTkFrame(card, fg_color="transparent")
-        stats.grid(row=1, column=0, columnspan=2, sticky="ew", padx=SPACE_4)
+        card.grid_rowconfigure(1, weight=1)
+        stats.grid(row=1, column=0, columnspan=2, sticky="new", padx=SPACE_4)
         stats.grid_columnconfigure((0, 1, 2), weight=1, uniform="task_stat")
         self.simple_task_labels = {}
         self.simple_task_title_vars = {}
@@ -1194,7 +1096,7 @@ class Dashboard:
             )
             window_card.grid(
                 row=0, column=column, sticky="nsew",
-                padx=(0 if column == 0 else SPACE_1, 0),
+                padx=(0, SPACE_1 // 2) if column == 0 else (SPACE_1 // 2, 0),
             )
             window_card.grid_columnconfigure(1, weight=1)
             title_var = tk.StringVar(master=self.root, value="")
@@ -1242,6 +1144,7 @@ class Dashboard:
                 padx=(0, SPACE_3), pady=(0, SPACE_2),
             )
             self.quota_window_widgets[prefix] = {
+                "card": window_card,
                 "title": title_var, "state": state_var,
                 "detail": detail_var, "state_label": state_label,
                 "progress": progress, "ring": ring,
@@ -1286,62 +1189,6 @@ class Dashboard:
             row=4, column=1, sticky="e", padx=(0, SPACE_4), pady=(0, SPACE_3),
         )
         self.quota_fallback_button.grid_remove()
-        return card
-
-    def _build_quick_actions_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
-        card = self._section_card(parent)
-        card.grid_columnconfigure(0, weight=1)
-        self.quick_title = ctk.CTkLabel(
-            card, text="", font=SECTION_TITLE, text_color=COLORS.primary_text,
-            anchor="w",
-        )
-        self.quick_title.grid(
-            row=0, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_3, SPACE_2),
-        )
-        self.quick_host = ctk.CTkFrame(card, fg_color="transparent")
-        self.quick_host.grid(
-            row=1, column=0, sticky="ew", padx=SPACE_3, pady=(0, SPACE_3),
-        )
-        self.ui_icons["quick_diagnose"] = create_icon(
-            "pulse", size=20, color=COLORS.on_accent,
-        )
-        for name, kind in (
-            ("quick_codex", "open"), ("quick_history", "history"),
-            ("quick_more", "more"),
-        ):
-            self.ui_icons[name] = create_icon(kind, size=20, color=COLORS.accent)
-        self.quick_diagnose = ctk.CTkButton(
-            self.quick_host, text="", image=self.ui_icons["quick_diagnose"],
-            compound="left", command=self.start_diagnostics,
-            fg_color=COLORS.accent, hover_color=COLORS.accent_hover,
-        )
-        self.quick_codex = ctk.CTkButton(
-            self.quick_host, text="", image=self.ui_icons["quick_codex"],
-            compound="left", command=self._open_codex,
-            fg_color=COLORS.raised_surface, text_color=COLORS.primary_text,
-            hover_color=COLORS.accent_soft,
-        )
-        self.quick_history = ctk.CTkButton(
-            self.quick_host, text="", image=self.ui_icons["quick_history"],
-            compound="left", command=self._show_new_thread_dialog,
-            fg_color=COLORS.raised_surface, text_color=COLORS.primary_text,
-            hover_color=COLORS.accent_soft,
-        )
-        self.quick_more = ctk.CTkButton(
-            self.quick_host, text="", image=self.ui_icons["quick_more"],
-            compound="left", command=lambda: self.show_page("tools"),
-            fg_color=COLORS.raised_surface, text_color=COLORS.primary_text,
-            hover_color=COLORS.accent_soft,
-        )
-        self.quick_action_buttons = (
-            self.quick_diagnose, self.quick_codex, self.quick_history, self.quick_more,
-        )
-        for index, button in enumerate(self.quick_action_buttons):
-            row, column = divmod(index, 2)
-            self.quick_host.grid_columnconfigure(column, weight=1, uniform="quick")
-            button.grid(
-                row=row, column=column, sticky="ew", padx=SPACE_1, pady=SPACE_1,
-            )
         return card
 
     def _build_status_recent_card(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
@@ -1459,102 +1306,64 @@ class Dashboard:
             self._apply_cached_snapshot(snapshot)
 
     def _apply_status_layout(self, content_width: int) -> None:
-        mode = dashboard_layout_for_width(content_width)
         layout_signature = (
-            mode, metric_columns_for_width(content_width),
+            metric_columns_for_width(content_width), content_width >= 720,
+            content_width >= 620,
         )
         if getattr(self, "_status_layout_signature", None) == layout_signature:
             return
         self._status_layout_signature = layout_signature
-        selector = getattr(self, "session_selector_card", None)
-        if selector is not None:
-            selector.grid_forget()
-            selector.grid_propagate(True)
-            self.task_summary_card.grid_forget()
-            self.status_recent_card.grid_forget()
-        cards = (
-            self.status_advice_card, self.core_metrics_panel,
-            self.observed_usage_card, self.quota_center_card,
-            self.trend_preview_card, self.quick_actions_card,
-        ) if selector is not None else (
-            self.status_advice_card, self.core_metrics_panel,
-            self.observed_usage_card, self.task_summary_card,
-            self.quota_center_card, self.trend_preview_card,
-            self.status_recent_card, self.quick_actions_card,
-        )
-        for card in cards:
-            card.grid_forget()
-            card.grid_propagate(True)
-        core_layout_width = content_width
-        for column in range(4):
+        for column in range(2):
             self.status_page.grid_columnconfigure(
                 column, weight=0, uniform="", minsize=0,
             )
-        if mode in {"wide", "medium"}:
-            for column in (0, 1):
-                self.status_page.grid_columnconfigure(
-                    column, weight=1, uniform="dashboard",
-                )
-            self.status_advice_card.grid(
-                row=0, column=0, columnspan=2,
-                sticky="ew", pady=(0, SPACE_3),
+        self.status_page.grid_columnconfigure(0, weight=1)
+        ordered_cards = (
+            self.session_selector_card,
+            self.core_metrics_panel,
+            self.quota_center_card,
+            self.observed_usage_card,
+            self.trend_preview_card,
+        )
+        for row, card in enumerate(ordered_cards):
+            card.grid_forget()
+            card.grid(
+                row=row, column=0, sticky="ew", pady=(0, SPACE_3),
             )
-            if selector is not None:
-                selector.grid(
-                    row=1, column=0, columnspan=2,
-                    sticky="nsew", pady=(0, SPACE_3),
-                )
-                self._layout_session_selector(content_width)
-            self.core_metrics_panel.grid(
-                row=2 if selector is not None else 1, column=0, columnspan=2,
-                sticky="ew", pady=(0, SPACE_3),
-            )
-            self.quota_center_card.grid(
-                row=3 if selector is not None else 2, column=0, sticky="nsew", padx=(0, SPACE_2),
-                pady=(0, SPACE_3),
-            )
-            if selector is None:
-                self.status_recent_card.grid(
-                    row=2, column=1, sticky="nsew", pady=(0, SPACE_3),
-                )
-            self.observed_usage_card.grid(
-                row=4 if selector is not None else 3, column=0, columnspan=2,
-                sticky="ew", pady=(0, SPACE_3),
-            )
-            self.trend_preview_card.grid(
-                row=5 if selector is not None else 4, column=0, sticky="nsew", padx=(0, SPACE_2),
-                pady=(0, SPACE_3),
-            )
-            if selector is None:
-                self.task_summary_card.grid(
-                    row=4, column=1, sticky="nsew", pady=(0, SPACE_3),
-                )
-            self.quick_actions_card.grid(
-                row=6 if selector is not None else 5, column=0, columnspan=2,
-                sticky="ew", pady=(0, SPACE_3),
-            )
-        else:
-            self.status_page.grid_columnconfigure(0, weight=1, uniform="")
-            ordered_cards = [self.status_advice_card]
-            if selector is not None:
-                ordered_cards.append(selector)
-                ordered_cards.extend((
-                    self.core_metrics_panel, self.quota_center_card,
-                    self.observed_usage_card, self.trend_preview_card,
-                ))
-            else:
-                ordered_cards.extend((
-                    self.quota_center_card, self.core_metrics_panel,
-                    self.task_summary_card, self.observed_usage_card,
-                    self.trend_preview_card, self.status_recent_card,
-                ))
-            ordered_cards.append(self.quick_actions_card)
-            for row, card in enumerate(ordered_cards):
-                card.grid(row=row, column=0, sticky="ew", pady=(0, SPACE_3))
-            if selector is not None:
-                self._layout_session_selector(content_width)
-        self._layout_core_metrics(core_layout_width)
+        self._layout_session_selector(content_width)
+        self._layout_core_metrics(content_width)
+        self._layout_quota_cards(content_width)
         self._layout_observed_usage(content_width)
+
+    def _layout_quota_cards(self, content_width: int) -> None:
+        columns = 2 if content_width >= 620 else 1
+        for column in range(2):
+            self.quota_cards_host.grid_columnconfigure(
+                column,
+                weight=1 if column < columns else 0,
+                uniform="quota" if column < columns else "",
+            )
+        for row in range(2):
+            self.quota_cards_host.grid_rowconfigure(
+                row,
+                weight=1,
+                uniform="quota_row" if columns == 1 else "",
+            )
+        for index, prefix in enumerate(("five", "week")):
+            card = self.quota_window_widgets[prefix]["card"]
+            card.grid_forget()
+            row, column = divmod(index, columns)
+            card.grid(
+                row=row, column=column, sticky="nsew",
+                padx=(
+                    (0, SPACE_1 // 2)
+                    if columns == 2 and column == 0
+                    else (SPACE_1 // 2, 0)
+                    if columns == 2
+                    else (0, 0)
+                ),
+                pady=(0, SPACE_1 if columns == 1 and row == 0 else 0),
+            )
 
     def _layout_session_selector(self, content_width: int) -> None:
         """Keep recent choices and the selected result in one stable region."""
@@ -1571,10 +1380,10 @@ class Dashboard:
         self.task_summary_card.grid_forget()
         if content_width >= 720:
             self.status_recent_card.grid(
-                row=0, column=0, sticky="new", padx=(SPACE_2, SPACE_1),
+                row=0, column=0, sticky="nsew", padx=(SPACE_2, SPACE_1),
             )
             self.task_summary_card.grid(
-                row=0, column=1, sticky="new", padx=(SPACE_1, SPACE_2),
+                row=0, column=1, sticky="nsew", padx=(SPACE_1, SPACE_2),
             )
         else:
             self.status_recent_card.grid(
@@ -1731,8 +1540,7 @@ class Dashboard:
         actions.grid(row=5, column=0, sticky="ew", pady=SPACE_3)
         self.task_refresh_button = ctk.CTkButton(actions, text="", command=self.manual_refresh)
         self.task_switch_button = ctk.CTkButton(actions, text="", command=self._return_to_current_session, fg_color="transparent", border_width=1, border_color=COLORS.border, text_color=COLORS.primary_text)
-        self.task_new_thread_button = ctk.CTkButton(actions, text="", command=self._show_new_thread_dialog, fg_color=COLORS.orange, hover_color=COLORS.estimate)
-        for column, button in enumerate((self.task_refresh_button, self.task_switch_button, self.task_new_thread_button)):
+        for column, button in enumerate((self.task_refresh_button, self.task_switch_button)):
             button.grid(row=0, column=column, padx=(0, SPACE_2))
 
     def _build_history_page(self, parent: ctk.CTkFrame) -> None:
@@ -2246,179 +2054,6 @@ class Dashboard:
             row, column = divmod(index, columns)
             cell.grid(row=row, column=column, sticky="nsew", padx=SPACE_1, pady=SPACE_2)
 
-    def _build_recommendations_page(self, parent: ctk.CTkFrame) -> None:
-        page = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
-        page.grid(row=0, column=0, sticky="nsew")
-        page.grid_columnconfigure(0, weight=1)
-        self.recommendations_description = ctk.CTkLabel(
-            page, text="", font=BODY, text_color=COLORS.secondary_text,
-            anchor="w", justify="left", wraplength=780,
-        )
-        self.recommendations_description.grid(row=0, column=0, sticky="ew", pady=(0, SPACE_2))
-        self.recommendation_cards: list[dict[str, object]] = []
-        for index in range(5):
-            card = self._section_card(page)
-            card.grid(row=index + 1, column=0, sticky="ew", pady=(0, SPACE_3))
-            card.grid_columnconfigure(0, weight=1)
-            title_var = tk.StringVar(master=self.root, value="")
-            severity_var = tk.StringVar(master=self.root, value="")
-            body_var = tk.StringVar(master=self.root, value="")
-            evidence_var = tk.StringVar(master=self.root, value="")
-            metadata_var = tk.StringVar(master=self.root, value="")
-            history_var = tk.StringVar(master=self.root, value="")
-            observed_var = tk.StringVar(master=self.root, value="")
-            ctk.CTkLabel(
-                card, textvariable=title_var,
-                font=STATUS_TITLE if index == 0 else SECTION_TITLE,
-                text_color=COLORS.primary_text, anchor="w",
-            ).grid(row=0, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_3, SPACE_1))
-            severity = ctk.CTkLabel(
-                card, textvariable=severity_var, font=CAPTION,
-                text_color=COLORS.unknown, fg_color=COLORS.unknown_soft,
-                corner_radius=8, padx=8,
-            )
-            severity.grid(row=0, column=1, padx=SPACE_4, pady=(SPACE_3, SPACE_1))
-            ctk.CTkLabel(
-                card, textvariable=body_var, font=BODY,
-                text_color=COLORS.secondary_text, anchor="w", justify="left",
-                wraplength=760,
-            ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=SPACE_4, pady=SPACE_1)
-            ctk.CTkLabel(
-                card, textvariable=evidence_var, font=BODY_STRONG,
-                text_color=COLORS.primary_text, anchor="w", justify="left",
-                wraplength=760,
-            ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=SPACE_4, pady=SPACE_1)
-            ctk.CTkLabel(
-                card, textvariable=metadata_var, font=CAPTION,
-                text_color=COLORS.secondary_text, anchor="w", justify="left",
-                wraplength=760,
-            ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=SPACE_4, pady=SPACE_1)
-            ctk.CTkLabel(
-                card, textvariable=history_var, font=BODY,
-                text_color=COLORS.secondary_text, anchor="w", justify="left",
-                wraplength=760,
-            ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=SPACE_4, pady=SPACE_1)
-            ctk.CTkLabel(
-                card, textvariable=observed_var, font=CAPTION,
-                text_color=COLORS.muted_text, anchor="w",
-            ).grid(row=5, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_1, SPACE_3))
-            action = ctk.CTkButton(
-                card, text="", command=lambda item=index: self._execute_recommendation(item),
-                width=138, height=32,
-            )
-            action.grid(row=5, column=1, padx=SPACE_4, pady=(SPACE_1, SPACE_3))
-            self.recommendation_cards.append({
-                "card": card, "title": title_var, "severity": severity_var,
-                "severity_label": severity, "body": body_var,
-                "evidence": evidence_var, "metadata": metadata_var,
-                "history": history_var, "observed": observed_var,
-                "action": action, "recommendation": None,
-            })
-        self.recommendations_rules_button = ctk.CTkButton(
-            page, text="", command=self._show_advisor_rules,
-            fg_color="transparent", border_width=1, border_color=COLORS.border,
-            text_color=COLORS.primary_text, width=150,
-        )
-        self.recommendations_rules_button.grid(row=6, column=0, sticky="w", pady=(0, SPACE_3))
-
-    def _build_tools_page(self, parent: ctk.CTkFrame) -> None:
-        page = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
-        page.grid(row=0, column=0, sticky="nsew")
-        self.tools_page = page
-        page.grid_columnconfigure((0, 1), weight=1, uniform="tool_group")
-        self.tool_group_cards = []
-        self.tool_group_titles = {}
-
-        def group(key: str) -> ctk.CTkFrame:
-            card = self._section_card(page)
-            card.grid_columnconfigure(0, weight=1)
-            title = ctk.CTkLabel(
-                card, text="", font=SECTION_TITLE,
-                text_color=COLORS.primary_text, anchor="w",
-            )
-            title.grid(row=0, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_3, SPACE_2))
-            self.tool_group_cards.append(card)
-            self.tool_group_titles[key] = title
-            return card
-
-        diagnostic = group("diagnostics")
-        self.diagnostic_title = self.tool_group_titles["diagnostics"]
-        self.diagnostic_summary_var = tk.StringVar(master=self.root, value="")
-        ctk.CTkLabel(
-            diagnostic, textvariable=self.diagnostic_summary_var, font=BODY_STRONG,
-            text_color=COLORS.primary_text, anchor="w", justify="left",
-            wraplength=420,
-        ).grid(row=1, column=0, sticky="ew", padx=SPACE_4, pady=(0, SPACE_2))
-        self.diagnostic_run_button = ctk.CTkButton(
-            diagnostic, text="", command=self.start_diagnostics, height=34,
-        )
-        self.diagnostic_view_button = ctk.CTkButton(
-            diagnostic, text="", command=self._show_diagnostic_dialog,
-            state="disabled", height=34, fg_color="transparent",
-            border_width=1, border_color=COLORS.border,
-            text_color=COLORS.primary_text,
-        )
-        self.diagnostic_export_button = ctk.CTkButton(
-            diagnostic, text="", command=lambda: None, state="disabled", height=34,
-            fg_color="transparent", border_width=1, border_color=COLORS.border,
-            text_color=COLORS.muted_text,
-        )
-        for row, button in enumerate((
-            self.diagnostic_run_button, self.diagnostic_view_button,
-            self.diagnostic_export_button,
-        ), start=2):
-            button.grid(row=row, column=0, sticky="ew", padx=SPACE_4, pady=(0, SPACE_2 if row < 4 else SPACE_4))
-
-        data = group("data")
-        self.tool_open_data = ctk.CTkButton(data, text="", command=self._open_data_directory)
-        self.tool_backup = ctk.CTkButton(data, text="", command=lambda: None, state="disabled")
-        self.tool_restore = ctk.CTkButton(data, text="", command=lambda: None, state="disabled")
-        self.tool_cache_cleanup = ctk.CTkButton(data, text="", command=lambda: None, state="disabled")
-        for row, button in enumerate((
-            self.tool_open_data, self.tool_backup, self.tool_restore,
-            self.tool_cache_cleanup,
-        ), start=1):
-            button.grid(row=row, column=0, sticky="ew", padx=SPACE_4, pady=(0, SPACE_2 if row < 4 else SPACE_4))
-
-        workflow = group("workflow")
-        self.tool_open_codex = ctk.CTkButton(workflow, text="", command=self._open_codex)
-        self.tool_new_thread = ctk.CTkButton(workflow, text="", command=self._show_new_thread_dialog)
-        self.tool_redetect = ctk.CTkButton(workflow, text="", command=self.manual_refresh)
-        for row, button in enumerate((self.tool_open_codex, self.tool_new_thread, self.tool_redetect), start=1):
-            button.grid(row=row, column=0, sticky="ew", padx=SPACE_4, pady=(0, SPACE_2 if row < 3 else SPACE_4))
-
-        help_card = group("help")
-        self.tool_guide = ctk.CTkButton(help_card, text="", command=self._show_user_guide)
-        self.tool_privacy = ctk.CTkButton(help_card, text="", command=self._show_privacy_boundary)
-        self.tool_update = ctk.CTkButton(help_card, text="", command=lambda: None, state="disabled")
-        self.tool_about = ctk.CTkButton(help_card, text="", command=self._show_about)
-        for row, button in enumerate((self.tool_guide, self.tool_privacy, self.tool_update, self.tool_about), start=1):
-            button.grid(row=row, column=0, sticky="ew", padx=SPACE_4, pady=(0, SPACE_2 if row < 4 else SPACE_4))
-
-        self.coming_soon_buttons = (
-            self.diagnostic_export_button, self.tool_backup,
-            self.tool_restore, self.tool_cache_cleanup, self.tool_update,
-        )
-        self._layout_tool_groups(1000)
-
-    def _layout_tool_groups(self, content_width: int) -> None:
-        columns = 2 if content_width >= 900 else 1
-        if getattr(self, "_tool_group_layout_columns", None) == columns:
-            return
-        self._tool_group_layout_columns = columns
-        for column in range(2):
-            self.tools_page.grid_columnconfigure(
-                column, weight=1 if column < columns else 0,
-                uniform="tool_group" if column < columns else "",
-            )
-        for index, card in enumerate(self.tool_group_cards):
-            card.grid_forget()
-            row, column = divmod(index, columns)
-            card.grid(
-                row=row, column=column, sticky="nsew",
-                padx=(0 if column == 0 else SPACE_3, 0), pady=(0, SPACE_3),
-            )
-
     def _build_settings_page(self, parent: ctk.CTkFrame) -> None:
         page = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
         page.grid(row=0, column=0, sticky="nsew")
@@ -2493,16 +2128,14 @@ class Dashboard:
         privacy = group("privacy")
         self.settings_privacy_button = ctk.CTkButton(privacy, text="", command=self._show_privacy_boundary, width=180)
         self.settings_version_value = ctk.CTkLabel(privacy, text="0.1.0", font=BODY_STRONG, text_color=COLORS.primary_text)
-        self.settings_update_button = ctk.CTkButton(privacy, text="", command=lambda: None, state="disabled", width=180)
         field(privacy, 1, "privacy", self.settings_privacy_button)
         field(privacy, 2, "version", self.settings_version_value)
-        field(privacy, 3, "updates", self.settings_update_button)
         self.settings_note_var = tk.StringVar(master=self.root, value="")
         ctk.CTkLabel(
             privacy, textvariable=self.settings_note_var, font=FONT_SMALL,
             text_color=COLORS.secondary_text, anchor="w", justify="left",
             wraplength=420,
-        ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=SPACE_4, pady=(SPACE_2, SPACE_4))
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=SPACE_4, pady=(SPACE_2, SPACE_4))
         self._layout_settings_groups(1000)
 
     def _layout_settings_groups(self, content_width: int) -> None:
@@ -2587,9 +2220,7 @@ class Dashboard:
             self._mark_pages_dirty(set(ALL_PAGES))
             return
 
-        self.status_section_title.configure(text=translate("status_advice_title", language))
         self.core_metrics_title.configure(text=translate("core_metrics_title", language))
-        self.reason_button.configure(text=translate("view_all_recommendations", language))
         for widget in self.core_metric_widgets:
             semantic = widget["semantic"]
             widget["title"].set(translate(f"core_metric_{semantic}", language))
@@ -2652,11 +2283,6 @@ class Dashboard:
         self.quota_detail_button.configure(text=translate("view_local_quota_history", language))
         self.quota_window_widgets["five"]["title"].set(translate("five_hour_limit", language))
         self.quota_window_widgets["week"]["title"].set(translate("weekly_limit", language))
-        self.quick_title.configure(text=translate("quick_actions_title", language))
-        for button, key in zip(self.quick_action_buttons, (
-            "one_click_diagnostics", "open_codex", "prepare_new_thread", "more_tools",
-        )):
-            button.configure(text=translate(key, language))
         self.status_recent_title.configure(text=translate("recent_sessions", language))
         self.status_recent_all.configure(text=translate("nav_sessions", language))
         self.trend_preview_title.configure(text=translate("trend_preview_title", language))
@@ -2673,7 +2299,6 @@ class Dashboard:
             if hasattr(self, "mini_widget") and self.mini_widget.visible:
                 self.mini_widget.update(
                     self.quota_snapshot, self._mini_thread_snapshot, language,
-                    self.advisor_result.primary if self.advisor_result is not None else None,
                 )
             if hasattr(self, "tray"):
                 self.tray.update(
@@ -2696,7 +2321,6 @@ class Dashboard:
         self.task_back_button.configure(text=translate("nav_sessions", language))
         self.task_refresh_button.configure(text=translate("manual_refresh", language))
         self.task_switch_button.configure(text=translate("return_to_current", language))
-        self.task_new_thread_button.configure(text=translate("prepare_new_thread", language))
 
         self.task_selector_label.configure(text=translate("monitored_task", language))
         self.session_search_label.configure(text=translate("search_sessions", language))
@@ -2775,40 +2399,10 @@ class Dashboard:
                 stale=translate("trend_tooltip_stale", language),
                 fresh=translate("trend_tooltip_fresh", language),
                 derived=translate("trend_tooltip_derived", language),
-                derived_yes=translate("recommendation_derived_yes", language),
-                derived_no=translate("recommendation_derived_no", language),
+                derived_yes=translate("derived_yes", language),
+                derived_no=translate("derived_no", language),
             ),
         )
-        self.recommendations_description.configure(text=translate("recommendations_description", language))
-        self.recommendations_rules_button.configure(text=translate("recommendation_rules", language))
-
-        for key, title in self.tool_group_titles.items():
-            title.configure(text=translate(f"tools_group_{key}", language))
-        self.diagnostic_run_button.configure(text=translate("run_diagnostics", language))
-        self.diagnostic_view_button.configure(text=translate("view_diagnostic_result", language))
-        self.diagnostic_export_button.configure(
-            text=f"{translate('export_diagnostic_package', language)} · {translate('coming_soon', language)}",
-        )
-        for button, key in (
-            (self.tool_open_codex, "open_codex"),
-            (self.tool_open_data, "open_data_directory"),
-            (self.tool_new_thread, "prepare_new_thread"),
-            (self.tool_redetect, "redetect_sources"),
-            (self.tool_privacy, "privacy_boundary"),
-            (self.tool_guide, "user_guide"),
-            (self.tool_about, "about_and_version"),
-        ):
-            button.configure(text=translate(key, language))
-        for button, key in (
-            (self.tool_backup, "backup_monitor_data"),
-            (self.tool_restore, "restore_monitor_data"),
-            (self.tool_cache_cleanup, "clear_monitor_cache"),
-            (self.tool_update, "check_updates"),
-        ):
-            button.configure(
-                text=f"{translate(key, language)} · {translate('coming_soon', language)}",
-            )
-
         settings_keys = {
             "language": "language", "startup_mode": "default_startup_mode",
             "widget_mode": "widget_default_mode", "auto_refresh": "auto_refresh_setting",
@@ -2819,7 +2413,6 @@ class Dashboard:
             "tray": "tray_setting", "taskbar": "taskbar_setting",
             "always_on_top": "always_on_top", "remember_position": "remember_position",
             "privacy": "privacy_setting", "version": "version_setting",
-            "updates": "updates_setting",
         }
         for name, key in settings_keys.items():
             self.settings_labels[name].configure(text=translate(key, language))
@@ -2844,9 +2437,6 @@ class Dashboard:
         self.settings_position_value.configure(text=translate("enabled_fixed_value", language))
         self.settings_privacy_button.configure(text=translate("privacy_boundary", language))
         self.settings_version_value.configure(text=__version__)
-        self.settings_update_button.configure(
-            text=f"{translate('check_updates', language)} · {translate('coming_soon', language)}",
-        )
 
         self._mark_pages_dirty(set(ALL_PAGES))
         if self.presentation is not None:
@@ -2855,7 +2445,6 @@ class Dashboard:
         if hasattr(self, "mini_widget") and self.mini_widget.visible:
             self.mini_widget.update(
                 self.quota_snapshot, self._mini_thread_snapshot, language,
-                self.advisor_result.primary if self.advisor_result is not None else None,
             )
         if hasattr(self, "tray"):
             self.tray.update(
@@ -2879,7 +2468,6 @@ class Dashboard:
             self.task_back_button.configure(text=translate("nav_sessions", language))
             self.task_refresh_button.configure(text=translate("manual_refresh", language))
             self.task_switch_button.configure(text=translate("return_to_current", language))
-            self.task_new_thread_button.configure(text=translate("prepare_new_thread", language))
             return
         if page == "sessions":
             self.task_selector_label.configure(text=translate("monitored_task", language))
@@ -2959,46 +2547,10 @@ class Dashboard:
                     stale=translate("trend_tooltip_stale", language),
                     fresh=translate("trend_tooltip_fresh", language),
                     derived=translate("trend_tooltip_derived", language),
-                    derived_yes=translate("recommendation_derived_yes", language),
-                    derived_no=translate("recommendation_derived_no", language),
+                    derived_yes=translate("derived_yes", language),
+                    derived_no=translate("derived_no", language),
                 ),
             )
-            return
-        if page == "recommendations":
-            self.recommendations_description.configure(
-                text=translate("recommendations_description", language),
-            )
-            self.recommendations_rules_button.configure(
-                text=translate("recommendation_rules", language),
-            )
-            return
-        if page == "tools":
-            for key, title in self.tool_group_titles.items():
-                title.configure(text=translate(f"tools_group_{key}", language))
-            self.diagnostic_run_button.configure(text=translate("run_diagnostics", language))
-            self.diagnostic_view_button.configure(text=translate("view_diagnostic_result", language))
-            self.diagnostic_export_button.configure(
-                text=f"{translate('export_diagnostic_package', language)} · {translate('coming_soon', language)}",
-            )
-            for button, key in (
-                (self.tool_open_codex, "open_codex"),
-                (self.tool_open_data, "open_data_directory"),
-                (self.tool_new_thread, "prepare_new_thread"),
-                (self.tool_redetect, "redetect_sources"),
-                (self.tool_privacy, "privacy_boundary"),
-                (self.tool_guide, "user_guide"),
-                (self.tool_about, "about_and_version"),
-            ):
-                button.configure(text=translate(key, language))
-            for button, key in (
-                (self.tool_backup, "backup_monitor_data"),
-                (self.tool_restore, "restore_monitor_data"),
-                (self.tool_cache_cleanup, "clear_monitor_cache"),
-                (self.tool_update, "check_updates"),
-            ):
-                button.configure(
-                    text=f"{translate(key, language)} · {translate('coming_soon', language)}",
-                )
             return
         if page == "settings":
             self.settings_language_menu.set(LANGUAGE_LABELS[language])
@@ -3010,7 +2562,7 @@ class Dashboard:
                 "stale_status": "stale_status", "tray": "tray_setting",
                 "taskbar": "taskbar_setting", "always_on_top": "always_on_top",
                 "remember_position": "remember_position", "privacy": "privacy_setting",
-                "version": "version_setting", "updates": "updates_setting",
+                "version": "version_setting",
             }
             for name, key in settings_keys.items():
                 self.settings_labels[name].configure(text=translate(key, language))
@@ -3035,9 +2587,6 @@ class Dashboard:
             self.settings_position_value.configure(text=translate("enabled_fixed_value", language))
             self.settings_privacy_button.configure(text=translate("privacy_boundary", language))
             self.settings_version_value.configure(text=__version__)
-            self.settings_update_button.configure(
-                text=f"{translate('check_updates', language)} · {translate('coming_soon', language)}",
-            )
 
     def _apply_sidebar_labels(self) -> None:
         for page in NAVIGATION_ITEMS:
@@ -3143,7 +2692,6 @@ class Dashboard:
         if page not in dirty or presentation is None:
             return
         if page == "overview":
-            self._render_advisor()
             self._render_observed_usage()
             self._render_safe_overview(target="overview")
             self._render_status_recent(presentation)
@@ -3158,10 +2706,6 @@ class Dashboard:
         elif page == "usage_trends":
             self._render_usage_insights()
             self._render_trends(target="usage_trends")
-        elif page == "recommendations":
-            self._render_recommendations()
-        elif page == "tools":
-            self._render_diagnostics()
         dirty.discard(page)
         self._render_session_rows = True
 
@@ -3288,7 +2832,6 @@ class Dashboard:
         self._history_backfill_cancel.set()
         self.auto_refresh.close()
         self.refresh_worker.shutdown()
-        self.diagnostics_worker.shutdown()
         self.tray.stop()
         self.settings_dialog.close()
         self.mini_widget.destroy()
@@ -3425,7 +2968,6 @@ class Dashboard:
                 self.quota_snapshot,
                 self._mini_thread_snapshot,
                 self.language,
-                self.advisor_result.primary if self.advisor_result is not None else None,
             )
             return
         if payload.snapshot is None:
@@ -3435,7 +2977,6 @@ class Dashboard:
             self.current_page = 1
         self.lookback_days = self.snapshot.lookback_days
         self._refresh_trend_query()
-        self.advisor_result = self._evaluate_advisor()
         self.presentation = present_dashboard(
             self.snapshot, bool(self.auto_refresh_var.get()),
         )
@@ -3533,7 +3074,7 @@ class Dashboard:
                 local_timezone=None,
                 error_code="history_query_pending",
             )
-        self._mark_pages_dirty({"overview", "usage_trends", "recommendations"})
+        self._mark_pages_dirty({"overview", "usage_trends"})
         self._render_visible_page()
         self.history_error = None
         request = (
@@ -3626,9 +3167,7 @@ class Dashboard:
             self.observed_usage_summary,
             self.history_error,
         ) = candidate
-        if self.snapshot is not None:
-            self.advisor_result = self._evaluate_advisor()
-        self._mark_pages_dirty({"overview", "usage_trends", "recommendations"})
+        self._mark_pages_dirty({"overview", "usage_trends"})
         self._render_visible_page()
 
     def _invalidate_pending_trend_queries(self) -> None:
@@ -3641,25 +3180,9 @@ class Dashboard:
                 except queue.Empty:
                     break
 
-    def _evaluate_advisor(self) -> AdvisorResult:
-        advisor_snapshot = self.snapshot
-        if self.snapshot is not None:
-            advisor_snapshot = SimpleNamespace(
-                current_session=resolve_activity_session(self.snapshot),
-                selected_session=self.snapshot.selected_session,
-                sessions_result=self.snapshot.sessions_result,
-            )
-        return evaluate_advice(build_advisor_input(
-            advisor_snapshot,
-            self.quota_snapshot,
-            history_samples=self.trend_view.samples,
-            quota_history_samples=self.trend_view.quota_samples,
-        ))
-
     def _apply_cached_snapshot(self, snapshot) -> None:
         self.snapshot = snapshot
         self._schedule_trend_query(preserve_observed_usage=True)
-        self.advisor_result = self._evaluate_advisor()
         self.presentation = present_dashboard(snapshot, bool(self.auto_refresh_var.get()))
         self._apply_presentation(self.presentation)
 
@@ -3747,8 +3270,6 @@ class Dashboard:
             self._layout_history_controls(content_width)
             self._layout_history_columns(content_width)
             self._layout_sessions_page(content_width)
-        elif page == "tools" and self._page_is_built("tools"):
-            self._layout_tool_groups(content_width)
         elif page == "settings" and self._page_is_built("settings"):
             self._layout_settings_groups(content_width)
         elif page == "usage_trends" and self._page_is_built("usage_trends"):
@@ -3766,12 +3287,6 @@ class Dashboard:
             else:
                 for widget in secondary_header:
                     widget.grid()
-        reason_width = (
-            int(content_width / 2) - 100
-            if layout == "wide" else content_width - 64
-        )
-        if page == "overview" and self._page_is_built("overview"):
-            self.status_reason_label.configure(wraplength=max(180, reason_width))
         if page == "overview" and hasattr(self, "observed_usage_coverage_label"):
             wrap = max(220, content_width - 64)
             self.observed_usage_coverage_label.configure(wraplength=wrap)
@@ -3857,12 +3372,7 @@ class Dashboard:
             self.quota_snapshot,
             self._mini_thread_snapshot,
             self.language,
-            self.advisor_result.primary if self.advisor_result is not None else None,
         )
-
-    def _show_widget_more(self) -> None:
-        self.restore_dashboard()
-        self.show_page("tools")
 
     def restore_dashboard(self) -> None:
         if self.window_mode == "dashboard":
@@ -4016,74 +3526,36 @@ class Dashboard:
         self._render_session_rows = render_session_rows
         self._mark_pages_dirty({
             "overview", "sessions", "session_detail",
-            "usage_trends", "recommendations",
+            "usage_trends",
         })
+        self._render_factual_status(presentation)
         self._render_visible_page()
 
-    def _render_advisor(self) -> None:
-        if self.advisor_result is None:
-            return
-        recommendation = self.advisor_result.primary
-        title = translate(recommendation.title_key, self.language)
-        body = translate(recommendation.body_key, self.language)
-        self.simple_status_title_var.set(
-            translate("current_status_value", self.language, status=title)
-        )
-        self.simple_reason_var.set(
-            ellipsize_title(body, 38 if self.language == "zh-CN" else 62)
-        )
-        if hasattr(self, "status_meta_var") and self.snapshot is not None:
-            contract = build_ui_scope_contract(self.snapshot)
-            scope_key = (
-                "ui_scope_live_quota"
-                if recommendation.primary_action == "view_quota"
-                else "ui_scope_no_activity"
-                if contract.activity_thread_id is None
-                else "ui_scope_current_activity"
-                if contract.activity_scope.value == "current_activity"
-                else "ui_scope_recent_activity"
-            )
-            refreshed = (
-                self.presentation.last_refresh
-                if self.presentation is not None else "—"
-            )
-            self.status_meta_var.set(translate(
-                "status_scope_updated", self.language,
-                scope=translate(scope_key, self.language),
-                time=refreshed,
-            ))
-        action_keys = {
-            "view_current_task": "view_current_task",
-            "view_advice": "view_advice",
-            "prepare_new_thread": "prepare_new_thread",
-            "view_quota": "view_quota",
-            "diagnose": "one_click_diagnostics",
-        }
-        self.primary_action_button.configure(
-            text=translate(action_keys.get(recommendation.primary_action, "view_current_task"), self.language)
-        )
-        color = {
-            "normal": COLORS.real,
-            "optimize": COLORS.orange,
-            "new_thread": COLORS.orange,
-            "quota_risk": COLORS.orange,
-            "data_unavailable": COLORS.error,
-        }[recommendation.status]
-        soft = {
-            "normal": COLORS.real_soft,
-            "optimize": COLORS.orange_soft,
-            "new_thread": COLORS.orange_soft,
-            "quota_risk": COLORS.orange_soft,
-            "data_unavailable": COLORS.error_soft,
-        }[recommendation.status]
-        self.simple_status_accent.configure(fg_color=color, text="")
-        self.header_status_var.set(title)
-        self.header_status_badge.configure(
-            text_color=color, fg_color=soft,
-        )
-        connected = recommendation.status != "data_unavailable"
+    def _render_factual_status(self, presentation: DashboardPresentation) -> None:
+        data_available = presentation.data_status.value != "unavailable"
+        source_status = self.quota_snapshot.source_status
+        if not data_available:
+            text = localize_status(presentation.data_status, self.language)
+            color, soft = COLORS.error, COLORS.error_soft
+        elif source_status == "stale":
+            text = translate("quota_stale", self.language)
+            color, soft = COLORS.stale, COLORS.orange_soft
+        elif source_status == "invalid":
+            text = translate("quota_invalid", self.language)
+            color, soft = COLORS.error, COLORS.error_soft
+        elif source_status == "unavailable":
+            text = translate("quota_unavailable", self.language)
+            color, soft = COLORS.unknown, COLORS.unknown_soft
+        else:
+            text = localize_status(presentation.data_status, self.language)
+            color, soft = COLORS.real, COLORS.real_soft
+        self.header_status_var.set(text)
+        self.header_status_badge.configure(text_color=color, fg_color=soft)
         self.nav_connection_var.set(translate(
-            "connection_normal" if connected else "connection_abnormal", self.language
+            "connection_normal"
+            if data_available and source_status == "normal"
+            else "connection_abnormal",
+            self.language,
         ))
 
     def _configure_trend_metric_menu(self) -> None:
@@ -4282,10 +3754,6 @@ class Dashboard:
             self.refresh(refresh_quota=True)
         elif action == "view_quota_history":
             self._show_quota_history()
-        elif action == "diagnose":
-            self.start_diagnostics()
-        elif action == "open_codex":
-            self._open_codex()
         elif action == "view_all":
             self.show_page("overview")
         elif action == "view_coverage":
@@ -4724,126 +4192,6 @@ class Dashboard:
         }.get(point.unit)
         return value if unit_key is None else f"{value} {translate(unit_key, self.language)}"
 
-    def _render_recommendations(self) -> None:
-        if not hasattr(self, "recommendation_cards"):
-            return
-        recommendations = (
-            self.advisor_result.recommendations
-            if self.advisor_result is not None else ()
-        )
-        action_keys = {
-            "view_current_task": "view_current_task",
-            "view_advice": "view_advice",
-            "prepare_new_thread": "prepare_new_thread",
-            "view_quota": "view_quota",
-            "diagnose": "one_click_diagnostics",
-        }
-        for index, widget in enumerate(self.recommendation_cards):
-            card = widget["card"]
-            if index >= len(recommendations):
-                widget["recommendation"] = None
-                card.grid_remove()
-                continue
-            recommendation = recommendations[index]
-            widget["recommendation"] = recommendation
-            card.grid()
-            widget["title"].set(translate(recommendation.title_key, self.language))
-            widget["body"].set(translate(recommendation.body_key, self.language))
-            widget["severity"].set(
-                translate(f"severity_{recommendation.severity}", self.language)
-            )
-            evidence = " · ".join(
-                f"{translate(f'evidence_{key}', self.language)}: {self._format_advisor_evidence(key, value)}"
-                for key, value in recommendation.evidence
-            ) or "—"
-            widget["evidence"].set(
-                translate("recommendation_evidence", self.language, value=evidence)
-            )
-            source = translate("recommendation_source_safe_numeric", self.language)
-            widget["metadata"].set(
-                f"{translate('recommendation_source', self.language, value=source)} · "
-                f"{translate('recommendation_derived', self.language, value=translate('recommendation_derived_yes' if recommendation.derived else 'recommendation_derived_no', self.language))}"
-            )
-            history = recommendation.history_evidence
-            if history is None:
-                history_text = translate("recommendation_history_insufficient", self.language)
-            else:
-                direction_key = {
-                    "up": "history_direction_up",
-                    "down": "history_direction_down",
-                    "flat": "history_direction_stable",
-                }[history.direction]
-                history_text = translate(
-                    "advisor_history_summary",
-                    self.language,
-                    metric=translate(f"evidence_{history.metric}", self.language),
-                    direction=translate(direction_key, self.language),
-                    count=history.sample_count,
-                )
-                history_text = translate(
-                    "recommendation_history_scope",
-                    self.language,
-                    scope=translate(
-                        self._history_scope_key(history.source),
-                        self.language,
-                    ),
-                    value=history_text,
-                )
-            widget["history"].set(
-                translate("recommendation_history", self.language, value=history_text)
-            )
-            observed_at = recommendation.source_observed_at or recommendation.observed_at
-            widget["observed"].set(translate(
-                "recommendation_observed", self.language,
-                value=observed_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
-            ))
-            widget["action"].configure(
-                text=translate(
-                    action_keys.get(recommendation.primary_action, "view_current_task"),
-                    self.language,
-                )
-            )
-            tone, soft = {
-                "normal": (COLORS.real, COLORS.real_soft),
-                "notice": (COLORS.orange, COLORS.orange_soft),
-                "warning": (COLORS.orange, COLORS.orange_soft),
-                "failure": (COLORS.error, COLORS.error_soft),
-            }[recommendation.severity]
-            widget["severity_label"].configure(text_color=tone, fg_color=soft)
-
-    def _format_advisor_evidence(self, key: str, value: object) -> str:
-        if value is None:
-            return "—"
-        if isinstance(value, bool):
-            return translate("available_value" if value else "unavailable", self.language)
-        if key.endswith("_percent") or key == "cache_hit_percent_derived":
-            return f"{float(value):.1f}%"
-        if key.endswith("_tokens"):
-            return format_full_token_count(int(value))
-        if isinstance(value, str):
-            return localize_presenter_text(value, self.language)
-        return str(value)
-
-    def _execute_recommendation(self, index: int) -> None:
-        if index >= len(self.recommendation_cards):
-            return
-        recommendation = self.recommendation_cards[index].get("recommendation")
-        if not isinstance(recommendation, Recommendation):
-            return
-        self._execute_ui_action(recommendation.primary_action)
-
-    def _execute_ui_action(self, action: str) -> None:
-        if action == "prepare_new_thread":
-            self._show_new_thread_dialog()
-        elif action == "diagnose":
-            self.start_diagnostics()
-        elif action == "view_advice":
-            self.show_page("recommendations")
-        elif action == "view_quota":
-            self.show_page("overview")
-        else:
-            self._show_activity_detail()
-
     def _show_activity_detail(self) -> None:
         activity = resolve_activity_session(self.snapshot) if self.snapshot is not None else None
         selected = None
@@ -4869,14 +4217,6 @@ class Dashboard:
             self._configure_trend_metric_menu()
         self._mark_pages_dirty({"usage_trends"})
         self.show_page("usage_trends")
-
-    def _show_advisor_rules(self) -> None:
-        messagebox.showinfo(
-            translate("recommendation_rules", self.language),
-            translate("advisor_rules_body", self.language),
-            parent=self.root,
-        )
-
     def _render_usage_insights(self) -> None:
         if not hasattr(self, "usage_insights_sections"):
             return
@@ -5667,66 +5007,6 @@ class Dashboard:
                 border_color=COLORS.accent if is_selected else COLORS.border,
             )
 
-    def _execute_primary_action(self) -> None:
-        if self.advisor_result is None:
-            self.start_diagnostics()
-            return
-        self._execute_ui_action(self.advisor_result.primary.primary_action)
-
-    def _show_reason(self) -> None:
-        if self.advisor_result is None:
-            return
-        recommendation = self.advisor_result.primary
-        messagebox.showinfo(
-            translate(recommendation.title_key, self.language),
-            translate(recommendation.body_key, self.language),
-            parent=self.root,
-        )
-
-    def _show_new_thread_dialog(self) -> None:
-        existing = getattr(self, "new_thread_window", None)
-        if existing is not None and existing.winfo_exists():
-            existing.lift()
-            return
-        window = self.new_thread_window = ctk.CTkToplevel(self.root)
-        window.title(translate("prepare_new_thread", self.language))
-        window.geometry("560x430")
-        window.resizable(False, False)
-        if self.root.winfo_viewable():
-            window.transient(self.root)
-        window.grid_columnconfigure(0, weight=1)
-        window.protocol("WM_DELETE_WINDOW", window.destroy)
-        recommendation = self.advisor_result.primary if self.advisor_result is not None else None
-        reason = translate(recommendation.body_key, self.language) if recommendation is not None else translate("new_thread_generic_reason", self.language)
-        ctk.CTkLabel(window, text=translate("prepare_new_thread", self.language), font=(FONT_FAMILY, 21, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=SPACE_6, pady=(SPACE_6, SPACE_2))
-        ctk.CTkLabel(window, text=reason, font=FONT_BODY, text_color=COLORS.secondary_text, justify="left", anchor="w", wraplength=500).grid(row=1, column=0, sticky="ew", padx=SPACE_6)
-        ctk.CTkLabel(window, text=translate("new_thread_steps", self.language), font=FONT_BODY, justify="left", anchor="w", wraplength=500).grid(row=2, column=0, sticky="ew", padx=SPACE_6, pady=SPACE_3)
-        ctk.CTkLabel(window, text=translate("new_thread_aos_note", self.language), font=FONT_SMALL, text_color=COLORS.secondary_text, justify="left", anchor="w", wraplength=500).grid(row=3, column=0, sticky="ew", padx=SPACE_6, pady=SPACE_2)
-        actions = ctk.CTkFrame(window, fg_color="transparent")
-        actions.grid(row=4, column=0, sticky="ew", padx=SPACE_6, pady=SPACE_4)
-        ctk.CTkButton(actions, text=translate("open_codex", self.language), command=self._open_codex).grid(row=0, column=0, padx=(0, SPACE_2))
-        ctk.CTkButton(actions, text=translate("copy_generic_template", self.language), command=self._copy_generic_handoff, fg_color="transparent", border_width=1, border_color=COLORS.border, text_color=COLORS.primary_text).grid(row=0, column=1)
-
-    def _copy_generic_handoff(self) -> None:
-        self.root.clipboard_clear()
-        self.root.clipboard_append(generic_handoff_template(self.language))
-        self.status_message_var.set(translate("generic_template_copied", self.language))
-        self.header_message_label.configure(text_color=COLORS.real)
-
-    def _open_codex(self) -> None:
-        result = open_codex()
-        self.status_message_var.set(translate("codex_opened" if result.ok else "codex_open_failed", self.language))
-        self.header_message_label.configure(
-            text_color=COLORS.real if result.ok else COLORS.error,
-        )
-
-    def _open_data_directory(self) -> None:
-        result = open_data_directory()
-        self.status_message_var.set(translate("data_directory_opened" if result.ok else "data_directory_open_failed", self.language))
-        self.header_message_label.configure(
-            text_color=COLORS.real if result.ok else COLORS.error,
-        )
-
     def _show_privacy_boundary(self) -> None:
         messagebox.showinfo(
             translate("privacy_boundary", self.language),
@@ -5747,207 +5027,6 @@ class Dashboard:
             translate("about_body", self.language),
             parent=self.root,
         )
-
-    def start_diagnostics(self) -> None:
-        if self._closing:
-            return
-        self.show_page("tools")
-        session_count = len(self.snapshot.recent_sessions) if self.snapshot is not None else 0
-        request = DiagnosticsRequest(
-            version=__version__,
-            runtime_mode=self.window_mode,
-            frozen=bool(getattr(sys, "frozen", False)),
-            session_count=session_count,
-            rollout_root=configured_sessions_dir(),
-            state_path=configured_state_path(),
-            settings_path=UI_SETTINGS_PATH,
-            startup_executable=Path(sys.executable),
-            tray_started=self.tray.started,
-            refreshed_at=(self.snapshot.sessions_result.refreshed_at if self.snapshot is not None else None),
-        )
-        self._diagnostics_error = False
-        self._diagnostics_running = True
-        self._latest_diagnostics_generation = self.diagnostics_worker.submit(request)
-        self._render_diagnostics()
-        self._schedule_diagnostics_poll()
-
-    def _schedule_diagnostics_poll(self) -> None:
-        if self._diagnostics_poll_scheduled or self._closing:
-            return
-        self._diagnostics_poll_scheduled = True
-        self.root.after(25, self._poll_diagnostics_results)
-
-    def _poll_diagnostics_results(self) -> None:
-        if self._closing:
-            self._diagnostics_poll_scheduled = False
-            return
-        results = self.diagnostics_worker.drain_results()
-        if not results and not self.diagnostics_worker.busy:
-            results = self.diagnostics_worker.drain_results()
-        candidate = None
-        for result in results:
-            if result.generation != self._latest_diagnostics_generation:
-                self.diagnostics_worker.mark_discarded()
-                continue
-            candidate = result
-        if candidate is not None:
-            self._diagnostics_running = False
-            if candidate.error is not None:
-                self._diagnostics_error = True
-                self.status_message_var.set(
-                    f"{translate('diagnostics_title', self.language)} · "
-                    f"{translate('diagnostic_status_failure', self.language)}",
-                )
-                self.header_message_label.configure(text_color=COLORS.error)
-                self._mark_pages_dirty({"tools"})
-                self._render_visible_page()
-            elif candidate.value is not None:
-                self.diagnostic_report = candidate.value
-                self._diagnostics_error = False
-                self._mark_pages_dirty({"tools"})
-                self._render_visible_page()
-                self._show_diagnostic_dialog()
-        if self.diagnostics_worker.busy:
-            self.root.after(25, self._poll_diagnostics_results)
-        else:
-            self._diagnostics_poll_scheduled = False
-
-    def _render_diagnostics(self) -> None:
-        if not hasattr(self, "diagnostic_summary_var"):
-            return
-        report = self.diagnostic_report
-        running = bool(getattr(self, "_diagnostics_running", False))
-        failed = bool(getattr(self, "_diagnostics_error", False))
-        if running:
-            self.diagnostic_summary_var.set(
-                f"{translate('diagnostics_title', self.language)} · "
-                f"{translate('running', self.language)}",
-            )
-        elif failed:
-            self.diagnostic_summary_var.set(
-                f"{translate('diagnostics_title', self.language)} · "
-                f"{translate('diagnostic_status_failure', self.language)}",
-            )
-        elif report is None:
-            self.diagnostic_summary_var.set(translate("diagnostics_not_run", self.language))
-        else:
-            self.diagnostic_summary_var.set(
-                translate("diagnostics_all_normal", self.language)
-                if report.problem_count == 0
-                else translate("diagnostics_problem_count", self.language, count=report.problem_count)
-            )
-        self.diagnostic_view_button.configure(
-            state="normal" if report is not None else "disabled",
-        )
-        self.diagnostic_run_button.configure(
-            state="disabled" if running else "normal",
-        )
-        if getattr(self, "diagnostic_window", None) is not None:
-            self._render_diagnostic_dialog()
-            self.diagnostic_rerun_button.configure(
-                state="disabled" if running else "normal",
-            )
-
-    def _show_diagnostic_dialog(self) -> None:
-        if self.diagnostic_report is None:
-            return
-        existing = getattr(self, "diagnostic_window", None)
-        if existing is not None and existing.winfo_exists():
-            self._render_diagnostic_dialog()
-            existing.lift()
-            return
-        window = self.diagnostic_window = ctk.CTkToplevel(self.root)
-        window.title(translate("diagnostics_title", self.language))
-        window.geometry("680x600")
-        window.minsize(560, 460)
-        if self.root.winfo_viewable():
-            window.transient(self.root)
-        window.grab_set()
-        window.grid_columnconfigure(0, weight=1)
-        window.grid_rowconfigure(2, weight=1)
-        self.diagnostic_dialog_time_var = tk.StringVar(master=window, value="")
-        self.diagnostic_dialog_counts_var = tk.StringVar(master=window, value="")
-        ctk.CTkLabel(
-            window, textvariable=self.diagnostic_dialog_time_var,
-            font=SECTION_TITLE, text_color=COLORS.primary_text, anchor="w",
-        ).grid(row=0, column=0, sticky="ew", padx=SPACE_6, pady=(SPACE_6, SPACE_1))
-        ctk.CTkLabel(
-            window, textvariable=self.diagnostic_dialog_counts_var,
-            font=BODY, text_color=COLORS.secondary_text, anchor="w",
-        ).grid(row=1, column=0, sticky="ew", padx=SPACE_6, pady=(0, SPACE_3))
-        results = ctk.CTkScrollableFrame(
-            window, fg_color=COLORS.raised_surface, corner_radius=CARD_RADIUS,
-        )
-        results.grid(row=2, column=0, sticky="nsew", padx=SPACE_6)
-        results.grid_columnconfigure(1, weight=1)
-        self.diagnostic_dialog_rows = []
-        for row in range(len(DIAGNOSTIC_CHECK_CODES)):
-            name = ctk.CTkLabel(
-                results, text="", font=BODY_STRONG,
-                text_color=COLORS.primary_text, anchor="w",
-            )
-            detail = ctk.CTkLabel(
-                results, text="", font=BODY,
-                text_color=COLORS.secondary_text, anchor="w", justify="left",
-                wraplength=390,
-            )
-            name.grid(row=row, column=0, sticky="nw", padx=SPACE_3, pady=SPACE_2)
-            detail.grid(row=row, column=1, sticky="ew", padx=SPACE_3, pady=SPACE_2)
-            self.diagnostic_dialog_rows.append((name, detail))
-        actions = ctk.CTkFrame(window, fg_color="transparent")
-        actions.grid(row=3, column=0, sticky="e", padx=SPACE_6, pady=SPACE_4)
-        self.diagnostic_rerun_button = ctk.CTkButton(
-            actions, text="", command=self.start_diagnostics, width=140,
-        )
-        self.diagnostic_rerun_button.grid(row=0, column=0, padx=(0, SPACE_2))
-        self.diagnostic_close_button = ctk.CTkButton(
-            actions, text="", command=self._close_diagnostic_dialog,
-            width=100, fg_color="transparent", border_width=1,
-            border_color=COLORS.border, text_color=COLORS.primary_text,
-        )
-        self.diagnostic_close_button.grid(row=0, column=1)
-        window.protocol("WM_DELETE_WINDOW", self._close_diagnostic_dialog)
-        self._render_diagnostic_dialog()
-
-    def _render_diagnostic_dialog(self) -> None:
-        report = self.diagnostic_report
-        rows = getattr(self, "diagnostic_dialog_rows", None)
-        if report is None or rows is None:
-            return
-        self.diagnostic_window.title(translate("diagnostics_title", self.language))
-        self.diagnostic_dialog_time_var.set(translate(
-            "diagnostic_runtime", self.language,
-            value=report.observed_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
-        ))
-        counts = {
-            status: sum(item.status == status for item in report.results)
-            for status in ("normal", "warning", "failure")
-        }
-        self.diagnostic_dialog_counts_var.set(translate(
-            "diagnostic_counts", self.language, **counts,
-        ))
-        for (name, detail), result in zip(rows, report.results):
-            name.configure(text=translate(f"diagnostic_name_{result.code}", self.language))
-            detail.configure(
-                text=f"{translate(f'diagnostic_status_{result.status}', self.language)} · {translate(result.detail_key, self.language)}",
-                text_color={
-                    "normal": COLORS.real, "warning": COLORS.orange,
-                    "failure": COLORS.error, "unused": COLORS.unknown,
-                }[result.status],
-            )
-        self.diagnostic_rerun_button.configure(text=translate("rerun_diagnostics", self.language))
-        self.diagnostic_close_button.configure(text=translate("close", self.language))
-
-    def _close_diagnostic_dialog(self) -> None:
-        window = getattr(self, "diagnostic_window", None)
-        if window is None:
-            return
-        try:
-            window.grab_release()
-            window.destroy()
-        except tk.TclError:
-            pass
-        self.diagnostic_window = None
 
     def _request_history_backfill(self, manual: bool = False) -> bool:
         """Start at most one bounded worker without delaying UI refresh."""

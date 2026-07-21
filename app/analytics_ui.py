@@ -32,7 +32,7 @@ class SafeTrendSample:
 
 @dataclass(frozen=True)
 class TrendView:
-    """Provider-neutral input shared by trend, overview, and Advisor UI."""
+    """Provider-neutral input shared by trend and overview UI."""
 
     range_days: int
     quality: str

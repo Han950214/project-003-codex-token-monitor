@@ -1,128 +1,29 @@
 # Telemetry Model
 
-The MVP model is a local JSON-compatible schema. Field names stay English for stable integration.
+当前 Dashboard 使用只读来源和安全 DTO，字段名保持英文以便稳定集成。
 
-## AgentRun
+## 当前响应与会话
 
-- `run_id`
-- `session_id`
-- `title`
-- `started_at`
-- `ended_at`
-- `elapsed_seconds`
-- `steps`
-- `prompt_artifact`
-- `output_artifact`
-- `token_estimate`
-- `repo_before`
-- `repo_after`
-- `waste_signals`
-- `cache_risks`
-- `recommendations`
+当前响应包含 Input、Output、Total、Cached Input、Reasoning、完成状态与安全响应身份。当前会话包含 Thread 安全身份、官方 `Thread.name` 或安全回退标题、轮次、最近活动和权威累计 Token。
 
-## AgentStep
+缺失字段保持未知，不当作零。旧 v3 Token 行没有严格响应身份，不进入规范全局总和。
 
-- `step_id`
-- `kind`
-- `summary`
-- `started_at`
-- `ended_at`
-- `tokens`
+## 已观测用量
 
-## PromptArtifact
+本产品自己的历史库按响应安全身份归并完成观测，并支持 today、5h、7d、30d 范围。汇总只计算有效最终 Token 字段，不累加进行中快照、会话累计或额度行。每项指标同时保留有效、缺失与无效记录数，并标记覆盖与新鲜度。
 
-- `source`
-- `text`
-- `sha256`
-- `approx_chars`
-- `estimated_tokens`
+## 额度
 
-## OutputArtifact
+官方额度 DTO 只接受：
 
-- `source`
-- `text`
-- `sha256`
-- `approx_chars`
-- `estimated_tokens`
+- `windowDurationMins`
+- `usedPercent`
+- `resetsAt`
 
-## TokenEstimate
+300 分钟映射到 5 小时窗口，10080 分钟映射到每周窗口。未知窗口不猜测。额度和本地 Token 汇总保持独立，不相互换算。
 
-- `input_tokens`
-- `output_tokens`
-- `optional_log_tokens`
-- `stable_prefix_tokens`
-- `observed_cached_input_tokens`
-- `cached_input_tokens`
-- `uncached_input_tokens`
-- `current_tokens`
-- `current_hit`
-- `current_cost`
-- `source`
+## 历史兼容模型
 
-`source` is `local_estimate` unless real provider usage is explicitly available.
+仓库仍保留早期 `AgentRun`、`AgentStep`、`PromptArtifact`、`OutputArtifact`、`TokenEstimate`、`RepoSnapshot`、`WasteSignal`、`CacheRisk`、`PricingConfig` 和 `BudgetState` 类型，仅用于旧数据兼容，不是当前 Dashboard 的数据入口。
 
-## TokenSnapshot
-
-- `session_id`
-- `round_index`
-- `current_run_tokens`
-- `session_tokens`
-- `current_cache_hit_estimate`
-- `average_cache_hit_estimate`
-- `current_context_tokens`
-- `configured_context_window`
-- `context_usage`
-- `compression_threshold`
-- `current_cost`
-- `session_cost`
-- `budget_remaining`
-
-## RepoSnapshot
-
-- `captured_at`
-- `git_root`
-- `branch`
-- `status_short`
-- `changed_files`
-- `diff_stat`
-
-## WasteSignal
-
-- `kind`
-- `severity`
-- `evidence`
-- `estimated_wasted_tokens`
-
-## CacheRisk
-
-- `kind`
-- `severity`
-- `evidence`
-- `recommendation`
-
-## OptimizationRecommendation
-
-- `kind`
-- `summary`
-- `suggested_prompt`
-- `estimated_savings_tokens`
-
-## PricingConfig
-
-- `model`
-- `input_token_price`
-- `cached_input_token_price`
-- `output_token_price`
-- `unit_tokens`
-- `currency`
-
-## BudgetState
-
-- `configured_budget`
-- `session_cost`
-- `budget_remaining`
-- `currency`
-- `source`
-
-All billing-like fields are 本地估算 / local estimate unless a future integration stores explicit observed usage.
-
+类似账单的旧字段均为本地估算，不能表述为真实账单、真实余额或保证的提供方用量。

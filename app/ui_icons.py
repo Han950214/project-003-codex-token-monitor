@@ -38,15 +38,6 @@ def create_icon(
     elif kind == "trend":
         draw.line(points(((3, 19), (8, 13), (12, 16), (20, 6))), fill=color, width=width, joint="curve")
         draw.line(points(((16, 6), (20, 6), (20, 10))), fill=color, width=width, joint="curve")
-    elif kind == "recommendation":
-        draw.ellipse((*points(((6, 3), (18, 15)))[0], *points(((6, 3), (18, 15)))[1]), outline=color, width=width)
-        draw.line(points(((9, 18), (15, 18))), fill=color, width=width)
-        draw.line(points(((10, 21), (14, 21))), fill=color, width=width)
-        draw.line(points(((12, 7), (12, 11))), fill=color, width=width)
-    elif kind == "tools":
-        draw.rounded_rectangle((*points(((3, 8), (21, 20)))[0], *points(((3, 8), (21, 20)))[1]), radius=max(1, round(2 * scale)), outline=color, width=width)
-        draw.rounded_rectangle((*points(((8, 4), (16, 10)))[0], *points(((8, 4), (16, 10)))[1]), radius=max(1, round(2 * scale)), outline=color, width=width)
-        draw.line(points(((3, 13), (21, 13))), fill=color, width=width)
     elif kind == "settings":
         draw.ellipse((*points(((8, 8), (16, 16)))[0], *points(((8, 8), (16, 16)))[1]), outline=color, width=width)
         for x1, y1, x2, y2 in ((12, 2, 12, 6), (12, 18, 12, 22), (2, 12, 6, 12), (18, 12, 22, 12), (5, 5, 8, 8), (16, 16, 19, 19), (19, 5, 16, 8), (8, 16, 5, 19)):
@@ -64,10 +55,6 @@ def create_icon(
         draw.rounded_rectangle((*points(((3, 4), (21, 20)))[0], *points(((3, 4), (21, 20)))[1]), radius=max(1, round(2 * scale)), outline=color, width=width)
         draw.line(points(((8, 4), (8, 20))), fill=color, width=width)
         draw.line(points(((8, 10), (21, 10))), fill=color, width=width)
-    elif kind == "more":
-        radius = max(1, round(2 * scale))
-        for x in (6, 12, 18):
-            draw.ellipse((round(x * scale) - radius, round(12 * scale) - radius, round(x * scale) + radius, round(12 * scale) + radius), fill=color)
     else:
         draw.ellipse((*points(((5, 5), (19, 19)))[0], *points(((5, 5), (19, 19)))[1]), outline=color, width=width)
     # Keep a 2x source so CTkImage can render cleanly at 125%/150% DPI.

@@ -25,7 +25,6 @@ class WidgetPresentation:
 def present_widget(
     quota: CodexQuotaSnapshot,
     thread: MiniThreadSnapshot,
-    recommendation: object | None,
     language: str,
     *,
     turn_count: int | None = None,
@@ -43,13 +42,18 @@ def present_widget(
         )
     else:
         quota_text = translate("widget_five_hour_unknown", language)
-    if recommendation is not None and isinstance(getattr(recommendation, "title_key", None), str):
-        status = getattr(recommendation, "status", "normal")
-        status_text = translate(recommendation.title_key, language)
-    elif thread.status in {"no_selection", "unavailable"}:
-        status, status_text = "data_unavailable", translate("advisor_data_unavailable_title", language)
+    response_status = thread.response_status or thread.status
+    if thread.status == "no_selection":
+        status, status_key = "unknown", "widget_status_no_session"
+    elif thread.status == "unavailable" or response_status == "unavailable":
+        status, status_key = "error", "widget_status_unavailable"
+    elif response_status == "completed_partial":
+        status, status_key = "warning", "widget_status_partial"
+    elif response_status in {"in_progress", "running"}:
+        status, status_key = "normal", "widget_status_in_progress"
     else:
-        status, status_text = "normal", translate("advisor_normal_title", language)
+        status, status_key = "normal", "widget_status_complete"
+    status_text = translate(status_key, language)
     return WidgetPresentation(
         status,
         status_text,

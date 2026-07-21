@@ -257,7 +257,6 @@ def build_history_state_view(state: HistoryEmptyState) -> ActionableStateView:
     """Return stable i18n keys and bounded actions for one history state."""
 
     actions = {
-        "open_codex": UiAction("open_codex", "open_codex"),
         "refresh": UiAction("refresh", "manual_refresh"),
         "choose_session": UiAction(
             "choose_session", "choose_session", UiDataScope.SELECTED_SESSION,
@@ -276,12 +275,11 @@ def build_history_state_view(state: HistoryEmptyState) -> ActionableStateView:
         "view_coverage": UiAction("view_coverage", "view_coverage_details"),
         "use_current": UiAction("use_current", "continue_with_current_data"),
         "keep_ranking": UiAction("keep_ranking", "keep_current_ranking"),
-        "diagnose": UiAction("diagnose", "one_click_diagnostics"),
         "retry": UiAction("retry", "retry_later"),
     }
     mapping = {
         HistoryEmptyState.AVAILABLE: (None, None),
-        HistoryEmptyState.FIRST_USE: (actions["open_codex"], actions["refresh"]),
+        HistoryEmptyState.FIRST_USE: (actions["refresh"], None),
         HistoryEmptyState.SELECTED_NO_HISTORY: (
             actions["choose_session"], actions["expand_range"],
         ),
@@ -296,11 +294,11 @@ def build_history_state_view(state: HistoryEmptyState) -> ActionableStateView:
         HistoryEmptyState.PARTIAL: (
             actions["view_coverage"], actions["use_current"],
         ),
-        HistoryEmptyState.STALE: (actions["refresh"], actions["diagnose"]),
+        HistoryEmptyState.STALE: (actions["refresh"], None),
         HistoryEmptyState.BACKFILL_INCOMPLETE: (
             actions["use_current"], actions["retry"],
         ),
-        HistoryEmptyState.UNAVAILABLE: (actions["diagnose"], actions["refresh"]),
+        HistoryEmptyState.UNAVAILABLE: (actions["refresh"], None),
     }
     primary, fallback = mapping[state]
     return ActionableStateView(
@@ -366,32 +364,30 @@ def build_quota_state_view(
         "view_quota_history", "view_local_quota_history",
         UiDataScope.LOCAL_QUOTA_HISTORY,
     )
-    open_codex = UiAction("open_codex", "open_codex")
-    diagnose = UiAction("diagnose", "one_click_diagnostics")
     state = contract.state
     if state is QuotaAvailability.LIVE_AND_HISTORY:
         variant = "live_and_history"
         primary, fallback = history, None
     elif state is QuotaAvailability.LIVE_ONLY:
         variant = "live_only"
-        primary, fallback = open_codex, refresh
+        primary, fallback = refresh, None
     elif state is QuotaAvailability.HISTORY_ONLY:
         variant = "history_only"
         primary, fallback = refresh, history
     elif state is QuotaAvailability.WEEKLY_ONLY:
         variant = "weekly_only"
         primary = refresh
-        fallback = history if contract.local_history_available else open_codex
+        fallback = history if contract.local_history_available else None
     elif state is QuotaAvailability.STALE_LIVE:
         variant = "stale_live"
         primary = refresh
-        fallback = history if contract.local_history_available else open_codex
+        fallback = history if contract.local_history_available else None
     elif contract.local_history_source_available:
         variant = "both_empty"
-        primary, fallback = refresh, open_codex
+        primary, fallback = refresh, None
     else:
         variant = "sources_unavailable"
-        primary, fallback = diagnose, refresh
+        primary, fallback = refresh, None
     return ActionableStateView(
         kind=state,
         title_key=f"quota_state_{variant}_title",

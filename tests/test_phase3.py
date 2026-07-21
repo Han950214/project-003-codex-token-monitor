@@ -1,6 +1,5 @@
 import inspect
 import json
-import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
@@ -12,32 +11,12 @@ from unittest.mock import Mock, patch
 import app.desktop_widget as desktop_widget_module
 import app.main as main_module
 import app.ui_icons as ui_icons_module
-from app.advisor import (
-    ADVISOR_RULE_CODES,
-    DATA_STALE_AFTER,
-    NEW_THREAD_TURN_COUNT,
-    OPTIMIZE_CACHE_HIT_PERCENT,
-    OPTIMIZE_INPUT_TOKENS,
-    QUOTA_RISK_REMAINING_PERCENT,
-    AdvisorInput,
-    Recommendation,
-    build_advisor_input,
-    evaluate_advice,
-)
 from app.analytics_ui import TrendView
 from app.dashboard_mode import ALL_PAGES, AppShellState, NAVIGATION_ITEMS
 from app.desktop_widget import DesktopMiniWidget, HOVER_ALPHA, format_percent
 from app.codex_rollout import CodexSessionUsage, InstructionUsage, TokenUsage
-from app.diagnostics import (
-    DIAGNOSTIC_CHECK_CODES,
-    DiagnosticContext,
-    inspect_settings_file,
-    run_diagnostics,
-)
-from app.diagnostics_worker import DiagnosticsWorkerResult
 from app.i18n import TRANSLATIONS, translate
 from app.main import CORE_METRICS, Dashboard
-from app.new_thread import generic_handoff_template
 from app.quota import CodexQuotaSnapshot, QuotaKind, QuotaWindow
 from app.ui_presenter import _latest_metrics
 from app.ui_format import (
@@ -172,24 +151,6 @@ class QueryBomb:
         raise AssertionError(f"unexpected product-data query: {name}")
 
 
-def advisor_input(**changes):
-    base = AdvisorInput(
-        data_available=True,
-        data_age_seconds=10,
-        source_status="normal",
-        five_hour_remaining_percent=75.0,
-        weekly_remaining_percent=80.0,
-        turn_count=4,
-        instruction_input_tokens=20_000,
-        instruction_total_tokens=22_000,
-        cached_input_tokens=10_000,
-        session_total_tokens=100_000,
-        session_status="in_progress",
-        observed_at=NOW,
-    )
-    return replace(base, **changes)
-
-
 class Phase3ModeTests(unittest.TestCase):
     def test_widget_mode_defaults_to_compact(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -240,10 +201,9 @@ class Phase3ModeTests(unittest.TestCase):
     def test_invalid_navigation_returns_to_status_center(self):
         self.assertEqual(AppShellState(page="sessions").navigate("missing").page, "overview")
 
-    def test_navigation_has_exactly_six_product_entries(self):
+    def test_navigation_has_exactly_four_product_entries(self):
         self.assertEqual(NAVIGATION_ITEMS, (
-            "overview", "sessions", "usage_trends", "recommendations",
-            "tools", "settings",
+            "overview", "sessions", "usage_trends", "settings",
         ))
         self.assertNotIn("session_detail", NAVIGATION_ITEMS)
         self.assertIn("session_detail", ALL_PAGES)
@@ -415,106 +375,6 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
                     for card in cards
                 )
                 self.assertEqual(actual, expected)
-
-    def test_wide_status_layout_uses_balanced_columns(self):
-        dashboard = object.__new__(Dashboard)
-        dashboard.status_page = FakeWidget()
-        cards = [FakeWidget() for _ in range(8)]
-        (
-            dashboard.status_advice_card,
-            dashboard.core_metrics_panel,
-            dashboard.observed_usage_card,
-            dashboard.task_summary_card,
-            dashboard.quota_center_card,
-            dashboard.trend_preview_card,
-            dashboard.status_recent_card,
-            dashboard.quick_actions_card,
-        ) = cards
-        core_widths = []
-        usage_widths = []
-        dashboard._layout_core_metrics = core_widths.append
-        dashboard._layout_observed_usage = usage_widths.append
-        dashboard.snapshot = SimpleNamespace(
-            selection_mode="pinned", selected_session=object(),
-        )
-
-        Dashboard._apply_status_layout(dashboard, 1_400)
-
-        self.assertEqual(
-            tuple(card.grid_calls[-1][1]["column"] for card in cards),
-            (0, 0, 0, 1, 0, 0, 1, 0),
-        )
-        self.assertEqual(
-            tuple(card.grid_calls[-1][1].get("columnspan", 1) for card in cards),
-            (2, 2, 2, 1, 1, 1, 1, 2),
-        )
-        self.assertTrue(all(
-            ("propagate", (True,), {}) in card.configure_calls
-            for card in cards
-        ))
-        self.assertEqual(core_widths, [1_400])
-        self.assertEqual(usage_widths, [1_400])
-
-        Dashboard._apply_status_layout(dashboard, 1_200)
-        self.assertTrue(all(
-            card.configure_calls[-1] == ("propagate", (True,), {})
-            for card in cards
-        ))
-
-    def test_recent_sessions_card_keeps_its_grid_position_when_selection_changes(self):
-        def recent_position(selection_mode: str):
-            dashboard = object.__new__(Dashboard)
-            dashboard.status_page = FakeWidget()
-            (
-                dashboard.status_advice_card,
-                dashboard.core_metrics_panel,
-                dashboard.observed_usage_card,
-                dashboard.task_summary_card,
-                dashboard.quota_center_card,
-                dashboard.trend_preview_card,
-                dashboard.status_recent_card,
-                dashboard.quick_actions_card,
-            ) = [FakeWidget() for _ in range(8)]
-            dashboard._layout_core_metrics = lambda _width: None
-            dashboard._layout_observed_usage = lambda _width: None
-            dashboard.snapshot = SimpleNamespace(
-                selection_mode=selection_mode,
-                selected_session=object() if selection_mode == "pinned" else None,
-            )
-
-            Dashboard._apply_status_layout(dashboard, 1_400)
-            return dashboard.status_recent_card.grid_calls[-1][1]
-
-        self.assertEqual(recent_position("auto"), recent_position("pinned"))
-
-    def test_session_selector_combines_recent_and_selected_cards_at_supported_width(self):
-        dashboard = object.__new__(Dashboard)
-        dashboard.status_page = FakeWidget()
-        (
-            dashboard.status_advice_card,
-            dashboard.core_metrics_panel,
-            dashboard.observed_usage_card,
-            dashboard.quota_center_card,
-            dashboard.trend_preview_card,
-            dashboard.quick_actions_card,
-            dashboard.session_selector_card,
-            dashboard.status_recent_card,
-            dashboard.task_summary_card,
-        ) = [FakeWidget() for _ in range(9)]
-        dashboard._layout_core_metrics = lambda _width: None
-        dashboard._layout_observed_usage = lambda _width: None
-        Dashboard._apply_status_layout(dashboard, 980)
-
-        self.assertEqual(
-            dashboard.session_selector_card.grid_calls[-1][1]["row"], 1,
-        )
-        self.assertEqual(
-            dashboard.status_recent_card.grid_calls[-1][1]["column"], 0,
-        )
-        self.assertEqual(
-            dashboard.task_summary_card.grid_calls[-1][1]["column"], 1,
-        )
-
     def test_return_to_current_session_restores_auto_follow_without_navigation(self):
         snapshot = object()
         dashboard = object.__new__(Dashboard)
@@ -685,7 +545,6 @@ class Phase3FormatAndResponsiveTests(unittest.TestCase):
         dashboard._layout_history_columns = lambda width: calls.append(("columns", width))
         dashboard._layout_sessions_page = lambda width: calls.append(("sessions", width))
         dashboard._apply_status_layout = lambda width: calls.append(("overview", width))
-        dashboard._layout_tool_groups = lambda width: calls.append(("tools", width))
         dashboard._layout_settings_groups = lambda width: calls.append(("settings", width))
         dashboard._layout_trend_metrics = lambda width: calls.append(("trends", width))
 
@@ -779,8 +638,8 @@ class Phase3LocalVisualTests(unittest.TestCase):
             return kwargs
 
         kinds = (
-            "shield", "home", "history", "trend", "recommendation", "tools", "settings",
-            "pulse", "open", "refresh", "widget", "more",
+            "shield", "home", "history", "trend", "settings",
+            "pulse", "open", "refresh", "widget",
         )
         with patch.object(ui_icons_module.ctk, "CTkImage", fake_ctk_image):
             for kind in kinds:
@@ -837,359 +696,6 @@ class Phase3LocalVisualTests(unittest.TestCase):
         self.assertEqual(progress.deleted, ["all"])
         CircularProgress.set(progress, 64, color="#248A52")
         self.assertEqual(progress.deleted, ["all", "all"])
-
-
-class Phase3AdvisorTests(unittest.TestCase):
-    def test_advisor_uses_current_session_until_current_changes(self):
-        def session(
-            thread_id, *, turns, input_tokens, cached_tokens, total_tokens,
-        ):
-            usage = TokenUsage(
-                input_tokens, cached_tokens, total_tokens - input_tokens,
-                0, total_tokens,
-            )
-            return SimpleNamespace(
-                thread_id=thread_id,
-                instruction=InstructionUsage(
-                    f"turn-{thread_id}", "exact", usage, 1, None,
-                    0, 0, 0, True, False,
-                ),
-                thread_cumulative_usage=TokenUsage(
-                    input_tokens, cached_tokens, total_tokens - input_tokens,
-                    0, total_tokens,
-                ),
-                observed_at=NOW - timedelta(seconds=turns),
-                status="exact",
-                turn_count=turns,
-            )
-
-        current_a = session(
-            "A", turns=5, input_tokens=1_000,
-            cached_tokens=500, total_tokens=1_200,
-        )
-        historical_b = session(
-            "B", turns=40, input_tokens=OPTIMIZE_INPUT_TOKENS,
-            cached_tokens=0, total_tokens=OPTIMIZE_INPUT_TOKENS + 5_000,
-        )
-        historical_c = session(
-            "C", turns=45, input_tokens=OPTIMIZE_INPUT_TOKENS + 10_000,
-            cached_tokens=0, total_tokens=OPTIMIZE_INPUT_TOKENS + 15_000,
-        )
-        quota_snapshot = CodexQuotaSnapshot.unavailable(observed_at=NOW)
-
-        def build(current, selected):
-            snapshot = SimpleNamespace(
-                current_session=current,
-                selected_session=selected,
-                sessions_result=SimpleNamespace(refreshed_at=NOW),
-            )
-            return build_advisor_input(snapshot, quota_snapshot, now=NOW)
-
-        selected_a = build(current_a, current_a)
-        selected_b = build(current_a, historical_b)
-        selected_c = build(current_a, historical_c)
-
-        self.assertEqual(selected_a, selected_b)
-        self.assertEqual(selected_a, selected_c)
-        self.assertEqual(
-            (
-                selected_b.turn_count,
-                selected_b.instruction_input_tokens,
-                selected_b.instruction_total_tokens,
-                selected_b.cached_input_tokens,
-                selected_b.session_total_tokens,
-                selected_b.session_status,
-                selected_b.thread_safe_id,
-                selected_b.source_observed_at,
-            ),
-            (5, 1_000, 1_200, 500, 1_200, "exact", "A", current_a.observed_at),
-        )
-        self.assertEqual(evaluate_advice(selected_b).primary.code, "normal")
-        self.assertEqual(evaluate_advice(selected_c).primary.code, "normal")
-
-        current_changed = build(historical_b, current_a)
-        self.assertEqual(current_changed.thread_safe_id, "B")
-        self.assertEqual(
-            evaluate_advice(current_changed).primary.code,
-            "new_thread",
-        )
-
-    def test_rule_codes_and_thresholds_are_centralized(self):
-        self.assertEqual(len(ADVISOR_RULE_CODES), 6)
-        self.assertGreater(NEW_THREAD_TURN_COUNT, 0)
-        self.assertGreater(OPTIMIZE_INPUT_TOKENS, 0)
-        self.assertGreater(OPTIMIZE_CACHE_HIT_PERCENT, 0)
-        self.assertGreater(QUOTA_RISK_REMAINING_PERCENT, 0)
-        self.assertGreater(DATA_STALE_AFTER.total_seconds(), 0)
-
-    def test_data_unavailable_has_highest_priority(self):
-        result = evaluate_advice(advisor_input(
-            data_available=False, five_hour_remaining_percent=1,
-            turn_count=NEW_THREAD_TURN_COUNT,
-            instruction_input_tokens=OPTIMIZE_INPUT_TOKENS,
-            cached_input_tokens=0,
-        ))
-        self.assertEqual(result.primary.status, "data_unavailable")
-
-    def test_view_quota_primary_action_routes_to_live_quota_overview(self):
-        dashboard = object.__new__(Dashboard)
-        dashboard.advisor_result = SimpleNamespace(
-            primary=SimpleNamespace(primary_action="view_quota"),
-        )
-        pages = []
-        dashboard.show_page = pages.append
-
-        Dashboard._execute_primary_action(dashboard)
-
-        self.assertEqual(pages, ["overview"])
-
-    def test_dashboard_advisor_uses_same_resolved_running_activity_as_ui_scope(self):
-        completed = SimpleNamespace(
-            thread_id="completed", instruction=InstructionUsage(
-                "done", "exact", TokenUsage(10, 2, 3, 0, 13), 1,
-                None, 0, 0, 0, True, False,
-            ),
-            thread_cumulative_usage=TokenUsage(10, 2, 3, 0, 13),
-            observed_at=NOW, status="exact", turn_count=1,
-        )
-        running = SimpleNamespace(
-            thread_id="running", instruction=InstructionUsage(
-                "live", "in_progress", TokenUsage(20, 4, 5, 0, 25), 1,
-                None, 0, 0, 0, False, True,
-            ),
-            thread_cumulative_usage=TokenUsage(20, 4, 5, 0, 25),
-            observed_at=NOW, status="in_progress", turn_count=2,
-        )
-        dashboard = object.__new__(Dashboard)
-        dashboard.snapshot = SimpleNamespace(
-            current_session=completed,
-            current_thread_id=completed.thread_id,
-            selected_session=completed,
-            selected_thread_id=completed.thread_id,
-            recent_sessions=(completed, running),
-            selection_mode="auto",
-            sessions_result=SimpleNamespace(refreshed_at=NOW),
-        )
-        dashboard.quota_snapshot = CodexQuotaSnapshot.unavailable(observed_at=NOW)
-        dashboard.trend_view = SimpleNamespace(samples=(), quota_samples=())
-        marker = object()
-        with (
-            patch.object(main_module, "build_advisor_input", return_value=marker) as build,
-            patch.object(main_module, "evaluate_advice", return_value=marker),
-        ):
-            self.assertIs(Dashboard._evaluate_advisor(dashboard), marker)
-
-        advisor_snapshot = build.call_args.args[0]
-        self.assertIs(advisor_snapshot.current_session, running)
-
-    def test_stale_data_is_data_unavailable_status(self):
-        result = evaluate_advice(advisor_input(data_age_seconds=round(DATA_STALE_AFTER.total_seconds()) + 1))
-        self.assertEqual((result.primary.code, result.primary.status), ("data_stale", "data_unavailable"))
-
-    def test_quota_risk_precedes_optimize(self):
-        result = evaluate_advice(advisor_input(
-            five_hour_remaining_percent=QUOTA_RISK_REMAINING_PERCENT,
-            instruction_input_tokens=OPTIMIZE_INPUT_TOKENS,
-            cached_input_tokens=0,
-        ))
-        self.assertEqual(result.primary.status, "quota_risk")
-
-    def test_new_thread_precedes_optimize(self):
-        result = evaluate_advice(advisor_input(
-            turn_count=NEW_THREAD_TURN_COUNT,
-            instruction_input_tokens=OPTIMIZE_INPUT_TOKENS,
-            cached_input_tokens=0,
-        ))
-        self.assertEqual(result.primary.status, "new_thread")
-
-    def test_low_cache_reuse_on_large_input_suggests_optimize(self):
-        result = evaluate_advice(advisor_input(
-            instruction_input_tokens=OPTIMIZE_INPUT_TOKENS,
-            cached_input_tokens=0,
-        ))
-        self.assertEqual(result.primary.status, "optimize")
-        self.assertIn(("cache_hit_percent_derived", 0.0), result.primary.evidence)
-
-    def test_normal_state_is_stable(self):
-        self.assertEqual(evaluate_advice(advisor_input()).primary.code, "normal")
-
-    def test_missing_numeric_fields_do_not_crash(self):
-        result = evaluate_advice(advisor_input(
-            turn_count=None, instruction_input_tokens=None,
-            instruction_total_tokens=None, cached_input_tokens=None,
-            session_total_tokens=None, five_hour_remaining_percent=None,
-            weekly_remaining_percent=None,
-        ))
-        self.assertEqual(result.primary.status, "normal")
-
-    def test_same_input_has_deterministic_output(self):
-        data = advisor_input(turn_count=NEW_THREAD_TURN_COUNT)
-        self.assertEqual(evaluate_advice(data), evaluate_advice(data))
-
-    def test_evidence_rejects_content_fields_and_free_text(self):
-        with self.assertRaises(ValueError):
-            Recommendation("normal", "normal", "x", "y", "z", (("prompt", 1),), NOW)
-        with self.assertRaises(ValueError):
-            Recommendation("normal", "normal", "x", "y", "z", (("session_status", "project text"),), NOW)
-
-    def test_advice_wording_marks_cache_rate_as_non_official(self):
-        self.assertIn("不是官方", translate("advisor_optimize_body", "zh-CN"))
-        self.assertIn("not an official", translate("advisor_optimize_body", "en"))
-
-
-class Phase3DiagnosticsTests(unittest.TestCase):
-    def context(self, root: Path, **changes):
-        base = DiagnosticContext(
-            version="0.1.0",
-            runtime_mode="dashboard",
-            frozen=False,
-            codex_executable_found=True,
-            quota_probe=lambda: "normal",
-            rollout_root=root,
-            rollout_probe=lambda: 2,
-            state_path=root / "missing.sqlite",
-            settings_path=root / "missing.json",
-            startup_status=lambda: "unused",
-            tray_started=True,
-            refreshed_at=NOW,
-        )
-        return replace(base, **changes)
-
-    def test_diagnostics_run_all_thirteen_checks(self):
-        with tempfile.TemporaryDirectory() as directory:
-            report = run_diagnostics(self.context(Path(directory)), now=NOW)
-        self.assertEqual(tuple(item.code for item in report.results), DIAGNOSTIC_CHECK_CODES)
-
-    def test_one_failure_does_not_abort_other_checks(self):
-        def fail():
-            raise RuntimeError("connection")
-        with tempfile.TemporaryDirectory() as directory:
-            report = run_diagnostics(self.context(Path(directory), quota_probe=fail), now=NOW)
-        self.assertEqual(len(report.results), 13)
-        self.assertEqual(report.results[4].status, "failure")
-        self.assertEqual(report.results[-1].status, "normal")
-
-    def test_numeric_probe_failure_is_isolated(self):
-        def fail():
-            raise OSError("read")
-        with tempfile.TemporaryDirectory() as directory:
-            report = run_diagnostics(self.context(Path(directory), rollout_probe=fail), now=NOW)
-        numeric = next(item for item in report.results if item.code == "safe_numeric_data")
-        self.assertEqual(numeric.status, "failure")
-
-    def test_invalid_settings_are_detected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "settings.json"
-            path.write_text("not-json", encoding="utf-8")
-            self.assertEqual(inspect_settings_file(path), "failure")
-            self.assertEqual(validate_ui_settings(path), (False, "invalid_json"))
-
-    def test_invalid_sqlite_schema_is_detected_without_rows(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "state.sqlite"
-            sqlite3.connect(path).close()
-            report = run_diagnostics(self.context(Path(directory), state_path=path), now=NOW)
-        sqlite_result = next(item for item in report.results if item.code == "sqlite_adapter")
-        self.assertEqual(sqlite_result.status, "failure")
-
-    def test_stale_data_is_warning(self):
-        with tempfile.TemporaryDirectory() as directory:
-            report = run_diagnostics(
-                self.context(Path(directory), refreshed_at=NOW - timedelta(minutes=4)), now=NOW,
-            )
-        self.assertEqual(report.results[-1].status, "warning")
-
-    def test_diagnostics_can_repeat_deterministically(self):
-        with tempfile.TemporaryDirectory() as directory:
-            context = self.context(Path(directory))
-            self.assertEqual(run_diagnostics(context, now=NOW), run_diagnostics(context, now=NOW))
-
-    def test_diagnostic_contract_contains_no_content_or_credentials(self):
-        fields = set(DiagnosticContext.__dataclass_fields__)
-        forbidden = {"prompt", "response", "message", "reasoning", "authorization", "cookie", "secret"}
-        self.assertTrue(fields.isdisjoint(forbidden))
-
-    def test_diagnostic_translations_exist_in_both_languages(self):
-        for code in DIAGNOSTIC_CHECK_CODES:
-            self.assertIn(f"diagnostic_name_{code}", TRANSLATIONS["zh-CN"])
-            self.assertIn(f"diagnostic_name_{code}", TRANSLATIONS["en"])
-
-    def test_start_diagnostics_only_captures_safe_values_and_submits_worker_request(self):
-        class Worker:
-            def __init__(self):
-                self.requests = []
-
-            def submit(self, request):
-                self.requests.append(request)
-                return 7
-
-        dashboard = Dashboard.__new__(Dashboard)
-        dashboard._closing = False
-        dashboard.snapshot = None
-        dashboard.window_mode = "dashboard"
-        dashboard.tray = SimpleNamespace(started=True)
-        dashboard.diagnostics_worker = Worker()
-        dashboard._diagnostics_error = False
-        dashboard._diagnostics_running = False
-        dashboard.show_page = lambda _page: None
-        dashboard._render_diagnostics = lambda: None
-        dashboard._schedule_diagnostics_poll = lambda: None
-
-        with (
-            patch.object(main_module, "configured_sessions_dir", return_value=Path("sessions")),
-            patch.object(main_module, "configured_state_path", return_value=Path("state.sqlite")),
-        ):
-            Dashboard.start_diagnostics(dashboard)
-
-        self.assertEqual(dashboard._latest_diagnostics_generation, 7)
-        self.assertTrue(dashboard._diagnostics_running)
-        request = dashboard.diagnostics_worker.requests[0]
-        self.assertEqual(request.session_count, 0)
-        self.assertEqual(request.rollout_root, Path("sessions"))
-        source = inspect.getsource(Dashboard.start_diagnostics)
-        self.assertNotIn("run_diagnostics(", source)
-        self.assertNotIn("find_codex_executable", source)
-        self.assertNotIn("quota_provider.refresh", source)
-
-    def test_diagnostics_poll_applies_latest_result_and_ignores_old_generation(self):
-        class Worker:
-            busy = False
-
-            def __init__(self):
-                self.discarded = 0
-
-            @staticmethod
-            def drain_results():
-                return (
-                    DiagnosticsWorkerResult(1, value="old"),
-                    DiagnosticsWorkerResult(2, value="latest"),
-                )
-
-            def mark_discarded(self):
-                self.discarded += 1
-
-        dashboard = Dashboard.__new__(Dashboard)
-        dashboard._closing = False
-        dashboard._latest_diagnostics_generation = 2
-        dashboard._diagnostics_poll_scheduled = True
-        dashboard._diagnostics_running = True
-        dashboard._diagnostics_error = False
-        dashboard.diagnostics_worker = Worker()
-        dashboard._mark_pages_dirty = Mock()
-        dashboard._render_visible_page = Mock()
-        dashboard._show_diagnostic_dialog = Mock()
-
-        Dashboard._poll_diagnostics_results(dashboard)
-
-        self.assertEqual(dashboard.diagnostic_report, "latest")
-        self.assertFalse(dashboard._diagnostics_running)
-        self.assertEqual(dashboard.diagnostics_worker.discarded, 1)
-        dashboard._mark_pages_dirty.assert_called_once_with({"tools"})
-        dashboard._render_visible_page.assert_called_once_with()
-        dashboard._show_diagnostic_dialog.assert_called_once_with()
-        self.assertFalse(dashboard._diagnostics_poll_scheduled)
-
-
 class Phase3WidgetAndSettingsTests(unittest.TestCase):
     def test_all_settings_round_trip_without_losing_existing_values(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1343,19 +849,12 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         )
         self.assertTrue(dashboard.header_message_label.visible)
         self.assertTrue(dashboard.header_message_label.grid_calls)
-
-    def test_unified_status_center_has_one_primary_action_control(self):
-        source = inspect.getsource(Dashboard._build_status_advice)
-        self.assertEqual(source.count("self.primary_action_button ="), 1)
-
     def test_overview_builds_four_non_quota_metrics_and_one_live_quota_region(self):
         dashboard = object.__new__(Dashboard)
         dashboard.root = object()
         dashboard.core_metric_widgets = []
         dashboard.status_recent_rows = []
         dashboard.ui_icons = {}
-        dashboard.start_diagnostics = lambda: None
-        dashboard._open_codex = lambda: None
         dashboard.show_page = lambda _page: None
         parent = FakeWidget()
         with (
@@ -1374,7 +873,6 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         ):
             Dashboard._build_core_metrics_panel(dashboard, parent)
             Dashboard._build_quota_center_card(dashboard, parent)
-            Dashboard._build_quick_actions_card(dashboard, parent)
             Dashboard._build_status_recent_card(dashboard, parent)
 
         self.assertEqual(
@@ -1394,7 +892,6 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             for item in dashboard.core_metric_widgets
         ))
         self.assertEqual(set(dashboard.quota_window_widgets), {"five", "week"})
-        self.assertEqual(len(dashboard.quick_action_buttons), 4)
         self.assertEqual(len(dashboard.status_recent_rows), 3)
 
     def test_recent_task_compact_row_selects_its_session(self):
@@ -1507,11 +1004,10 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             name: FakeVar() for name in (
                 "title", "status", "activity", "turns", "input", "output",
                 "total", "cached", "reasoning", "cache", "session",
-                "quota_five", "quota_weekly", "advice",
+                "quota_five", "quota_weekly",
             )
         }
         dashboard.task_detail_viewing_var = FakeVar()
-        dashboard.advisor_result = None
         dashboard._metric_trend_samples = lambda _semantic: ()
         dashboard._full_token_tooltip = lambda value: str(value)
         dashboard._format_quota_summary = lambda _window: "quota"
@@ -1767,58 +1263,10 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
             ["Input", "Output", "Total", "Cached", "Reasoning", "Cache Hit"],
         )
 
-    def test_generic_handoff_template_contains_only_manual_placeholder(self):
-        chinese = generic_handoff_template("zh-CN")
-        english = generic_handoff_template("en")
-        self.assertIn("手动整理", chinese)
-        self.assertIn("请在这里", chinese)
-        self.assertIn("organized manually", english)
-        for value in (chinese.lower(), english.lower()):
-            self.assertNotIn("response", value)
-            self.assertNotIn("reasoning", value)
-            self.assertNotIn("tool output", value)
-
-    def test_new_thread_dialog_uses_one_toplevel_and_no_mainloop(self):
-        source = inspect.getsource(Dashboard._show_new_thread_dialog)
-        self.assertEqual(source.count("ctk.CTkToplevel("), 1)
-        self.assertNotIn("mainloop", source)
-        self.assertNotIn("view_model", source)
-
     def test_no_aos_runtime_dependency_is_added(self):
         requirements = Path("requirements.txt").read_text(encoding="utf-8").lower()
         build_requirements = Path("requirements-build.txt").read_text(encoding="utf-8").lower()
         self.assertNotIn("aos", requirements + build_requirements)
-
-    def test_product_actions_do_not_offer_knowledge_features(self):
-        source = inspect.getsource(Dashboard._build_tools_page)
-        for forbidden in ("knowledge", "project_export", "context_restore", "scan_project"):
-            self.assertNotIn(forbidden, source.lower())
-
-    def test_tools_build_four_groups_and_disable_unimplemented_actions(self):
-        dashboard = object.__new__(Dashboard)
-        dashboard.root = object()
-        dashboard.diagnostic_rows = []
-        parent = FakeWidget()
-        with (
-            patch.multiple(
-                main_module.ctk,
-                CTkScrollableFrame=FakeWidget,
-                CTkFrame=FakeWidget,
-                CTkLabel=FakeWidget,
-                CTkButton=FakeWidget,
-            ),
-            patch.object(main_module.tk, "StringVar", FakeVar),
-        ):
-            Dashboard._build_tools_page(dashboard, parent)
-
-        self.assertEqual(set(dashboard.tool_group_titles), {
-            "diagnostics", "data", "workflow", "help",
-        })
-        self.assertEqual(len(dashboard.tool_group_cards), 4)
-        self.assertTrue(all(
-            button.options.get("state") == "disabled"
-            for button in dashboard.coming_soon_buttons
-        ))
 
     def test_settings_builds_five_contract_groups(self):
         dashboard = object.__new__(Dashboard)
@@ -1852,21 +1300,11 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
         self.assertEqual(len(dashboard.settings_group_cards), 5)
         self.assertEqual(main_module.DEFAULT_AUTO_REFRESH_SECONDS, 60)
 
-    def test_diagnostic_results_use_one_dialog_and_no_second_mainloop(self):
-        source = inspect.getsource(Dashboard._show_diagnostic_dialog)
-        self.assertEqual(source.count("ctk.CTkToplevel("), 1)
-        self.assertNotIn("mainloop", source)
-        self.assertNotIn("rollout_path", source)
-        self.assertNotIn("exception", source.lower())
-
     def test_new_analytics_copy_excludes_stitch_off_domain_terms(self):
         keys = {
             "trend_page_description", "trend_quality_available_message",
             "trend_quality_insufficient_message", "trend_quality_unavailable_message",
-            "trend_quality_stale_message", "recommendations_description",
-            "tools_group_diagnostics", "tools_group_data", "tools_group_workflow",
-            "tools_group_help", "backup_monitor_data", "restore_monitor_data",
-            "clear_monitor_cache",
+            "trend_quality_stale_message",
         }
         forbidden = (
             "enterprise", "latency", "cluster", "deployment", "infrastructure",
@@ -1881,24 +1319,19 @@ class Phase3ProductBoundaryTests(unittest.TestCase):
     def test_all_new_product_keys_are_bilingual(self):
         keys = {
             "nav_overview", "nav_sessions", "nav_usage_trends",
-            "nav_recommendations", "nav_session_detail", "nav_tools",
-            "nav_settings", "status_advice_title", "core_metrics_title",
+            "nav_session_detail", "nav_settings", "core_metrics_title",
             "core_metric_current_turn", "core_metric_session_total",
             "core_metric_cache_reuse", "core_metric_reasoning",
-            "core_metric_five_hour_quota", "core_metric_weekly_quota",
-            "quota_center_title",
-            "current_task_card_title", "quick_actions_title",
-            "one_click_diagnostics", "open_codex", "prepare_new_thread", "more_tools",
+            "official_live_quota_title", "observed_usage_title",
+            "trend_preview_title",
             "recent_tasks_title", "view_all_tasks", "five_hour_limit",
-            "weekly_limit", "back_status_center", "prepare_new_thread",
-            "diagnostics_title", "widget_compact", "widget_expanded",
+            "weekly_limit", "back_status_center",
+            "widget_compact", "widget_expanded", "widget_status_complete",
             "trend_quality_available_title", "trend_quality_insufficient_title",
             "trend_quality_unavailable_title", "trend_quality_stale_title",
-            "tools_group_diagnostics", "tools_group_data",
-            "tools_group_workflow", "tools_group_help",
             "settings_group_general", "settings_group_refresh",
             "settings_group_windows", "settings_group_widget",
-            "settings_group_privacy", "coming_soon",
+            "settings_group_privacy", "privacy_boundary", "version_setting",
         }
         self.assertTrue(keys.issubset(TRANSLATIONS["zh-CN"]))
         self.assertTrue(keys.issubset(TRANSLATIONS["en"]))

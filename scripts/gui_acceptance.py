@@ -1,9 +1,9 @@
 """Launch deterministic safe-number scenarios in the real Dashboard UI.
 
 The launcher requires an isolated directory below the system Temp directory.
-Every scenario uses the production history store, projection, trend DTOs, and
-Advisor rules, but never reads or stores prompt, response, title, path, or
-other content fields.
+Every scenario uses the production history store, projection, and trend DTOs,
+but never reads or stores prompt, response, title, path, or other content
+fields.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ import argparse
 import os
 import sys
 import tempfile
-import time
 import traceback
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -27,7 +26,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.advisor import AdvisorInput, AdvisorResult, evaluate_advice  # noqa: E402
 from app.analytics_ui import TrendView, trend_view_from_query  # noqa: E402
 from app.codex_rollout import (  # noqa: E402
     CodexSessionUsage, InstructionUsage, RolloutSessionsResult,
@@ -59,14 +57,12 @@ from app.ui_presenter import (  # noqa: E402
 
 GEOMETRIES = ("980x660", "1440x900")
 SCALES = (1.0, 1.25, 1.5)
-PAGES = ("overview", "session_detail", "usage_trends", "recommendations")
+PAGES = ("overview", "session_detail", "usage_trends", "sessions", "settings")
 RANGES = (7, 30, 90)
 SCENARIOS = (
     "token_quota_independence",
     "quota_heartbeat",
     "quota_round_trip",
-    "advisor_quota_sufficient",
-    "advisor_quota_insufficient",
     "mini_dashboard_dedup",
     "observed_usage_complete",
     "observed_usage_partial",
@@ -104,7 +100,6 @@ class ScenarioResult:
     before: HistoryQueryResult
     after: HistoryQueryResult
     trend_view: TrendView
-    advisor_result: AdvisorResult
     trend_group: str
     trend_metric: str
     default_page: str
@@ -331,35 +326,6 @@ def _quota_observation(
         weekly_stale=False,
     )
 
-
-def _advisor_result(
-    query: HistoryQueryResult,
-    *,
-    now: datetime,
-    five_hour_remaining: float,
-) -> AdvisorResult:
-    return evaluate_advice(AdvisorInput(
-        data_available=True,
-        data_age_seconds=0,
-        source_status="normal",
-        five_hour_remaining_percent=five_hour_remaining,
-        weekly_remaining_percent=60.0,
-        turn_count=12,
-        instruction_input_tokens=1_200,
-        instruction_total_tokens=1_500,
-        cached_input_tokens=600,
-        session_total_tokens=8_000,
-        session_status="exact",
-        observed_at=now,
-        thread_safe_id=QA_THREAD_ID,
-        history_samples=query.samples,
-        source_observed_at=now,
-        five_hour_observed_at=now,
-        weekly_observed_at=now,
-        quota_history_samples=query.quota_samples,
-    ))
-
-
 def build_scenario(
     name: str,
     data_root: Path,
@@ -416,7 +382,6 @@ def build_scenario(
         )
         inserted_second = store.record(second)
         after = store.query(range_days, QA_THREAD_ID, now=current)
-        advisor = _advisor_result(after, now=current, five_hour_remaining=35.0)
         group, metric, page = "tokens", "total", "usage_trends"
         outcomes = (inserted_first, inserted_second)
 
@@ -444,7 +409,6 @@ def build_scenario(
         )
         inserted_heartbeat = store.record(heartbeat)
         after = store.query(range_days, QA_THREAD_ID, now=current)
-        advisor = _advisor_result(after, now=current, five_hour_remaining=40.0)
         group, metric, page = "quota", "five_hour", "usage_trends"
         outcomes = (inserted_first, inserted_heartbeat)
 
@@ -466,32 +430,8 @@ def build_scenario(
         before = store.query(range_days, QA_THREAD_ID, now=current)
         inserted_third = store.record(observations[2])
         after = store.query(range_days, QA_THREAD_ID, now=current)
-        advisor = _advisor_result(after, now=current, five_hour_remaining=80.0)
         group, metric, page = "quota", "five_hour", "usage_trends"
         outcomes = (inserted_first, inserted_second, inserted_third)
-
-    elif name in {"advisor_quota_sufficient", "advisor_quota_insufficient"}:
-        prior_count = 5 if name == "advisor_quota_sufficient" else 4
-        reset_at = current + timedelta(hours=4)
-        outcomes_list: list[bool] = []
-        for index in range(prior_count):
-            observed = current - timedelta(minutes=prior_count - index)
-            outcomes_list.append(store.record(_quota_observation(
-                observed_at=observed,
-                remaining_percent=40.0 - index * 5.0,
-                reset_at=reset_at,
-            )))
-        before = store.query(range_days, QA_THREAD_ID, now=current)
-        outcomes_list.append(store.record(_quota_observation(
-            observed_at=current,
-            remaining_percent=10.0,
-            reset_at=reset_at,
-        )))
-        after = store.query(range_days, QA_THREAD_ID, now=current)
-        advisor = _advisor_result(after, now=current, five_hour_remaining=10.0)
-        group, metric, page = "quota", "five_hour", "recommendations"
-        outcomes = tuple(outcomes_list)
-
     elif name == "mini_dashboard_dedup":
         observed = current - timedelta(minutes=1)
         mini = _token_observation(
@@ -515,7 +455,6 @@ def build_scenario(
         )
         inserted_dashboard = store.record(dashboard)
         after = store.query(range_days, QA_THREAD_ID, now=current)
-        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
         group, metric, page = "tokens", "total", "usage_trends"
         outcomes = (inserted_mini, inserted_dashboard)
 
@@ -545,7 +484,6 @@ def build_scenario(
             (current - timedelta(minutes=5 + index) for index in range(5))
         ))
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
-        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
         group, metric, page = "tokens", "total", "usage_trends"
 
     elif name == "observed_usage_partial":
@@ -560,7 +498,6 @@ def build_scenario(
         )
         outcomes = (store.record(partial),)
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
-        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
         group, metric, page = "tokens", "total", "usage_trends"
 
     elif name in {"observed_usage_resolved", "observed_usage_in_progress"}:
@@ -583,7 +520,6 @@ def build_scenario(
             reasoning_tokens=total // 5,
         )) for observed, status, total in lifecycle_rows)
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
-        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
         group, metric, page = "tokens", "total", "usage_trends"
         resolved = name == "observed_usage_resolved"
         instruction = InstructionUsage(
@@ -662,12 +598,10 @@ def build_scenario(
         before = after = store.query(
             range_days, selected_session.thread_id, now=current,
         )
-        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
         group, metric, page = "tokens", "total", "overview"
 
     else:  # observed_usage_empty / observed_usage_unavailable
         before = after = store.query(range_days, QA_THREAD_ID, now=current)
-        advisor = _advisor_result(after, now=current, five_hour_remaining=60.0)
         group, metric, page = "tokens", "total", "usage_trends"
         outcomes = ()
 
@@ -700,7 +634,6 @@ def build_scenario(
         before=before,
         after=after,
         trend_view=trend_view_from_query(after),
-        advisor_result=advisor,
         trend_group=group,
         trend_metric=metric,
         default_page=page,
@@ -731,7 +664,6 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
     """Apply production DTOs to already-built real Dashboard widgets."""
 
     _ensure_qa_page_built(dashboard, "usage_trends")
-    _ensure_qa_page_built(dashboard, "recommendations")
     _ensure_qa_page_built(dashboard, "sessions")
     _ensure_qa_page_built(dashboard, "session_detail")
     dashboard.trend_range_days = scenario.after.range_days
@@ -753,7 +685,6 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
     dashboard.trend_range_menu.set(
         translate(f"last_{scenario.after.range_days}_days", dashboard.language)
     )
-    dashboard.advisor_result = scenario.advisor_result
     if hasattr(dashboard, "observed_usage_window_menu"):
         dashboard.observed_usage_window_menu.set(
             translate("observed_usage_rolling_5h", dashboard.language)
@@ -762,8 +693,6 @@ def _apply_scenario(dashboard: object, scenario: ScenarioResult, page: str) -> N
     if hasattr(dashboard, "_render_usage_insights"):
         dashboard._render_usage_insights()  # noqa: SLF001 - QA launcher
     dashboard._render_trends()  # noqa: SLF001 - QA launcher
-    dashboard._render_advisor()  # noqa: SLF001 - QA launcher
-    dashboard._render_recommendations()  # noqa: SLF001 - QA launcher
     if hasattr(dashboard, "status_recent_rows"):
         five = QuotaWindow.from_reset_duration(
             QuotaKind.FIVE_HOUR,
@@ -996,9 +925,6 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
         and not contract.selected_is_activity
         and contract.selected_thread_id == scenario.selected_session.thread_id
     )
-    checks["advisor_scope_visible"] = translate(
-        "ui_scope_current_activity", dashboard.language,
-    ) in dashboard.status_meta_var.get()
     semantics = tuple(
         item["semantic"] for item in dashboard.core_metric_widgets
     )
@@ -1027,17 +953,6 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
         "all_sessions_scope", dashboard.language,
     ) in dashboard.usage_insights_range_var.get()
     checks["selected_card_visible"] = dashboard.task_summary_card.winfo_ismapped()
-    visible_advice_children = tuple(
-        child for child in dashboard.status_advice_card.winfo_children()
-        if child.winfo_ismapped()
-    )
-    advice_height = dashboard.status_advice_card.winfo_height()
-    advice_content_bottom = max(
-        child.winfo_y() + child.winfo_height()
-        for child in visible_advice_children
-    )
-    advice_blank_tail = advice_height - advice_content_bottom
-    checks["compact_advice_card"] = advice_blank_tail <= 48
     visible_core_cards = tuple(
         item["card"] for item in dashboard.core_metric_widgets
         if item["card"].winfo_ismapped()
@@ -1048,20 +963,13 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
     checks["core_metrics_fill_row"] = (
         dashboard.core_cards_frame.winfo_width() - core_right <= 16
     )
-    checks["six_primary_navigation_items"] = tuple(
+    checks["four_primary_navigation_items"] = tuple(
         dashboard.nav_buttons
     ) == (
-        "overview", "sessions", "usage_trends",
-        "recommendations", "tools", "settings",
+        "overview", "sessions", "usage_trends", "settings",
     )
-    checks["recommendations_page_preserved"] = len(
-        dashboard.recommendation_cards,
-    ) == 5
     visible_values: list[str] = []
     for variable in (
-        dashboard.simple_status_title_var,
-        dashboard.simple_reason_var,
-        dashboard.status_meta_var,
         dashboard.task_full_title_var,
         dashboard.task_detail_viewing_var,
     ):
@@ -1086,14 +994,6 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
             visible_values.extend((
                 str(row["title"].get()), str(row["details"].get()),
             ))
-    for card in dashboard.recommendation_cards:
-        visible_values.extend(
-            str(card[key].get())
-            for key in (
-                "title", "severity", "body", "evidence", "metadata",
-                "history", "observed",
-            )
-        )
     saved_widget_thread_id = dashboard._widget_thread_id  # noqa: SLF001 - QA path
     dashboard._widget_thread_id = scenario.selected_session.thread_id  # noqa: SLF001
     mini_snapshot = dashboard._safe_mini_snapshot(  # noqa: SLF001 - QA path
@@ -1101,8 +1001,7 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
     )
     dashboard._widget_thread_id = saved_widget_thread_id  # noqa: SLF001
     mini_presentation = present_widget(
-        dashboard.quota_snapshot, mini_snapshot,
-        dashboard.advisor_result.primary, dashboard.language,
+        dashboard.quota_snapshot, mini_snapshot, dashboard.language,
     )
     tooltip_values = (
         dashboard.task_full_title_var.get(),
@@ -1174,17 +1073,12 @@ def _assert_e1_dashboard(dashboard: object, scenario: ScenarioResult) -> None:
         dashboard.current_nav_page == "usage_trends"
         and dashboard.trend_group == "quota"
     )
-    _ensure_qa_page_built(dashboard, "recommendations")
-    dashboard.show_page("recommendations")
-    dashboard._execute_ui_action("view_quota")  # noqa: SLF001 - QA action path
-    checks["quota_action_routes_overview"] = dashboard.current_nav_page == "overview"
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
         raise RuntimeError(f"E1 GUI acceptance failed: {', '.join(failed)}")
     print(
         "E1_GUI_ACCEPTANCE_OK "
-        f"checks={len(checks)} scenario={scenario.name} language={dashboard.language} "
-        f"advice_height={advice_height} advice_blank_tail={advice_blank_tail}",
+        f"checks={len(checks)} scenario={scenario.name} language={dashboard.language}",
         flush=True,
     )
 
@@ -1314,8 +1208,6 @@ def main() -> None:
     parser.add_argument("--cycle-observed-windows", action="store_true")
     parser.add_argument("--click-recent-index", choices=range(3), type=int)
     parser.add_argument("--assert-e1", action="store_true")
-    parser.add_argument("--diagnostics-slow", action="store_true")
-    parser.add_argument("--diagnostics-fail-once", action="store_true")
     parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--auto-close-ms", type=int, default=0)
     args = parser.parse_args()
@@ -1361,40 +1253,6 @@ def main() -> None:
     )
     dashboard.auto_refresh.set_enabled(False)
     dashboard.auto_refresh_var.set(False)
-    if args.diagnostics_fail_once and not args.diagnostics_slow:
-        raise RuntimeError("--diagnostics-fail-once requires --diagnostics-slow")
-    if args.diagnostics_slow:
-        from app.diagnostics import DiagnosticContext, run_diagnostics
-        from app.diagnostics_worker import DashboardDiagnosticsWorker
-
-        original_diagnostics_worker = dashboard.diagnostics_worker
-        original_diagnostics_worker.shutdown()
-        original_diagnostics_worker.wait_until_stopped(1)
-        diagnostic_attempts = {"count": 0}
-
-        def run_slow_diagnostics(request):
-            diagnostic_attempts["count"] += 1
-            time.sleep(1.5)
-            if args.diagnostics_fail_once and diagnostic_attempts["count"] == 1:
-                raise RuntimeError("qa_diagnostics_failure")
-            return run_diagnostics(DiagnosticContext(
-                version=request.version,
-                runtime_mode=request.runtime_mode,
-                frozen=request.frozen,
-                codex_executable_found=True,
-                quota_probe=lambda: "normal",
-                rollout_root=request.rollout_root,
-                rollout_probe=lambda: request.session_count,
-                state_path=request.state_path,
-                settings_path=request.settings_path,
-                startup_status=lambda: "unused",
-                tray_started=request.tray_started,
-                refreshed_at=request.refreshed_at,
-            ))
-
-        dashboard.diagnostics_worker = DashboardDiagnosticsWorker(
-            run_slow_diagnostics,
-        )
     percent = round(args.scale * 100)
     root.title(
         "Codex Token Monitor QA - "
@@ -1435,50 +1293,6 @@ def main() -> None:
                         dashboard, args.click_recent_index,
                     ),
                 )
-            if args.diagnostics_slow:
-                def complete_diagnostics() -> None:
-                    if dashboard.diagnostics_worker.busy or dashboard._diagnostics_running:
-                        root.after(50, complete_diagnostics)
-                        return
-                    metrics = dashboard.diagnostics_worker.metrics
-                    if args.diagnostics_fail_once and diagnostic_attempts["count"] == 1:
-                        if not dashboard._diagnostics_error:
-                            raise RuntimeError("Slow diagnostics did not expose failure")
-                        dashboard.start_diagnostics()
-                        root.after(1700, complete_diagnostics)
-                        return
-                    if dashboard.diagnostic_report is None:
-                        raise RuntimeError("Slow diagnostics did not return a report")
-                    if len(dashboard.diagnostic_report.results) != 13:
-                        raise RuntimeError("Slow diagnostics did not run every check")
-                    if metrics["max_parallel"] != 1 or metrics["ignored"] < 4:
-                        raise RuntimeError("Repeated diagnostics started parallel work")
-                    print(
-                        "F1_GUI_DIAGNOSTICS_OK "
-                        f"language={dashboard.language} submitted={metrics['submitted']} "
-                        f"executed={metrics['executed']} ignored={metrics['ignored']} "
-                        f"errors={metrics['errors']}",
-                        flush=True,
-                    )
-
-                dashboard.start_diagnostics()
-                for _ in range(4):
-                    dashboard.start_diagnostics()
-                expected_running = (
-                    f"{translate('diagnostics_title', dashboard.language)} · "
-                    f"{translate('running', dashboard.language)}"
-                )
-                if dashboard.diagnostic_summary_var.get() != expected_running:
-                    raise RuntimeError("Diagnostics did not show its running state")
-                root.after(650, lambda: (
-                    _ensure_qa_page_built(dashboard, "usage_trends"),
-                    dashboard.show_page("usage_trends"),
-                ))
-                root.after(730, lambda: root.geometry(
-                    f"{_geometry_for_scale(args.geometry, args.scale)}+16+16",
-                ))
-                root.after(800, lambda: _scroll_trends_to_end(dashboard))
-                root.after(1700, complete_diagnostics)
             if screenshot_path is not None:
                 delay = (
                     1000

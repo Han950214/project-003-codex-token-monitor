@@ -147,12 +147,12 @@ class PageLifecycleTests(unittest.TestCase):
     def test_idle_heavy_page_prune_keeps_overview_and_most_recent_heavy_state(self):
         dashboard = object.__new__(Dashboard)
         dashboard.current_nav_page = "overview"
-        dashboard._recent_heavy_page = "recommendations"
+        dashboard._recent_heavy_page = "usage_trends"
         dashboard._heavy_page_prune_job = "pending"
         dashboard._heavy_page_destroy_count = 0
         dashboard.page_frames = {
             page: FakeWidget()
-            for page in ("overview", "sessions", "usage_trends", "recommendations")
+            for page in ("overview", "sessions", "usage_trends")
         }
         dashboard.built_pages = set(dashboard.page_frames)
         dashboard.session_search_var = FakeVar(value="needle")
@@ -161,10 +161,10 @@ class PageLifecycleTests(unittest.TestCase):
 
         self.assertEqual(
             dashboard.built_pages,
-            {"overview", "recommendations"},
+            {"overview", "usage_trends"},
         )
         self.assertEqual(dashboard._session_search_text, "needle")
-        self.assertEqual(dashboard._heavy_page_destroy_count, 2)
+        self.assertEqual(dashboard._heavy_page_destroy_count, 1)
         self.assertIsNone(dashboard._heavy_page_prune_job)
 
     def test_pruned_heavy_page_rebuilds_with_preserved_search_state(self):
@@ -172,12 +172,12 @@ class PageLifecycleTests(unittest.TestCase):
         dashboard.root = FakeRoot()
         dashboard.page_host = FakeWidget()
         dashboard.current_nav_page = "overview"
-        dashboard._recent_heavy_page = "recommendations"
+        dashboard._recent_heavy_page = "usage_trends"
         dashboard._heavy_page_prune_job = None
         dashboard._heavy_page_destroy_count = 0
         dashboard.page_frames = {
             page: FakeWidget()
-            for page in ("overview", "sessions", "recommendations")
+            for page in ("overview", "sessions", "usage_trends")
         }
         dashboard.built_pages = set(dashboard.page_frames)
         dashboard._building_pages = set()
@@ -268,16 +268,12 @@ class PageLifecycleTests(unittest.TestCase):
             "session_detail": Mock(),
             "sessions": Mock(),
             "usage_trends": Mock(),
-            "recommendations": Mock(),
-            "tools": Mock(),
             "settings": Mock(),
         }
         dashboard._build_status_center = builders["overview"]
         dashboard._build_current_task_page = builders["session_detail"]
         dashboard._build_history_page = builders["sessions"]
         dashboard._build_usage_trends_page = builders["usage_trends"]
-        dashboard._build_recommendations_page = builders["recommendations"]
-        dashboard._build_tools_page = builders["tools"]
         dashboard._build_settings_page = builders["settings"]
 
         with patch.object(main_module.ctk, "CTkFrame", FakeWidget), patch.object(
@@ -341,7 +337,7 @@ class PageLifecycleTests(unittest.TestCase):
         dashboard.built_pages = {"overview"}
         dashboard._building_pages = set()
         dashboard._page_build_errors = {}
-        dashboard.current_nav_page = "tools"
+        dashboard.current_nav_page = "settings"
         dashboard.language = "en"
         attempts = []
 
@@ -350,7 +346,7 @@ class PageLifecycleTests(unittest.TestCase):
             if len(attempts) == 1:
                 raise RuntimeError("expected failure")
 
-        dashboard.page_builders = {"tools": build}
+        dashboard.page_builders = {"settings": build}
         dashboard._apply_deferred_page_language = Mock()
         dashboard._render_visible_page = Mock()
         dashboard._apply_responsive_layout = Mock()
@@ -358,18 +354,18 @@ class PageLifecycleTests(unittest.TestCase):
         with patch.object(main_module.ctk, "CTkFrame", FakeWidget), patch.object(
             main_module.ctk, "CTkLabel", FakeWidget,
         ), patch.object(main_module.ctk, "CTkButton", FakeWidget):
-            self.assertFalse(Dashboard.ensure_page_built(dashboard, "tools"))
+            self.assertFalse(Dashboard.ensure_page_built(dashboard, "settings"))
             dashboard.root.idle_callbacks.pop()()
-            self.assertNotIn("tools", dashboard.built_pages)
-            self.assertNotIn("tools", dashboard._building_pages)
-            self.assertIn("tools", dashboard._page_build_errors)
+            self.assertNotIn("settings", dashboard.built_pages)
+            self.assertNotIn("settings", dashboard._building_pages)
+            self.assertIn("settings", dashboard._page_build_errors)
 
-            self.assertFalse(Dashboard.ensure_page_built(dashboard, "tools"))
+            self.assertFalse(Dashboard.ensure_page_built(dashboard, "settings"))
             dashboard.root.idle_callbacks.pop()()
 
         self.assertEqual(len(attempts), 2)
-        self.assertIn("tools", dashboard.built_pages)
-        self.assertNotIn("tools", dashboard._page_build_errors)
+        self.assertIn("settings", dashboard.built_pages)
+        self.assertNotIn("settings", dashboard._page_build_errors)
 
     def test_page_finishing_after_navigation_away_stays_hidden(self):
         dashboard = object.__new__(Dashboard)
@@ -404,7 +400,7 @@ class PageLifecycleTests(unittest.TestCase):
         dashboard.shell_state = FakeShellState(initial_page)
         dashboard.page_frames = {
             page: FakeWidget()
-            for page in ("overview", "sessions", "usage_trends", "recommendations", "tools")
+            for page in ("overview", "sessions", "usage_trends", "settings")
         }
         dashboard.built_pages = set(dashboard.page_frames)
         dashboard._building_pages = set()
@@ -421,11 +417,9 @@ class PageLifecycleTests(unittest.TestCase):
 
     def test_heavy_page_sequences_keep_only_current_and_recent_page(self):
         cases = (
-            (("sessions", "usage_trends"), {"overview", "sessions", "usage_trends", "tools"}, 1),
-            (("sessions", "usage_trends", "recommendations"), {"overview", "usage_trends", "recommendations", "tools"}, 1),
-            (("sessions", "usage_trends", "recommendations", "sessions"), {"overview", "sessions", "recommendations", "tools"}, 1),
-            (("sessions", "overview"), {"overview", "sessions", "tools"}, 2),
-            (("usage_trends", "tools"), {"overview", "usage_trends", "tools"}, 2),
+            (("sessions", "usage_trends"), {"overview", "sessions", "usage_trends", "settings"}, 0),
+            (("sessions", "overview"), {"overview", "sessions", "settings"}, 1),
+            (("usage_trends", "settings"), {"overview", "usage_trends", "settings"}, 1),
         )
         for sequence, expected, destroy_count in cases:
             with self.subTest(sequence=sequence):
@@ -447,7 +441,7 @@ class PageLifecycleTests(unittest.TestCase):
         dashboard.root.run_after_callbacks()
 
         self.assertEqual(dashboard.built_pages & main_module.HEAVY_PAGES, {"sessions", "usage_trends"})
-        self.assertEqual(dashboard._heavy_page_destroy_count, 1)
+        self.assertEqual(dashboard._heavy_page_destroy_count, 0)
         self.assertIn("after-0", dashboard.root.cancelled)
         self.assertEqual(dashboard.current_nav_page, "sessions")
 
@@ -466,7 +460,7 @@ class PageLifecycleTests(unittest.TestCase):
         dashboard._apply_responsive_layout = Mock()
 
         Dashboard.show_page(dashboard, "usage_trends")
-        Dashboard.show_page(dashboard, "recommendations")
+        Dashboard.show_page(dashboard, "overview")
         dashboard.root.run_after_callbacks()
         self.assertNotIn("sessions", dashboard.built_pages)
 

@@ -224,7 +224,6 @@ class UsageInsightsDashboardContractTests(unittest.TestCase):
         dashboard.presentation = SimpleNamespace()
         dashboard._dirty_pages = {"overview", "session_detail"}
         dashboard._render_safe_overview = Mock()
-        dashboard._render_advisor = Mock()
         dashboard._render_observed_usage = Mock()
         dashboard._render_status_recent = Mock()
         dashboard._render_trends = Mock()

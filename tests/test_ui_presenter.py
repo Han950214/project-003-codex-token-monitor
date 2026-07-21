@@ -423,7 +423,7 @@ class UiScopeContractTests(unittest.TestCase):
 
     def test_required_history_state_matrix_has_exact_primary_and_fallback(self):
         expected = {
-            HistoryEmptyState.FIRST_USE: ("open_codex", "refresh"),
+            HistoryEmptyState.FIRST_USE: ("refresh", None),
             HistoryEmptyState.SELECTED_NO_HISTORY: (
                 "choose_session", "expand_range",
             ),
@@ -434,17 +434,20 @@ class UiScopeContractTests(unittest.TestCase):
             HistoryEmptyState.MAPPING_FAILED: (
                 "expand_range", "keep_ranking",
             ),
-            HistoryEmptyState.STALE: ("refresh", "diagnose"),
+            HistoryEmptyState.STALE: ("refresh", None),
             HistoryEmptyState.BACKFILL_INCOMPLETE: (
                 "use_current", "retry",
             ),
-            HistoryEmptyState.UNAVAILABLE: ("diagnose", "refresh"),
+            HistoryEmptyState.UNAVAILABLE: ("refresh", None),
         }
         for state, actions in expected.items():
             with self.subTest(state=state):
                 view = build_history_state_view(state)
                 self.assertEqual(view.primary_action.kind, actions[0])
-                self.assertEqual(view.fallback_action.kind, actions[1])
+                self.assertEqual(
+                    view.fallback_action.kind if view.fallback_action else None,
+                    actions[1],
+                )
                 self.assertTrue(view.title_key.endswith("_title"))
                 self.assertTrue(view.reason_key.endswith("_reason"))
                 self.assertTrue(view.realtime_impact_key.endswith("_impact"))
@@ -491,9 +494,7 @@ class UiScopeContractTests(unittest.TestCase):
         self.assertNotEqual(empty_view.title_key, failed_view.title_key)
         self.assertNotEqual(empty_view.reason_key, failed_view.reason_key)
         self.assertIsNotNone(empty_view.primary_action)
-        self.assertIsNotNone(empty_view.fallback_action)
         self.assertIsNotNone(failed_view.primary_action)
-        self.assertIsNotNone(failed_view.fallback_action)
 
     def test_every_nonhealthy_quota_state_has_reason_actions_and_impact(self):
         contracts = (
@@ -514,15 +515,14 @@ class UiScopeContractTests(unittest.TestCase):
                 self.assertTrue(view.reason_key)
                 self.assertTrue(view.realtime_impact_key)
                 self.assertIsNotNone(view.primary_action)
-                self.assertIsNotNone(view.fallback_action)
 
     def test_required_quota_matrix_has_exact_variants_and_action_scopes(self):
         cases = (
-            ((True, True, False, False, True), "live_only", "open_codex", "refresh_quota"),
+            ((True, True, False, False, True), "live_only", "refresh_quota", None),
             ((False, False, True, False, True), "history_only", "refresh_quota", "view_quota_history"),
             ((True, True, True, False, True), "live_and_history", "view_quota_history", None),
-            ((False, False, False, False, False), "sources_unavailable", "diagnose", "refresh_quota"),
-            ((False, True, False, False, True), "weekly_only", "refresh_quota", "open_codex"),
+            ((False, False, False, False, False), "sources_unavailable", "refresh_quota", None),
+            ((False, True, False, False, True), "weekly_only", "refresh_quota", None),
             ((True, True, True, True, True), "stale_live", "refresh_quota", "view_quota_history"),
         )
         for arguments, variant, primary, fallback in cases:

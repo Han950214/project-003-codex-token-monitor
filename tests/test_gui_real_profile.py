@@ -44,7 +44,7 @@ class RealDataProfilerTests(unittest.TestCase):
 
         frames = {
             page: dashboard._create_page_frame(page)
-            for page in ("overview", "sessions", "usage_trends", "recommendations")
+            for page in ("overview", "sessions", "usage_trends", "settings")
         }
         profiler._bind_page_configures()
         self.assertEqual(
@@ -56,14 +56,14 @@ class RealDataProfilerTests(unittest.TestCase):
                 "overview": 1,
                 "sessions": 1,
                 "usage_trends": 1,
-                "recommendations": 1,
+                "settings": 1,
             }),
         )
 
         dashboard.current_nav_page = "sessions"
         frames["overview"].emit_configure()
         dashboard.current_nav_page = "overview"
-        for page in ("sessions", "usage_trends", "recommendations"):
+        for page in ("sessions", "usage_trends", "settings"):
             frames[page].emit_configure()
         self.assertEqual(
             profiler.hidden_page_configures,
@@ -71,7 +71,7 @@ class RealDataProfilerTests(unittest.TestCase):
                 "overview": 1,
                 "sessions": 1,
                 "usage_trends": 1,
-                "recommendations": 1,
+                "settings": 1,
             }),
         )
 

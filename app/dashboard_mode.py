@@ -11,8 +11,6 @@ NAVIGATION_ITEMS = (
     "overview",
     "sessions",
     "usage_trends",
-    "recommendations",
-    "tools",
     "settings",
 )
 SECONDARY_PAGES = ("session_detail",)

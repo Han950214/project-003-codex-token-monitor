@@ -20,8 +20,6 @@ PAGES = (
     "overview",
     "sessions",
     "usage_trends",
-    "recommendations",
-    "tools",
     "settings",
 )
 
@@ -80,8 +78,6 @@ class Benchmark:
 
         import customtkinter as ctk
         import tkinter as tk
-        from app.diagnostics import DiagnosticContext, run_diagnostics
-        from app.diagnostics_worker import DashboardDiagnosticsWorker
         from app.main import Dashboard
         from scripts.gui_acceptance import (
             _SafeQaQuotaProvider,
@@ -136,30 +132,6 @@ class Benchmark:
         self.dashboard.auto_refresh.set_enabled(False)
         self.dashboard.auto_refresh_var.set(False)
         self.dashboard._request_history_backfill = lambda *args, **kwargs: None
-        original_diagnostics_worker = self.dashboard.diagnostics_worker
-        original_diagnostics_worker.shutdown()
-        original_diagnostics_worker.wait_until_stopped(1)
-
-        def run_slow_diagnostics(request):
-            time.sleep(1.5)
-            return run_diagnostics(DiagnosticContext(
-                version=request.version,
-                runtime_mode=request.runtime_mode,
-                frozen=request.frozen,
-                codex_executable_found=True,
-                quota_probe=lambda: "normal",
-                rollout_root=request.rollout_root,
-                rollout_probe=lambda: request.session_count,
-                state_path=request.state_path,
-                settings_path=request.settings_path,
-                startup_status=lambda: "unused",
-                tray_started=request.tray_started,
-                refreshed_at=request.refreshed_at,
-            ))
-
-        self.dashboard.diagnostics_worker = DashboardDiagnosticsWorker(
-            run_slow_diagnostics,
-        )
         self.scenario = scenario
         self._apply_scenario = _apply_scenario
         self._instrument_dashboard()
@@ -176,14 +148,11 @@ class Benchmark:
     def _instrument_dashboard(self) -> None:
         render_pages = {
             "_render_sessions": {"sessions"},
-            "_render_advisor": {"overview"},
             "_render_observed_usage": {"overview"},
             "_render_usage_insights": {"usage_trends"},
             "_render_safe_overview": {"overview", "session_detail"},
             "_render_status_recent": {"overview"},
             "_render_trends": {"overview", "usage_trends"},
-            "_render_recommendations": {"recommendations"},
-            "_render_diagnostics": {"tools"},
         }
         for name, pages in render_pages.items():
             if not hasattr(self.dashboard, name):
@@ -207,7 +176,6 @@ class Benchmark:
         for name in (
             "_apply_responsive_layout",
             "_poll_refresh_results",
-            "_poll_diagnostics_results",
             "_apply_refresh_payload",
             "_apply_presentation",
             "_schedule_trend_query",
@@ -215,7 +183,6 @@ class Benchmark:
             "_layout_history_controls",
             "_layout_history_columns",
             "_layout_sessions_page",
-            "_layout_tool_groups",
             "_layout_settings_groups",
             "_layout_trend_metrics",
         ):
@@ -321,7 +288,7 @@ class Benchmark:
             self.configure_events = 0
             self._begin("slow_refresh")
             self.provider.delay_seconds = 1.5
-            self.root.after(100, lambda: self.dashboard.show_page("tools"))
+            self.root.after(100, lambda: self.dashboard.show_page("settings"))
             self.root.after(10, self.dashboard.manual_refresh)
             self.root.after(1900, maximize_restore)
 
@@ -400,27 +367,12 @@ class Benchmark:
                 self.dashboard.manual_refresh()
             self.root.after(100, lambda: self.dashboard.show_page("usage_trends"))
             self.root.after(180, lambda: self.root.geometry("1180x720+20+20"))
-            self.root.after(3500, slow_diagnostics)
+            self.root.after(3500, close_while_refreshing)
 
-        def slow_diagnostics() -> None:
-            self._begin("slow_diagnostics")
-            for _ in range(5):
-                self.dashboard.start_diagnostics()
-            self.root.after(100, lambda: self.dashboard.show_page("usage_trends"))
-            self.root.after(180, lambda: self.root.geometry("1180x720+20+20"))
-            self.root.after(
-                260,
-                lambda: self._scroll(
-                    "usage_trends", "trends_page", lambda: None,
-                ),
-            )
-            self.root.after(1900, close_while_refreshing_and_diagnostics)
-
-        def close_while_refreshing_and_diagnostics() -> None:
-            self._begin("close_while_refreshing_and_diagnostics")
+        def close_while_refreshing() -> None:
+            self._begin("close_while_refreshing")
             self.provider.delay_seconds = 1.5
             self.dashboard.manual_refresh()
-            self.dashboard.start_diagnostics()
             close_requested = time.perf_counter()
 
             def close() -> None:
@@ -436,15 +388,11 @@ class Benchmark:
         worker = getattr(self.dashboard, "refresh_worker", None)
         if worker is not None:
             worker.wait_until_stopped(2)
-        diagnostics_worker = getattr(self.dashboard, "diagnostics_worker", None)
-        if diagnostics_worker is not None:
-            diagnostics_worker.wait_until_stopped(2)
         self._restore_canvas_delete()
         self._write_result()
 
     def _write_result(self) -> None:
         worker = getattr(self.dashboard, "refresh_worker", None)
-        diagnostics_worker = getattr(self.dashboard, "diagnostics_worker", None)
         worker_metrics: dict[str, Any] = {}
         if worker is not None:
             metrics = getattr(worker, "metrics", None)
@@ -456,9 +404,6 @@ class Benchmark:
                 )
             errors = getattr(worker, "errors", ())
             self.worker_errors.extend(str(error) for error in errors)
-        diagnostics_worker_metrics: dict[str, Any] = {}
-        if diagnostics_worker is not None:
-            diagnostics_worker_metrics = dict(diagnostics_worker.metrics)
         result = {
             "run_id": self.run_id,
             "isolated_data": True,
@@ -477,7 +422,6 @@ class Benchmark:
             "configure_events": self.configure_events,
             "quota_refresh_calls": self.provider.refresh_calls,
             "worker_metrics": worker_metrics,
-            "diagnostics_worker_metrics": diagnostics_worker_metrics,
             "close_latency_ms": round(getattr(self, "close_latency_ms", 0.0), 3),
             "callback_errors": self.callback_errors,
             "worker_errors": self.worker_errors,

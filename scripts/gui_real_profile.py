@@ -19,6 +19,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 
+from PIL import ImageGrab
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -29,8 +31,6 @@ PAGES = (
     "overview",
     "sessions",
     "usage_trends",
-    "recommendations",
-    "tools",
     "settings",
 )
 BUILD_METHODS = (
@@ -39,8 +39,6 @@ BUILD_METHODS = (
     "_build_current_task_page",
     "_build_history_page",
     "_build_usage_trends_page",
-    "_build_recommendations_page",
-    "_build_tools_page",
     "_build_settings_page",
 )
 PROFILE_METHODS = BUILD_METHODS + (
@@ -53,15 +51,19 @@ PROFILE_METHODS = BUILD_METHODS + (
     "_layout_history_controls",
     "_layout_history_columns",
     "_layout_sessions_page",
-    "_layout_tool_groups",
     "_layout_settings_groups",
     "_layout_trend_metrics",
     "_render_safe_overview",
     "_render_sessions",
     "_render_trends",
     "_render_usage_insights",
-    "_render_recommendations",
 )
+
+
+def _geometry_for_scale(geometry: str, scale: float) -> str:
+    """Keep the requested physical viewport stable under CTk window scaling."""
+    width_text, height_text = geometry.split("x", maxsplit=1)
+    return f"{round(int(width_text) / scale)}x{round(int(height_text) / scale)}"
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -97,6 +99,8 @@ class RealDataProfiler:
         exercise_e4: bool = False,
         language: str | None = None,
         geometry: str = "1280x800",
+        scale: float = 1.0,
+        capture: Path | None = None,
     ) -> None:
         import customtkinter as ctk
         import tkinter as tk
@@ -113,6 +117,12 @@ class RealDataProfiler:
         self.exercise_e3_f2 = exercise_e3_f2
         self.exercise_e4 = exercise_e4
         self.geometry = geometry
+        self.scale = scale
+        self.capture = capture.resolve() if capture is not None else None
+        if self.capture is not None:
+            if self.capture.suffix.lower() != ".png":
+                raise ValueError("real GUI capture must be a PNG")
+            self.capture.parent.mkdir(parents=True, exist_ok=True)
         self.e3_f1_checks: dict[str, bool] = {}
         self.e3_f2_checks: dict[str, bool] = {}
         self.e4_checks: dict[str, bool | float | int] = {}
@@ -178,9 +188,11 @@ class RealDataProfiler:
         self._instrument_page_frame_creation(Dashboard)
         self._instrument_tk(tk)
 
+        ctk.set_widget_scaling(scale)
+        ctk.set_window_scaling(scale)
         self.root = ctk.CTk()
         self.root.report_callback_exception = self._report_callback_exception
-        self.root.geometry(f"{self.geometry}+20+20")
+        self.root.geometry(f"{_geometry_for_scale(self.geometry, scale)}+20+20")
         started = time.perf_counter()
         self.dashboard = Dashboard(self.root, history_store=self.history_store)
         self.constructor_ms = (time.perf_counter() - started) * 1000
@@ -438,17 +450,13 @@ class RealDataProfiler:
             self._wait_for_page_built("usage_trends", trends_ready)
 
         def trends_ready() -> None:
-            dashboard.show_page("recommendations")
-            self._wait_for_page_built("recommendations", recommendations_ready)
-
-        def recommendations_ready() -> None:
+            dashboard.show_page("settings")
             self.root.after(2300, prune_ready)
 
         def prune_ready() -> None:
             built = getattr(dashboard, "built_pages", set())
             self.e3_f1_checks["heavy_pages_pruned"] = bool(
-                dashboard.current_nav_page == "recommendations"
-                and "recommendations" in built
+                dashboard.current_nav_page == "settings"
                 and "usage_trends" in built
                 and "sessions" not in built
             )
@@ -514,8 +522,6 @@ class RealDataProfiler:
             )
             self.e3_f2_checks["unbuilt_pages_not_created"] = bool(
                 dashboard.built_pages == built_before_language_change
-                and "recommendations" not in dashboard.built_pages
-                and "tools" not in dashboard.built_pages
             )
             dashboard.show_page("sessions")
             self._wait_for_page_built("sessions", sessions_language_ready)
@@ -629,6 +635,8 @@ class RealDataProfiler:
                 and self._layout_before_title_enrichment
                 != self._layout_after_title_enrichment
             )
+            self._record_e5_layout_checks()
+            self._capture_real_window()
             if len(rows) < 3:
                 finish()
                 return
@@ -808,6 +816,79 @@ class RealDataProfiler:
         if mini_window is not None:
             self._count_widgets("mini_widget", mini_window)
 
+    def _capture_real_window(self) -> None:
+        if self.capture is None:
+            return
+        self.dashboard.show_page("overview")
+        self.dashboard.status_page._parent_canvas.yview_moveto(0.0)
+        self.root.attributes("-topmost", True)
+        self.root.lift()
+        self.root.focus_force()
+        self.root.event_generate("<Escape>")
+        self.root.event_generate("<Escape>")
+        self.root.update_idletasks()
+        left = self.root.winfo_rootx()
+        top = self.root.winfo_rooty()
+        right = left + self.root.winfo_width()
+        bottom = top + self.root.winfo_height()
+        if right <= left or bottom <= top:
+            raise RuntimeError("real GUI window has invalid screenshot bounds")
+        image = ImageGrab.grab(
+            bbox=(left, top, right, bottom), all_screens=True,
+        )
+        image.save(self.capture, format="PNG")
+        self.e4_checks["capture_width"] = image.width
+        self.e4_checks["capture_height"] = image.height
+        self.e4_checks["capture_created"] = self.capture.is_file()
+        self.root.attributes("-topmost", False)
+
+    def _record_e5_layout_checks(self) -> None:
+        dashboard = self.dashboard
+        dashboard.show_page("overview")
+        self.root.update_idletasks()
+        cards = (
+            dashboard.session_selector_card,
+            dashboard.core_metrics_panel,
+            dashboard.quota_center_card,
+            dashboard.observed_usage_card,
+            dashboard.trend_preview_card,
+        )
+        grid = tuple(card.grid_info() for card in cards)
+        self.e4_checks["e5_four_navigation_items"] = tuple(
+            dashboard.nav_buttons
+        ) == ("overview", "sessions", "usage_trends", "settings")
+        self.e4_checks["e5_removed_pages_absent"] = not {
+            "recommendations", "tools",
+        }.intersection(dashboard.page_frames)
+        self.e4_checks["e5_overview_single_column"] = all(
+            int(info.get("column", -1)) == 0 for info in grid
+        )
+        self.e4_checks["e5_overview_order"] = tuple(
+            int(info.get("row", -1)) for info in grid
+        ) == tuple(range(5))
+        core_cards = tuple(item["card"] for item in dashboard.core_metric_widgets)
+        self.e4_checks["e5_core_cards_equal_height"] = len({
+            card.winfo_height() for card in core_cards
+        }) == 1
+        quota_cards = tuple(
+            dashboard.quota_window_widgets[prefix]["card"]
+            for prefix in ("five", "week")
+        )
+        quota_widths = tuple(card.winfo_width() for card in quota_cards)
+        self.e4_checks["e5_quota_card_width_delta"] = (
+            max(quota_widths) - min(quota_widths)
+        )
+        self.e4_checks["e5_quota_cards_equal_width"] = (
+            max(quota_widths) - min(quota_widths) <= 1
+        )
+        self.e4_checks["e5_quota_cards_equal_height"] = len({
+            card.winfo_height() for card in quota_cards
+        }) == 1
+        self.e4_checks["e5_quota_full_width"] = (
+            dashboard.quota_center_card.winfo_width()
+            >= dashboard.session_selector_card.winfo_width() - 4
+        )
+
     def _find_scroll_target(self, page: str) -> Any | None:
         if page == "sessions":
             return getattr(self.dashboard, "sessions_tree", None)
@@ -895,8 +976,16 @@ class RealDataProfiler:
         startup_started = time.perf_counter()
 
         def wait_for_startup() -> None:
+            full_enrichment_ready = (
+                not self.exercise_e4
+                or "full_enrichment_applied_ms" in self.startup_timeline
+            )
             if (
-                (self.dashboard.presentation is None or self.dashboard.refresh_worker.busy)
+                (
+                    self.dashboard.presentation is None
+                    or self.dashboard.refresh_worker.busy
+                    or not full_enrichment_ready
+                )
                 and time.perf_counter() - startup_started < 60
             ):
                 self.root.after(50, wait_for_startup)
@@ -1001,27 +1090,32 @@ class RealDataProfiler:
         def auto_refresh() -> None:
             self._begin("auto_refresh")
             self.dashboard.refresh(show_refreshing=False)
-            self._wait_for_refresh(diagnostics)
-
-        def diagnostics() -> None:
-            self._begin("diagnostics")
-            self.dashboard.show_page("tools")
-            self.dashboard.start_diagnostics()
-            started = time.perf_counter()
-
-            def wait() -> None:
-                if self.dashboard.diagnostics_worker.busy and time.perf_counter() - started < 30:
-                    self.root.after(50, wait)
-                    return
-                self.root.after(300, mini_widget)
-
-            wait()
+            self._wait_for_refresh(mini_widget)
 
         def mini_widget() -> None:
             self._begin("mini_widget")
             self.dashboard._enter_widget_mode()
-            self.root.after(600, self.dashboard.restore_dashboard)
-            self.root.after(1200, finish)
+            mini = self.dashboard.mini_widget
+            self.e4_checks["tray_started"] = self.dashboard.tray.started
+
+            def expanded() -> None:
+                mini.set_mode("expanded", persist=False)
+                self.root.update_idletasks()
+                self.e4_checks["mini_expanded_visible"] = bool(
+                    mini.expanded_frame.winfo_ismapped()
+                )
+                self.root.after(300, compact)
+
+            def compact() -> None:
+                mini.set_mode("compact", persist=False)
+                self.root.update_idletasks()
+                self.e4_checks["mini_compact_visible"] = bool(
+                    mini.compact_frame.winfo_ismapped()
+                )
+                self.root.after(300, self.dashboard.restore_dashboard)
+                self.root.after(900, finish)
+
+            self.root.after(300, expanded)
 
         def finish() -> None:
             self._begin("close")
@@ -1042,7 +1136,6 @@ class RealDataProfiler:
 
     def _write_result(self) -> None:
         worker = self.dashboard.refresh_worker
-        diagnostics_worker = self.dashboard.diagnostics_worker
         self.worker_errors.extend(
             type(error).__name__ for error in getattr(worker, "errors", ())
         )
@@ -1096,10 +1189,11 @@ class RealDataProfiler:
                 self.dashboard, "_heavy_page_destroy_count", 0,
             ),
             "refresh_worker_metrics": serialized_worker_metrics,
-            "diagnostics_worker_metrics": dict(diagnostics_worker.metrics),
             "close_latency_ms": round(getattr(self, "close_latency_ms", 0.0), 3),
             "callback_errors": self.callback_errors,
             "worker_errors": self.worker_errors,
+            "scale": self.scale,
+            "capture": str(self.capture) if self.capture is not None else None,
         }
         self.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         if not self.quiet:
@@ -1117,6 +1211,8 @@ def main() -> None:
     parser.add_argument("--assert-e4-f1", action="store_true")
     parser.add_argument("--language", choices=("zh-CN", "en"))
     parser.add_argument("--geometry", default="1280x800")
+    parser.add_argument("--scale", choices=(1.0, 1.25, 1.5), type=float, default=1.0)
+    parser.add_argument("--capture", type=Path)
     args = parser.parse_args()
     RealDataProfiler(
         args.run_id,
@@ -1127,6 +1223,8 @@ def main() -> None:
         exercise_e4=args.assert_e4 or args.assert_e4_f1,
         language=args.language,
         geometry=args.geometry,
+        scale=args.scale,
+        capture=args.capture,
     ).run()
 
 
