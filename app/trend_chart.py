@@ -10,6 +10,14 @@ from math import isfinite
 import re
 import tkinter as tk
 
+from .ui_theme import (
+    CHART_BACKGROUND,
+    CHART_FOREGROUND,
+    CHART_GRID,
+    CHART_SERIES,
+    COLORS,
+)
+
 
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/ -]{0,79}$")
 _SAFE_UNIT = re.compile(r"^[A-Za-z0-9%][A-Za-z0-9_.:/% -]{0,31}$")
@@ -57,7 +65,8 @@ class TrendTooltipLabels:
 
 
 def downsample_peak_valley(
-    points: Iterable[TrendPoint], max_points: int,
+    points: Iterable[TrendPoint],
+    max_points: int,
 ) -> tuple[TrendPoint, ...]:
     """Deterministically retain first/last and bucket extrema.
 
@@ -66,10 +75,11 @@ def downsample_peak_valley(
     """
 
     indexed = [
-        (index, point) for index, point in enumerate(points)
-        if point.value is not None
+        (index, point) for index, point in enumerate(points) if point.value is not None
     ]
-    indexed.sort(key=lambda item: (item[1].observed_at.astimezone(timezone.utc), item[0]))
+    indexed.sort(
+        key=lambda item: (item[1].observed_at.astimezone(timezone.utc), item[0])
+    )
     if max_points <= 0 or not indexed:
         return ()
     if len(indexed) <= max_points:
@@ -105,7 +115,8 @@ def downsample_peak_valley(
 
 
 def nearest_trend_point(
-    points: Iterable[TrendPoint], target_time: datetime,
+    points: Iterable[TrendPoint],
+    target_time: datetime,
 ) -> TrendPoint | None:
     """Select the temporally nearest valid point with stable tie-breaking."""
 
@@ -118,14 +129,17 @@ def nearest_trend_point(
     return min(
         enumerate(candidates),
         key=lambda item: (
-            abs((item[1].observed_at.astimezone(timezone.utc) - target).total_seconds()),
+            abs(
+                (item[1].observed_at.astimezone(timezone.utc) - target).total_seconds()
+            ),
             item[0],
         ),
     )[1]
 
 
 def _extreme_score(
-    ordered: list[tuple[int, TrendPoint]], candidate: tuple[int, TrendPoint],
+    ordered: list[tuple[int, TrendPoint]],
+    candidate: tuple[int, TrendPoint],
 ) -> float:
     position = ordered.index(candidate)
     if position <= 0 or position >= len(ordered) - 1:
@@ -145,9 +159,9 @@ class TrendCanvas(tk.Canvas):
         *,
         width: int = 760,
         height: int = 180,
-        background: str = "#F8FAFD",
-        foreground: str = "#152033",
-        grid_color: str = "#DDE4EE",
+        background: str = CHART_BACKGROUND,
+        foreground: str = CHART_FOREGROUND,
+        grid_color: str = CHART_GRID,
         series_colors: Mapping[str, str] | None = None,
         metric_labels: Mapping[str, str] | None = None,
         source_labels: Mapping[str, str] | None = None,
@@ -155,8 +169,12 @@ class TrendCanvas(tk.Canvas):
         value_formatter: Callable[[TrendPoint], str] | None = None,
     ) -> None:
         super().__init__(
-            master, width=width, height=height, bg=background,
-            highlightthickness=0, bd=0,
+            master,
+            width=width,
+            height=height,
+            bg=background,
+            highlightthickness=0,
+            bd=0,
         )
         self._foreground = foreground
         self._grid_color = grid_color
@@ -250,10 +268,15 @@ class TrendCanvas(tk.Canvas):
         width = max(1, self.winfo_width())
         height = max(1, self.winfo_height())
         signature = (
-            self._points, width, height, self._foreground, self._grid_color,
+            self._points,
+            width,
+            height,
+            self._foreground,
+            self._grid_color,
             tuple(sorted(self._series_colors.items())),
             tuple(sorted(self._metric_labels.items())),
-            tuple(sorted(self._source_labels.items())), self._tooltip_labels,
+            tuple(sorted(self._source_labels.items())),
+            self._tooltip_labels,
         )
         if signature == self._render_signature:
             return
@@ -274,22 +297,37 @@ class TrendCanvas(tk.Canvas):
         time_min, time_max = min(times), max(times)
         value_min, value_max = min(values), max(values)
         self.create_text(
-            left - 6, top, text=_format_axis(value_max), anchor="e",
-            fill=self._foreground, font=("Segoe UI", 8),
+            left - 6,
+            top,
+            text=_format_axis(value_max),
+            anchor="e",
+            fill=self._foreground,
+            font=("Segoe UI", 8),
         )
         self.create_text(
-            left - 6, bottom, text=_format_axis(value_min), anchor="e",
-            fill=self._foreground, font=("Segoe UI", 8),
+            left - 6,
+            bottom,
+            text=_format_axis(value_min),
+            anchor="e",
+            fill=self._foreground,
+            font=("Segoe UI", 8),
         )
         max_points = max(2, int((right - left) // 4))
         for series_index, (metric, series) in enumerate(sorted(grouped.items())):
             sampled = downsample_peak_valley(series, max_points)
-            color = self._series_colors.get(metric, _DEFAULT_COLORS[series_index % len(_DEFAULT_COLORS)])
+            color = self._series_colors.get(
+                metric, _DEFAULT_COLORS[series_index % len(_DEFAULT_COLORS)]
+            )
             coords: list[float] = []
             for point_index, point in enumerate(sampled):
                 x = _scale(
-                    point.observed_at.timestamp(), time_min, time_max,
-                    left, right, point_index, len(sampled),
+                    point.observed_at.timestamp(),
+                    time_min,
+                    time_max,
+                    left,
+                    right,
+                    point_index,
+                    len(sampled),
                 )
                 y = _scale(float(point.value), value_min, value_max, bottom, top)
                 coords.extend((x, y))
@@ -297,7 +335,7 @@ class TrendCanvas(tk.Canvas):
             if len(coords) >= 4:
                 self.create_line(*coords, fill=color, width=2, smooth=False)
             for index in range(0, len(coords), 2):
-                x, y = coords[index:index + 2]
+                x, y = coords[index : index + 2]
                 self.create_oval(x - 2, y - 2, x + 2, y + 2, fill=color, outline="")
 
     def _on_motion(self, event: tk.Event) -> None:
@@ -305,9 +343,9 @@ class TrendCanvas(tk.Canvas):
             return
         x, y, point = min(
             self._rendered_points,
-            key=lambda item: ((item[0] - event.x) ** 2 + (item[1] - event.y) ** 2),
+            key=lambda item: (item[0] - event.x) ** 2 + (item[1] - event.y) ** 2,
         )
-        if (x - event.x) ** 2 + (y - event.y) ** 2 > 18 ** 2:
+        if (x - event.x) ** 2 + (y - event.y) ** 2 > 18**2:
             self._hide_tooltip()
             return
         self._show_tooltip(event, point)
@@ -317,9 +355,9 @@ class TrendCanvas(tk.Canvas):
             return
         x, y, point = min(
             self._rendered_points,
-            key=lambda item: ((item[0] - event.x) ** 2 + (item[1] - event.y) ** 2),
+            key=lambda item: (item[0] - event.x) ** 2 + (item[1] - event.y) ** 2,
         )
-        if (x - event.x) ** 2 + (y - event.y) ** 2 <= 24 ** 2:
+        if (x - event.x) ** 2 + (y - event.y) ** 2 <= 24**2:
             self._show_tooltip(event, point)
 
     def _show_tooltip(self, event: tk.Event, point: TrendPoint) -> None:
@@ -327,9 +365,15 @@ class TrendCanvas(tk.Canvas):
             self._tooltip = tk.Toplevel(self)
             self._tooltip.overrideredirect(True)
             self._tooltip_label = tk.Label(
-                self._tooltip, justify="left", relief="solid", borderwidth=1,
-                background="#FFFFFF", foreground=self._foreground,
-                font=("Segoe UI", 9), padx=7, pady=5,
+                self._tooltip,
+                justify="left",
+                relief="solid",
+                borderwidth=1,
+                background=COLORS.raised_surface,
+                foreground=self._foreground,
+                font=("Segoe UI", 9),
+                padx=7,
+                pady=5,
             )
             self._tooltip_label.pack()
         assert self._tooltip_label is not None
@@ -339,20 +383,26 @@ class TrendCanvas(tk.Canvas):
         source = self._source_labels.get(point.source, point.source)
         freshness = labels.stale if point.stale else labels.fresh
         derived = labels.derived_yes if point.derived else labels.derived_no
-        self._tooltip_label.configure(text=(
-            f"{labels.time}: {local_time}\n"
-            f"{labels.metric}: {metric}\n"
-            f"{labels.value}: {self._value_formatter(point)}\n"
-            f"{labels.source}: {source}\n"
-            f"{labels.freshness}: {freshness}\n"
-            f"{labels.derived}: {derived}"
-        ))
+        self._tooltip_label.configure(
+            text=(
+                f"{labels.time}: {local_time}\n"
+                f"{labels.metric}: {metric}\n"
+                f"{labels.value}: {self._value_formatter(point)}\n"
+                f"{labels.source}: {source}\n"
+                f"{labels.freshness}: {freshness}\n"
+                f"{labels.derived}: {derived}"
+            )
+        )
         self._tooltip.deiconify()
         self._tooltip.update_idletasks()
         x = self.winfo_rootx() + event.x + 12
         y = self.winfo_rooty() + event.y + 12
-        x = max(0, min(x, self.winfo_screenwidth() - self._tooltip.winfo_reqwidth() - 4))
-        y = max(0, min(y, self.winfo_screenheight() - self._tooltip.winfo_reqheight() - 4))
+        x = max(
+            0, min(x, self.winfo_screenwidth() - self._tooltip.winfo_reqwidth() - 4)
+        )
+        y = max(
+            0, min(y, self.winfo_screenheight() - self._tooltip.winfo_reqheight() - 4)
+        )
         self._tooltip.geometry(f"+{x}+{y}")
 
     def _on_leave(self, _event: tk.Event) -> None:
@@ -386,7 +436,7 @@ class TrendCanvas(tk.Canvas):
         self._rendered_points.clear()
 
 
-_DEFAULT_COLORS = ("#3978F6", "#248A52", "#8B5CF6", "#D97706")
+_DEFAULT_COLORS = CHART_SERIES
 
 
 def _scale(
@@ -402,7 +452,9 @@ def _scale(
         if count > 1:
             return target_min + ((target_max - target_min) * index / (count - 1))
         return (target_min + target_max) / 2.0
-    return target_min + ((value - source_min) / (source_max - source_min) * (target_max - target_min))
+    return target_min + (
+        (value - source_min) / (source_max - source_min) * (target_max - target_min)
+    )
 
 
 def _format_full_value(point: TrendPoint) -> str:

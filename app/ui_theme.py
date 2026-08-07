@@ -19,53 +19,67 @@ CONTROL_RADIUS = 4
 
 @dataclass(frozen=True)
 class Colors:
-    window: str = "#F3F4F6"
-    surface: str = "#FFFFFF"
-    raised_surface: str = "#F8FAFC"
-    border: str = "#D1D5DB"
-    border_strong: str = "#94A3B8"
-    scrollbar_thumb: str = "#91A4BE"
-    scrollbar_thumb_hover: str = "#6F849F"
-    primary_text: str = "#111827"
-    on_accent: str = "#FFFFFF"
-    secondary_text: str = "#4B5563"
-    muted_text: str = "#6B7280"
-    accent: str = "#2563EB"
-    accent_hover: str = "#1D4ED8"
-    accent_soft: str = "#EFF6FF"
-    selection_background: str = "#D8E6FF"
-    selection_background_inactive: str = "#E4ECF8"
-    selection_foreground: str = "#102A56"
-    real: str = "#15803D"
-    real_soft: str = "#E8F6ED"
-    estimate: str = "#BC4800"
-    estimate_soft: str = "#FFF4DC"
-    stale: str = "#9A6417"
-    stale_soft: str = "#FFF1D8"
-    error: str = "#BA1A1A"
-    error_soft: str = "#FDECEB"
-    unknown: str = "#728096"
-    unknown_soft: str = "#EEF1F5"
-    purple: str = "#7C3AED"
-    purple_soft: str = "#F1EBFF"
-    teal: str = "#258E92"
-    teal_soft: str = "#E4F6F5"
-    orange: str = "#C87917"
-    orange_soft: str = "#FFF0D6"
-    telemetry: str = "#17263A"
-    telemetry_footer: str = "#132237"
-    telemetry_hover: str = "#263B56"
-    telemetry_border: str = "#314B69"
-    telemetry_action_hover: str = "#36516F"
-    telemetry_exit_hover: str = "#4A2630"
-    telemetry_muted: str = "#9FB0C5"
-    telemetry_secondary: str = "#B9C7D9"
-    telemetry_text: str = "#F7FAFC"
+    # Surfaces: darkest window, card surface, inner raised panel.
+    window: str = "#0C1018"
+    surface: str = "#121826"
+    raised_surface: str = "#1A2334"
+    border: str = "#263147"
+    border_strong: str = "#3B4A66"
+    scrollbar_thumb: str = "#33415E"
+    scrollbar_thumb_hover: str = "#455678"
+    # Text hierarchy.
+    primary_text: str = "#E6ECF5"
+    on_accent: str = "#0C1018"
+    secondary_text: str = "#A0AEC4"
+    muted_text: str = "#7F8CA3"
+    # Primary brand accent (electric blue).
+    accent: str = "#4D8DFF"
+    accent_hover: str = "#3A76E8"
+    accent_soft: str = "#16263F"
+    selection_background: str = "#22406E"
+    selection_background_inactive: str = "#1E2A42"
+    selection_foreground: str = "#DCE9FF"
+    # Semantic status colors, brightened for dark backgrounds.
+    real: str = "#3DDC84"
+    real_soft: str = "#10281C"
+    estimate: str = "#F5A623"
+    estimate_soft: str = "#2C2310"
+    stale: str = "#E8B04B"
+    stale_soft: str = "#2C2314"
+    error: str = "#F87171"
+    error_soft: str = "#331419"
+    unknown: str = "#8E9BAF"
+    unknown_soft: str = "#1B2333"
+    purple: str = "#A78BFA"
+    purple_soft: str = "#241C3D"
+    teal: str = "#2DD4BF"
+    teal_soft: str = "#0F2928"
+    orange: str = "#FB923C"
+    orange_soft: str = "#2B1D10"
+    # Telemetry sidebar (darker than the main window).
+    telemetry: str = "#0A0F1A"
+    telemetry_footer: str = "#080C15"
+    telemetry_hover: str = "#182638"
+    telemetry_border: str = "#22334C"
+    telemetry_action_hover: str = "#20324E"
+    telemetry_exit_hover: str = "#3A1F2C"
+    telemetry_muted: str = "#7C90AD"
+    telemetry_secondary: str = "#A6B8D0"
+    telemetry_text: str = "#F0F5FB"
+    # Compact desktop widget (kept high-contrast on dark).
     widget_purple: str = "#A884FF"
     widget_success: str = "#72D68B"
     widget_warning: str = "#F0B45C"
     widget_error: str = "#FF8178"
 
+
+# Chart-specific tokens (shared by TrendCanvas / Sparkline / CircularProgress).
+CHART_BACKGROUND = "#121826"
+CHART_FOREGROUND = "#8E9BAF"
+CHART_GRID = "#263147"
+CHART_TRACK = "#263147"
+CHART_RING_TEXT = "#DCE4F0"
+CHART_SERIES = ("#4D8DFF", "#3DDC84", "#A78BFA", "#FB923C")
 
 COLORS = Colors()
 FONT_FAMILY = "Segoe UI"
@@ -106,17 +120,17 @@ METRIC_ICONS = {
 }
 
 METRIC_ACCENTS = {
-    "Input": ("#4F8FEF", "#E8F1FF"),
-    "Output": ("#3B9B55", "#E9F7EC"),
+    "Input": ("#60A5FA", "#122441"),
+    "Output": ("#3DDC84", "#10281C"),
     "Current Total": (COLORS.purple, COLORS.purple_soft),
     "Cached": (COLORS.orange, COLORS.orange_soft),
-    "Reasoning": ("#627ED0", "#ECF0FF"),
+    "Reasoning": ("#8B9DF6", "#1B2140"),
     "Cache Hit": (COLORS.teal, COLORS.teal_soft),
 }
 
 
 def configure_view(root: ctk.CTk) -> None:
-    ctk.set_appearance_mode("light")
+    ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
     root.configure(fg_color=COLORS.window)
     configure_treeview(root)
@@ -139,8 +153,14 @@ def configure_treeview(root: ctk.CTk) -> ttk.Style:
     )
     style.map(
         "Monitor.Treeview",
-        background=[("selected !focus", COLORS.selection_background_inactive), ("selected", COLORS.selection_background)],
-        foreground=[("selected !focus", COLORS.selection_foreground), ("selected", COLORS.selection_foreground)],
+        background=[
+            ("selected !focus", COLORS.selection_background_inactive),
+            ("selected", COLORS.selection_background),
+        ],
+        foreground=[
+            ("selected !focus", COLORS.selection_foreground),
+            ("selected", COLORS.selection_foreground),
+        ],
     )
     style.configure(
         "Monitor.Treeview.Heading",
@@ -151,5 +171,7 @@ def configure_treeview(root: ctk.CTk) -> ttk.Style:
         font=(FONT_FAMILY, 11, "bold"),
         padding=(SPACE_2, SPACE_2),
     )
-    style.map("Monitor.Treeview.Heading", background=[("active", COLORS.raised_surface)])
+    style.map(
+        "Monitor.Treeview.Heading", background=[("active", COLORS.raised_surface)]
+    )
     return style
